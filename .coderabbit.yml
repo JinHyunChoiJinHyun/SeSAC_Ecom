@@ -1,0 +1,10 @@
+
+# CodeRabbit 리뷰 언어
+language: ko-KR
+
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - develop
