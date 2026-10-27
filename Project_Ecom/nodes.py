@@ -95,7 +95,8 @@ def get_analysis_dataframe(
     Prep Agent가 처리한 DataFrame이 있으면
     processed_dataframe을 우선 사용합니다.
 
-    없으면 원본 dataframe을 사용합니다.
+    없으면 Data Agent가 조회한
+    원본 dataframe을 사용합니다.
     """
 
     processed_df = state.get(
@@ -212,12 +213,99 @@ def enforce_requested_prep_actions(
             )
 
 
-    # 중복 action 제거
+    # 중복 Action 제거
     return list(
         dict.fromkeys(
             result
         )
     )
+
+
+# =========================================================
+# 최종 응답에 검증용 SQL 추가
+# =========================================================
+
+def append_verification_sql(
+    final_answer: str,
+    state: AgentState,
+) -> str:
+    """
+    Data Agent가 생성한 SQL이 존재하면
+    최종 응답 마지막에 검증용 SQL을 추가합니다.
+
+    Data → Final뿐 아니라
+
+    Data → Prep → Final
+    Data → Visualization → Final
+    Data → Model → Final
+    Data → Experiment → Final
+
+    과 같은 흐름에서도 동일하게 적용됩니다.
+
+    이후 Delivery Agent가 final_answer를
+    Slack이나 Email로 전달하면
+    SQL도 함께 전달할 수 있습니다.
+    """
+
+    sql_query = (
+        state.get(
+            "sql_query"
+        )
+    )
+
+
+    # Data Agent가 사용되지 않은 요청이면
+    # SQL을 추가하지 않습니다.
+    if not sql_query:
+
+        return final_answer
+
+
+    sql_query = (
+        str(
+            sql_query
+        )
+        .strip()
+    )
+
+
+    if not sql_query:
+
+        return final_answer
+
+
+    data_purpose = (
+        state.get(
+            "data_purpose"
+        )
+    )
+
+
+    final_answer += (
+        "\n\n"
+        "==============================\n"
+        "[기반 데이터 검증 정보]\n"
+        "==============================\n"
+    )
+
+
+    if data_purpose:
+
+        final_answer += (
+            "\n조회 목적:\n"
+            f"{data_purpose}\n"
+        )
+
+
+    final_answer += (
+        "\n사용된 SQL:\n"
+        "```sql\n"
+        f"{sql_query}\n"
+        "```"
+    )
+
+
+    return final_answer
 
 
 # =========================================================
@@ -415,8 +503,6 @@ def data_node(
                 ]
             },
 
-            # 시각화 요청처럼 Data Agent가
-            # 조금 더 판단해야 하는 경우를 고려
             config={
                 "recursion_limit": 30
             },
@@ -456,6 +542,7 @@ def data_node(
         print(
             "[생성된 SQL]"
         )
+
 
         print(
             sql_query
@@ -877,10 +964,12 @@ dtype:
         "[Prep Plan]"
     )
 
+
     print(
         f"actions = "
         f"{actions}"
     )
+
 
     print(
         f"reason = "
@@ -1273,10 +1362,12 @@ dtype:
         "[Prep 완료]"
     )
 
+
     print(
         f"shape = "
         f"{processed_df.shape}"
     )
+
 
     print(
         f"completed_steps = "
@@ -1349,8 +1440,6 @@ def visualization_node(
         )
 
 
-    # Prep 결과가 있으면 processed_dataframe을
-    # 우선 사용합니다.
     df = get_analysis_dataframe(
         state
     )
@@ -1420,11 +1509,6 @@ def visualization_node(
     # =====================================================
     # 고유값 수
     # =====================================================
-    #
-    # 지나치게 큰 DataFrame에서 모든 컬럼 nunique를
-    # 계산하는 비용을 제한하기 위해
-    # 200,000행을 초과하면 앞부분 표본으로 확인합니다.
-    # =====================================================
 
     unique_check_limit = (
         200_000
@@ -1471,7 +1555,6 @@ def visualization_node(
     }
 
 
-    # LLM에는 전체 데이터가 아닌 샘플만 전달
     sample_text = (
         df
         .head(
@@ -1622,7 +1705,7 @@ datetime 컬럼:
 
 
     # =====================================================
-    # title 안전장치
+    # Title 안전장치
     # =====================================================
 
     chart_title = (
@@ -1643,7 +1726,7 @@ datetime 컬럼:
 
 
     # =====================================================
-    # reason 안전장치
+    # Reason 안전장치
     # =====================================================
 
     plan_reason = (
@@ -1925,7 +2008,7 @@ datetime 컬럼:
 
 
     # =====================================================
-    # Tool 자체가 실패 결과를 반환한 경우
+    # Tool 자체 실패
     # =====================================================
 
     if not chart_result.get(
@@ -2176,7 +2259,7 @@ def final_response_node(
             )
 
 
-            # 히스토그램 log scale 적용 여부
+            # 히스토그램 Log Scale 적용 여부
             if (
                 visualization_result.get(
                     "chart_type"
@@ -2501,6 +2584,35 @@ def final_response_node(
                 f"{reason}"
             )
 
+
+    # =====================================================
+    # 기반 데이터 검증용 SQL 추가
+    # =====================================================
+    #
+    # Data Agent를 사용했다면
+    # 성공/실패 여부와 관계없이
+    # 생성된 SQL을 최종 응답에 포함합니다.
+    #
+    # 이후 Slack Delivery Agent가
+    # final_answer를 그대로 전달하면
+    # 사용자에게 SQL까지 함께 전달됩니다.
+    # =====================================================
+
+    final_answer = (
+        append_verification_sql(
+
+            final_answer=
+                final_answer,
+
+            state=
+                state,
+        )
+    )
+
+
+    # =====================================================
+    # 최종 메시지 생성
+    # =====================================================
 
     message = AIMessage(
 
