@@ -17,6 +17,13 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+
+# Slack Bot처럼 백그라운드 스레드에서 그래프를 생성할 수 있도록
+# GUI를 사용하지 않는 Agg backend를 설정합니다.
+# 반드시 matplotlib.pyplot을 import하기 전에 설정해야 합니다.
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd

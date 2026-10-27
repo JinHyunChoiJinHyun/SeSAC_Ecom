@@ -15,8 +15,14 @@ env/tools/visualization_tools.py가 담당합니다.
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
-from langchain.agents import create_agent
+from pydantic import (
+    BaseModel,
+    Field,
+)
+
+from langchain.agents import (
+    create_agent,
+)
 
 from env.gpt_client import (
     get_openai_chat_client
@@ -50,6 +56,7 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     x_column: str | None = Field(
         default=None,
         description=(
@@ -57,6 +64,7 @@ class VisualizationPlan(BaseModel):
             "x축 컬럼"
         )
     )
+
 
     y_column: str | None = Field(
         default=None,
@@ -66,6 +74,7 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     value_column: str | None = Field(
         default=None,
         description=(
@@ -73,6 +82,7 @@ class VisualizationPlan(BaseModel):
             "사용할 숫자형 컬럼"
         )
     )
+
 
     category_column: str | None = Field(
         default=None,
@@ -82,6 +92,7 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     heatmap_columns: list[str] = Field(
         default_factory=list,
         description=(
@@ -89,6 +100,7 @@ class VisualizationPlan(BaseModel):
             "숫자형 Feature 목록"
         )
     )
+
 
     # LLM이 제목을 누락해도
     # StructuredOutputValidationError가 발생하지 않도록 기본값 사용
@@ -101,15 +113,18 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     x_label: str | None = Field(
         default=None,
         description="x축 표시 이름"
     )
 
+
     y_label: str | None = Field(
         default=None,
         description="y축 표시 이름"
     )
+
 
     top_n: int = Field(
         default=20,
@@ -121,6 +136,7 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     bins: int = Field(
         default=30,
         ge=5,
@@ -130,6 +146,7 @@ class VisualizationPlan(BaseModel):
         )
     )
 
+
     sort_descending: bool = Field(
         default=True,
         description=(
@@ -137,6 +154,7 @@ class VisualizationPlan(BaseModel):
             "내림차순 정렬 여부"
         )
     )
+
 
     # reason도 누락 가능성을 고려해 기본값 설정
     reason: str = Field(
@@ -525,12 +543,63 @@ vs
 purchase_count
 
 
+다음과 같이
+두 개의 숫자형 Feature만을 대상으로
+
+"관계"
+
+를 확인하는 요청이라면
+scatter를 고려하십시오.
+
+
+예:
+
+"검색 횟수와 구매 횟수의 관계를 보여줘"
+
+
+→ scatter
+
+
+단,
+
+3개 이상의 숫자형 Feature 사이의
+전체 상관관계를 요청한 경우에는
+
+scatter가 아니라
+heatmap을 선택하십시오.
+
+
 ========================================
 [heatmap]
 ========================================
 
 여러 숫자형 Feature 사이의
 상관관계를 확인합니다.
+
+
+다음 표현이 있다면
+heatmap을 우선 고려하십시오.
+
+- 상관관계
+- 상관 관계
+- 상관계수
+- 상관 계수
+- correlation
+- correlation matrix
+- heatmap
+- 히트맵
+
+
+특히 사용자가
+
+3개 이상의 숫자형 Feature 사이의
+상관관계를 요청했다면
+
+scatter가 아니라
+
+heatmap
+
+을 선택하십시오.
 
 
 예:
@@ -541,7 +610,45 @@ search_count
 
 cart_add_count
 
+cart_remove_count
+
 purchase_count
+
+
+사용자 요청:
+
+"고객별 방문, 검색,
+장바구니 추가,
+장바구니 삭제,
+구매 횟수 간의
+상관관계를 보여줘"
+
+
+이 경우
+
+chart_type = heatmap
+
+
+heatmap_columns = [
+
+    "visit_count",
+
+    "search_count",
+
+    "cart_add_count",
+
+    "cart_remove_count",
+
+    "purchase_count"
+
+]
+
+
+로 선택하십시오.
+
+
+client_id는
+상관계수 계산 대상이 아닙니다.
 
 
 ========================================
@@ -565,6 +672,16 @@ purchase_count
 scatter의 연속형 숫자축
 
 heatmap 상관계수 Feature
+
+
+특히 heatmap_columns를 선택할 때
+
+다음 컬럼은 반드시 제외하십시오.
+
+- client_id
+- sku
+- category
+- url
 
 
 하지만 다음 용도는 가능합니다.
@@ -721,6 +838,32 @@ client_id 고유값 수 = 909,210
 → heatmap
 
 
+특히
+
+"상관관계"
+
+"상관 관계"
+
+"상관계수"
+
+"상관 계수"
+
+"correlation"
+
+"correlation matrix"
+
+라는 표현이 있고
+
+
+비교 대상 숫자형 Feature가
+3개 이상이라면
+
+→ heatmap
+
+
+을 우선 선택하십시오.
+
+
 ========================================
 [예시 1]
 ========================================
@@ -835,7 +978,7 @@ title = 검색 횟수와 구매 횟수의 관계
 사용자:
 
 "고객 행동 지표의
-상관관계를 시각화해줘"
+상관관계를 보여줘"
 
 
 DataFrame:
@@ -844,6 +987,7 @@ client_id
 visit_count
 search_count
 cart_add_count
+cart_remove_count
 purchase_count
 
 
@@ -851,17 +995,72 @@ purchase_count
 
 chart_type = heatmap
 
+
 heatmap_columns = [
+
     "visit_count",
+
     "search_count",
+
     "cart_add_count",
+
+    "cart_remove_count",
+
     "purchase_count"
+
 ]
+
 
 title = 고객 행동 지표 상관관계
 
 
 client_id는 제외합니다.
+
+
+========================================
+[예시 6]
+========================================
+
+사용자:
+
+"고객별 방문, 검색,
+장바구니 추가,
+장바구니 삭제,
+구매 횟수 간의
+상관관계를 보여줘"
+
+
+DataFrame:
+
+client_id
+visit_count
+search_count
+cart_add_count
+cart_remove_count
+purchase_count
+
+
+선택:
+
+chart_type = heatmap
+
+
+heatmap_columns = [
+
+    "visit_count",
+
+    "search_count",
+
+    "cart_add_count",
+
+    "cart_remove_count",
+
+    "purchase_count"
+
+]
+
+
+title = 고객 행동 지표 상관관계
 
 
 ========================================
@@ -874,6 +1073,31 @@ client_id는 제외합니다.
 
 사용자의 목적을 가장 잘 표현하는
 차트 하나를 선택하십시오.
+
+
+상관관계 요청에서는
+
+두 숫자형 Feature만 비교한다면
+
+scatter를 고려할 수 있습니다.
+
+
+하지만
+
+3개 이상의 숫자형 Feature 사이의
+상관관계를 요청하면
+
+heatmap을 우선 선택하십시오.
+
+
+client_id,
+sku,
+category,
+url
+
+같은 식별자 또는 범주 ID는
+
+heatmap_columns에 포함하지 마십시오.
 
 
 필요한 계획을 만들었다면

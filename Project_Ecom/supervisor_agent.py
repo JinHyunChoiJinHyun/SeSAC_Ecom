@@ -79,6 +79,10 @@ def detect_requested_agents(
     )
 
 
+    # =====================================================
+    # Prep Agent 키워드
+    # =====================================================
+
     prep_keywords = [
         "전처리",
         "데이터 정제",
@@ -106,6 +110,10 @@ def detect_requested_agents(
     ]
 
 
+    # =====================================================
+    # Model Agent 키워드
+    # =====================================================
+
     model_keywords = [
         "예측",
         "모델",
@@ -119,6 +127,10 @@ def detect_requested_agents(
         "prediction",
     ]
 
+
+    # =====================================================
+    # Experiment Agent 키워드
+    # =====================================================
 
     experiment_keywords = [
         "통계 검정",
@@ -135,29 +147,62 @@ def detect_requested_agents(
     ]
 
 
+    # =====================================================
+    # Visualization Agent 키워드
+    # =====================================================
+    #
+    # 중요:
+    #
+    # 사용자가
+    #
+    # "상관관계를 보여줘"
+    #
+    # 라고 요청할 때
+    # 반드시 Visualization Agent로 갈 수 있도록
+    # 상관관계 관련 표현도 포함합니다.
+    # =====================================================
+
     visualization_keywords = [
         "시각화",
         "그래프",
         "차트",
         "plot",
+
         "막대그래프",
         "막대 그래프",
         "바 차트",
         "bar chart",
+
         "선그래프",
         "선 그래프",
         "line chart",
+
         "히스토그램",
         "histogram",
+
         "산점도",
         "scatter",
+
         "박스플롯",
         "boxplot",
         "상자그림",
+
         "히트맵",
         "heatmap",
+
         "분포를 보여",
         "추이를 보여",
+
+        # ---------------------------------------------
+        # 상관관계 요청도 시각화 요청으로 처리
+        # ---------------------------------------------
+        "상관관계",
+        "상관 관계",
+        "상관계수",
+        "상관 계수",
+        "correlation",
+        "correlation matrix",
+        "corr",
     ]
 
 
@@ -166,25 +211,29 @@ def detect_requested_agents(
         "prep_agent":
             any(
                 keyword in query
-                for keyword in prep_keywords
+                for keyword
+                in prep_keywords
             ),
 
         "model_agent":
             any(
                 keyword in query
-                for keyword in model_keywords
+                for keyword
+                in model_keywords
             ),
 
         "experiment_agent":
             any(
                 keyword in query
-                for keyword in experiment_keywords
+                for keyword
+                in experiment_keywords
             ),
 
         "visualization_agent":
             any(
                 keyword in query
-                for keyword in visualization_keywords
+                for keyword
+                in visualization_keywords
             ),
     }
 
@@ -222,7 +271,9 @@ def route_request(
 
 
     if (
-        "data" in completed_steps
+        "data"
+        in completed_steps
+
         and has_dataframe
     ):
 
@@ -232,7 +283,9 @@ def route_request(
 
 
     if (
-        "prep" in completed_steps
+        "prep"
+        in completed_steps
+
         and has_processed_dataframe
     ):
 
@@ -242,7 +295,9 @@ def route_request(
 
 
     if (
-        "model" in completed_steps
+        "model"
+        in completed_steps
+
         and has_model_result
     ):
 
@@ -252,7 +307,9 @@ def route_request(
 
 
     if (
-        "experiment" in completed_steps
+        "experiment"
+        in completed_steps
+
         and has_experiment_result
     ):
 
@@ -262,7 +319,9 @@ def route_request(
 
 
     if (
-        "visualization" in completed_steps
+        "visualization"
+        in completed_steps
+
         and has_visualization_result
     ):
 
@@ -335,6 +394,27 @@ visualization_agent
 - 시각화
 - 분포 시각화
 - 시간 추이 시각화
+- 상관관계
+- 상관계수
+- correlation
+- heatmap
+
+
+특히 사용자가
+
+"상관관계를 보여줘"
+
+"상관계수를 보여줘"
+
+처럼 명시적으로
+그래프나 시각화라는 단어를 쓰지 않더라도
+
+여러 숫자형 지표 사이의
+상관관계를 요청했다면
+
+Visualization Agent 작업으로
+판단하십시오.
+
 
 Visualization Agent는 이미 준비된
 DataFrame 또는 processed_dataframe을
@@ -349,7 +429,8 @@ model_agent
 experiment_agent
 
 통계 검정, 가설 검정,
-p-value, 신뢰구간, A/B Test 등을 담당합니다.
+p-value, 신뢰구간,
+A/B Test 등을 담당합니다.
 
 
 final_response
@@ -397,6 +478,28 @@ visualization 작업이 아직 완료되지 않았다면
 visualization_agent를 선택하십시오.
 
 
+여기서 시각화 요청에는 다음도 포함됩니다.
+
+- 상관관계
+- 상관 관계
+- 상관계수
+- correlation
+- correlation matrix
+- heatmap
+
+
+따라서
+
+"방문, 검색, 장바구니 추가,
+장바구니 삭제, 구매 횟수 간의
+상관관계를 보여줘"
+
+와 같은 요청은
+
+Data 완료 후
+Visualization Agent를 실행해야 합니다.
+
+
 5.
 
 사용자가
@@ -409,6 +512,7 @@ visualization_agent를 선택하십시오.
 현재 데이터 상태에서 실행 가능한
 다음 Agent를 선택하십시오.
 
+
 예:
 
 Data 완료
@@ -416,7 +520,8 @@ Data 완료
 → Visualization 필요
 
 라면 Prep을 먼저 실행한 뒤
-다음 Supervisor에서 Visualization을 선택할 수 있습니다.
+다음 Supervisor에서
+Visualization을 선택할 수 있습니다.
 
 
 6.
@@ -424,7 +529,8 @@ Data 완료
 Data → Prep → Model → Visualization 순서를
 기계적으로 실행하지 마십시오.
 
-사용자의 실제 요청에 필요한 Agent만 선택하십시오.
+사용자의 실제 요청에 필요한 Agent만
+선택하십시오.
 
 
 ========================================
@@ -438,30 +544,90 @@ blocked_agents에 포함된 Agent는
 
 
 ========================================
-[예시]
+[예시 1]
 ========================================
+
+사용자:
 
 "구매 횟수가 많은 고객 10명을 가져와줘"
 
-Data → Final
 
+실행:
+
+Data
+→ Final
+
+
+========================================
+[예시 2]
+========================================
+
+사용자:
 
 "구매 횟수가 많은 고객 10명을 가져와서
 결측치와 중복을 확인해줘"
 
-Data → Prep → Final
 
+실행:
+
+Data
+→ Prep
+→ Final
+
+
+========================================
+[예시 3]
+========================================
+
+사용자:
 
 "구매 횟수가 많은 고객 10명을
 막대그래프로 보여줘"
 
-Data → Visualization → Final
 
+실행:
+
+Data
+→ Visualization
+→ Final
+
+
+========================================
+[예시 4]
+========================================
+
+사용자:
 
 "데이터를 전처리한 뒤
 막대그래프로 보여줘"
 
-Data → Prep → Visualization → Final
+
+실행:
+
+Data
+→ Prep
+→ Visualization
+→ Final
+
+
+========================================
+[예시 5]
+========================================
+
+사용자:
+
+"고객별 방문, 검색,
+장바구니 추가,
+장바구니 삭제,
+구매 횟수 간의
+상관관계를 보여줘"
+
+
+실행:
+
+Data
+→ Visualization
+→ Final
 
 
 ========================================
@@ -566,6 +732,7 @@ visualization_result 존재:
 
         if (
             not has_dataframe
+
             and decision.next_agent
             in {
                 "prep_agent",
@@ -593,9 +760,11 @@ visualization_result 존재:
 
         if (
             has_dataframe
+
             and requested_agents[
                 "prep_agent"
             ]
+
             and "prep"
             not in completed_steps
         ):
@@ -613,14 +782,17 @@ visualization_result 존재:
 
 
         # =================================================
-        # Prep 요청이 없거나 완료된 뒤 Visualization 보장
+        # Prep 요청이 없거나 완료된 뒤
+        # Visualization 요청 보장
         # =================================================
 
         elif (
             has_dataframe
+
             and requested_agents[
                 "visualization_agent"
             ]
+
             and "visualization"
             not in completed_steps
         ):
@@ -631,7 +803,7 @@ visualization_result 존재:
                     "visualization_agent",
 
                 reason=(
-                    "사용자가 시각화를 요청했고 "
+                    "사용자가 시각화 또는 상관관계 분석을 요청했고 "
                     "시각화할 DataFrame이 준비되어 있습니다."
                 )
             )
@@ -642,15 +814,19 @@ visualization_result 존재:
         # =================================================
 
         no_special_agent_requested = (
+
             not requested_agents[
                 "prep_agent"
             ]
+
             and not requested_agents[
                 "model_agent"
             ]
+
             and not requested_agents[
                 "experiment_agent"
             ]
+
             and not requested_agents[
                 "visualization_agent"
             ]
@@ -659,7 +835,10 @@ visualization_result 존재:
 
         if (
             has_dataframe
-            and "data" in completed_steps
+
+            and "data"
+            in completed_steps
+
             and no_special_agent_requested
         ):
 
@@ -683,14 +862,17 @@ visualization_result 존재:
         if (
             decision.next_agent
             == "prep_agent"
+
             and not requested_agents[
                 "prep_agent"
             ]
         ):
 
             decision = RouteDecision(
+
                 next_agent=
                     "final_response",
+
                 reason=(
                     "사용자가 전처리를 요청하지 않았으므로 "
                     "Prep Agent를 실행하지 않습니다."
@@ -701,14 +883,17 @@ visualization_result 존재:
         elif (
             decision.next_agent
             == "model_agent"
+
             and not requested_agents[
                 "model_agent"
             ]
         ):
 
             decision = RouteDecision(
+
                 next_agent=
                     "final_response",
+
                 reason=(
                     "사용자가 모델링을 요청하지 않았으므로 "
                     "Model Agent를 실행하지 않습니다."
@@ -719,14 +904,17 @@ visualization_result 존재:
         elif (
             decision.next_agent
             == "experiment_agent"
+
             and not requested_agents[
                 "experiment_agent"
             ]
         ):
 
             decision = RouteDecision(
+
                 next_agent=
                     "final_response",
+
                 reason=(
                     "사용자가 통계 검정을 요청하지 않았으므로 "
                     "Experiment Agent를 실행하지 않습니다."
@@ -737,16 +925,20 @@ visualization_result 존재:
         elif (
             decision.next_agent
             == "visualization_agent"
+
             and not requested_agents[
                 "visualization_agent"
             ]
         ):
 
             decision = RouteDecision(
+
                 next_agent=
                     "final_response",
+
                 reason=(
-                    "사용자가 시각화를 요청하지 않았으므로 "
+                    "사용자가 시각화 또는 상관관계 분석을 "
+                    "요청하지 않았으므로 "
                     "Visualization Agent를 실행하지 않습니다."
                 )
             )
