@@ -1,11 +1,15 @@
+import sys
 import logging
 import time
 from pathlib import Path
-
-from env.db_client import get_duckdb_connection
 from config import(
     BASE_DIR
 )
+
+# 모듈 경로에 현재 루트 추가
+sys.path.insert(0, str(BASE_DIR))
+
+from database.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +17,9 @@ SQL_DIR = BASE_DIR / "database" / "sql"
 
 # SQL 실행 순서 (단계명, SQL 파일명)
 SQL_EXECUTION_STEPS = [
-    ("라벨 테이블 생성", "label.sql"),
-    ("특징 테이블 생성", "features.sql"),
+    ("장바구니 이벤트 및 예측 기준 시점 테이블 생성", "build_prediction_points.sql"),
+    ("라벨 테이블 생성", "build_label.sql"),
+    ("특징 테이블 생성", "build_features.sql"),
     ("학습용 테이블 생성", "build_mart.sql"),
 ]
 
@@ -22,12 +27,21 @@ SQL_EXECUTION_STEPS = [
 VALIDATION_QUERY = """
     SELECT
         COUNT(*) AS total_rows,
-        COUNT(DISTINCT cart_event_id) AS unique_events,
+        COUNT(DISTINCT (cart_event_id, hours_after_cart)) AS unique_events,
         COUNT(*) FILTER (WHERE label = 1) AS purchase_count,
         COUNT(*) FILTER (WHERE label = 0) AS non_purchase_count,
         COUNT(*) FILTER (WHERE label IS NULL) AS null_label_count
-    FROM mart.cart_features
+    FROM mart.purchase_training_data
 """
+
+# 원본 테이블 목록
+RAW_TABLES = [
+    "add_to_cart",
+    "product_buy",
+    "remove_from_cart",
+    "page_visit",
+    "search_query",
+]
 
 def execute_sql_file(conn, file_path:Path) -> None:
     """SQL 파일을 읽어 실행"""
@@ -54,7 +68,7 @@ def validate_mart(conn) -> dict:
     # 2) 중복 검증
     duplicate_count = mart_summary["total_rows"] - mart_summary["unique_events"]
     if duplicate_count > 0:
-        errors.append(f"cart_event_id 중복 {duplicate_count}건 발생)")
+        errors.append(f"(cart_event_id, hours_after_cart) 중복 {duplicate_count}건 발생)")
 
     # 3) label 유효성 검증 (0/1/NULL 이외의 값)
     invalid_label_count = (
@@ -72,8 +86,21 @@ def validate_mart(conn) -> dict:
 
     return mart_summary
 
-def build_dataset():
-    """라벨, 득징, 학습용 테이블 생성"""
+def build_clean_tables(conn) -> None:
+    """원본 테이블의 timestamp를 문자열에서 TIMESTAMP 타입으로 변환"""
+    conn.execute("CREATE SCHEMA IF NOT EXISTS clean")
+
+    for table in RAW_TABLES:
+        conn.execute(f"""
+            CREATE OR REPLACE TABLE clean.{table} AS
+            SELECT * REPLACE (TRY_CAST("timestamp" AS TIMESTAMP) AS "timestamp") 
+            FROM raw.{table}
+            WHERE TRY_CAST("timestamp" AS TIMESTAMP) IS NOT NULL
+        """)
+        logger.info("%s 생성 완료", table)
+
+def build_dataset() -> dict:
+    """장바구니 이벤트, 라벨, 득징, 학습용 테이블 생성"""
 
     # 파일 존재 여부 확인
     paths = [SQL_DIR / filename for _, filename in SQL_EXECUTION_STEPS] # 경로 생성
@@ -83,10 +110,12 @@ def build_dataset():
         raise FileNotFoundError(f"SQL 파일이 없습니다: {missing_file}")
 
     # DB 연결
-    conn = get_duckdb_connection(read_only=True)
+    conn = get_duckdb_connection(read_only=False)
 
     try:
         conn.begin()
+
+        build_clean_tables(conn)
 
         for step_name, file_name in SQL_EXECUTION_STEPS:
             path = SQL_DIR / file_name
@@ -112,7 +141,7 @@ def build_dataset():
         "MART 생성 완료: 전체 %d행, 구매 %d, 비구매 %d, 라벨 없음 %d",
         mart_summary["total_rows"],
         mart_summary["purchase_count"],
-        mart_summary["nont_purchase_count"],
+        mart_summary["non_purchase_count"],
         mart_summary["null_label_count"],
     )
 

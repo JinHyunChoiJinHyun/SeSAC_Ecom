@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # 기준 경로
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 학습 데이터 설정
 LABEL_COLUMN = "label"
