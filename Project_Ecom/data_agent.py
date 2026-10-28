@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from langchain.agents import create_agent
 
@@ -23,6 +25,64 @@ class DataQueryPlan(BaseModel):
         description=(
             "이 SQL이 어떤 형태의 데이터를 "
             "가져오기 위한 것인지에 대한 짧은 설명"
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # 데이터 범위 / 샘플링 정책
+    # -----------------------------------------------------
+
+    result_type: Literal[
+        "full_result",
+        "visual_sample",
+        "correlation_matrix",
+    ] = Field(
+        default="full_result",
+        description=(
+            "full_result=전체 데이터 기준 조회/집계, "
+            "visual_sample=전체 원천 데이터로 분석 단위를 계산한 뒤 "
+            "시각화용 행만 표본 추출, "
+            "correlation_matrix=DuckDB에서 전체 데이터 기준으로 "
+            "계산한 상관계수 행렬"
+        )
+    )
+
+    uses_full_population: bool = Field(
+        default=True,
+        description=(
+            "SQL 결과 자체가 전체 모집단을 그대로 나타내면 True. "
+            "시각화용 행 표본이면 False"
+        )
+    )
+
+    is_sampled: bool = Field(
+        default=False,
+        description=(
+            "SQL 결과가 시각화를 위해 행 표본 추출된 결과인지 여부"
+        )
+    )
+
+    sample_size: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "시각화용 최대 표본 행 수. 샘플링하지 않았다면 0"
+        )
+    )
+
+    sampling_reason: str = Field(
+        default="",
+        description=(
+            "샘플링을 사용한 이유. 샘플링하지 않았다면 빈 문자열"
+        )
+    )
+
+    scope_note: str = Field(
+        default="",
+        description=(
+            "전체 데이터 사용 또는 시각화용 샘플 사용 여부를 "
+            "사용자에게 설명하기 위한 짧은 메모"
         )
     )
 
@@ -696,20 +756,283 @@ LEFT JOIN purchases p
     ON c.client_id = p.client_id;
 
 
-이렇게 만든 DataFrame을
-Visualization Agent가 사용합니다.
+이렇게 만든 고객 단위 DataFrame은
+두 개 Feature의 관계를 산점도로 표현하거나
+결과 행 수가 충분히 작은 경우에 사용할 수 있습니다.
+
+단, 3개 이상의 숫자형 Feature에 대한
+전체 상관관계 / correlation heatmap 요청에서는
+수백만~수천만 고객 행을 pandas로 전달하여
+pandas.corr()를 실행하게 하지 마십시오.
+
+그 경우에는 아래의
+[대용량 데이터 처리 정책 - 우선 적용]
+규칙에 따라 DuckDB의 corr()로 전체 데이터 기준
+상관계수를 먼저 계산하고 작은 상관행렬만 반환하십시오.
 
 
-Visualization Agent는
+========================================
+[대용량 데이터 처리 정책 - 우선 적용]
+========================================
 
-client_id를 제외하고
+이 규칙은 일반 시각화 예시보다 우선합니다.
 
-- visit_count
-- search_count
-- cart_add_count
-- purchase_count
+핵심 원칙:
 
-의 상관관계를 계산할 수 있습니다.
+"전체 데이터를 분석한다"와
+"전체 행을 pandas로 가져온다"는
+같은 의미가 아닙니다.
+
+정확한 계산은 DuckDB에서 전체 데이터를 사용하고,
+후속 Agent에는 필요한 작은 결과만 전달하십시오.
+
+
+----------------------------------------
+1. 정확한 집계 / 통계
+----------------------------------------
+
+다음 요청은 전체 데이터를 기준으로 계산하십시오.
+
+- COUNT
+- SUM
+- AVG
+- 비율
+- KPI
+- 순위
+- Top-N
+- 일별 / 월별 / 연도별 집계
+- 상관계수
+
+원본 데이터를 먼저 샘플링한 뒤
+집계하지 마십시오.
+
+잘못된 방식:
+
+raw 이벤트
+→ 먼저 100,000행 샘플
+→ 고객별 구매 횟수 계산
+
+이 방식은 고객별 실제 행동 횟수를
+왜곡할 수 있습니다.
+
+
+올바른 방식:
+
+raw 이벤트 전체
+→ DuckDB에서 고객별 지표 정확히 계산
+→ 필요할 때 최종 고객 단위 행만 시각화용 샘플링
+
+
+----------------------------------------
+2. 행 단위 시각화 표본
+----------------------------------------
+
+scatter, histogram, boxplot처럼
+많은 개체의 행 자체를 그래프에 표현해야 하고
+최종 분석 단위의 행 수가 매우 클 가능성이 있다면
+
+전체 원천 데이터에서 분석 단위를 먼저 정확히 만든 뒤,
+최종 결과 행에 대해서만
+최대 100,000행의 시각화용 표본을 사용하십시오.
+
+이 경우:
+
+result_type = "visual_sample"
+uses_full_population = False
+is_sampled = True
+sample_size = 100000
+
+으로 설정하십시오.
+
+SQL에서 직접 표본을 적용할 수 있다면
+최종 집계 결과를 서브쿼리로 만든 뒤
+그 결과에만 샘플링을 적용하십시오.
+
+예:
+
+SELECT *
+FROM (
+    SELECT
+        client_id,
+        COUNT(*) AS purchase_count
+    FROM raw.product_buy
+    GROUP BY client_id
+) AS customer_metrics
+USING SAMPLE reservoir(100000 ROWS);
+
+중요:
+
+raw.product_buy 자체를 먼저 샘플링하면 안 됩니다.
+
+
+----------------------------------------
+3. 두 숫자 Feature의 관계 / scatter
+----------------------------------------
+
+예:
+
+"고객별 검색 횟수와 구매 횟수의 관계를 알려줘"
+
+먼저 전체 이벤트에서
+
+- 고객별 search_count
+- 고객별 purchase_count
+
+를 정확히 계산하고 결합하십시오.
+
+고객 단위 결과가 매우 클 수 있으므로
+최종 customer_metrics에만
+최대 100,000행 시각화 표본을 적용할 수 있습니다.
+
+이 경우:
+
+result_type = "visual_sample"
+uses_full_population = False
+is_sampled = True
+sample_size = 100000
+
+
+----------------------------------------
+4. 단일 대규모 분포 / histogram
+----------------------------------------
+
+예:
+
+"고객별 구매 횟수 분포를 보여줘"
+
+먼저 전체 구매 이벤트에서
+고객별 purchase_count를 정확히 계산하십시오.
+
+고객 단위 행을 전부 pandas로 전달할 필요는 없으므로
+최종 고객 단위 결과에만
+최대 100,000행 시각화 표본을 적용할 수 있습니다.
+
+이 경우에도 raw 이벤트를 먼저 샘플링하지 마십시오.
+
+
+----------------------------------------
+5. 3개 이상 Feature 상관관계 / heatmap
+----------------------------------------
+
+3개 이상의 숫자형 Feature에 대한
+전체 관계 또는 상관관계 요청에서는
+
+수백만 행의 고객별 데이터를
+pandas로 전달하여 pandas.corr()를 실행하지 마십시오.
+
+반드시:
+
+1. 각 raw 이벤트 테이블을 전체 기준으로 고객별 집계
+2. 고객별 Feature를 결합
+3. DuckDB의 corr()로 전체 고객 기준 상관계수 계산
+4. 작은 상관계수 행렬만 반환
+
+순서로 처리하십시오.
+
+이 경우:
+
+result_type = "correlation_matrix"
+uses_full_population = True
+is_sampled = False
+sample_size = 0
+
+
+반환 DataFrame 형태는 다음처럼
+첫 번째 컬럼을 feature로 하는
+wide correlation matrix를 권장합니다.
+
+예:
+
+feature        visit_count  search_count  purchase_count
+visit_count          1.00          0.31            0.22
+search_count         0.31          1.00            0.40
+purchase_count       0.22          0.40            1.00
+
+
+예시 SQL 구조:
+
+WITH customer_metrics AS (
+    SELECT
+        ...
+),
+
+corr_values AS (
+    SELECT
+        corr(visit_count, search_count) AS visit_search,
+        corr(visit_count, purchase_count) AS visit_purchase,
+        corr(search_count, purchase_count) AS search_purchase
+    FROM customer_metrics
+)
+
+SELECT
+    'visit_count' AS feature,
+    1.0 AS visit_count,
+    visit_search AS search_count,
+    visit_purchase AS purchase_count
+FROM corr_values
+
+UNION ALL
+
+SELECT
+    'search_count' AS feature,
+    visit_search AS visit_count,
+    1.0 AS search_count,
+    search_purchase AS purchase_count
+FROM corr_values
+
+UNION ALL
+
+SELECT
+    'purchase_count' AS feature,
+    visit_purchase AS visit_count,
+    search_purchase AS search_count,
+    1.0 AS purchase_count
+FROM corr_values;
+
+
+요청 Feature가 더 많다면
+동일한 방식으로 확장하십시오.
+
+client_id, sku, category, url 같은
+식별자 또는 범주 ID는
+상관계수 계산 대상에서 제외하십시오.
+
+
+----------------------------------------
+6. full_result
+----------------------------------------
+
+다음과 같이 결과 자체가 충분히 작거나
+정확한 전체 결과를 그대로 전달해야 하는 경우에는
+
+result_type = "full_result"
+uses_full_population = True
+is_sampled = False
+sample_size = 0
+
+으로 설정하십시오.
+
+예:
+
+- 월별 구매 건수
+- Top 10 고객
+- category별 집계
+- 이미 소수 행으로 축약된 KPI
+
+
+----------------------------------------
+7. 메타데이터와 실제 SQL 일치
+----------------------------------------
+
+DataQueryPlan의 메타데이터는
+실제 SQL과 반드시 일치해야 합니다.
+
+visual_sample이라고 반환하면서
+SQL에는 아무 샘플링도 하지 않는 상태를
+만들지 마십시오.
+
+correlation_matrix라고 반환하면서
+고객별 수백만 행을 그대로 반환하지 마십시오.
 
 
 ========================================
@@ -805,6 +1128,16 @@ Visualization Agent가
 purchase_count를 이용하여
 
 히스토그램을 생성합니다.
+
+고객 단위 결과가 매우 클 수 있으므로
+시각화용 표본을 사용하는 경우에는
+
+result_type = "visual_sample"
+uses_full_population = False
+is_sampled = True
+sample_size = 100000
+
+으로 설정하십시오.
 
 
 ========================================
@@ -911,6 +1244,20 @@ LEFT JOIN searches s
 
 LEFT JOIN purchases p
     ON c.client_id = p.client_id;
+
+
+고객 단위 결과가 매우 클 수 있으므로
+행 단위 산점도 표현을 위해 표본이 필요하면
+위 전체 집계 결과를 먼저 만든 뒤
+최종 customer_metrics에만
+최대 100,000행 샘플링을 적용하십시오.
+
+이 경우:
+
+result_type = "visual_sample"
+uses_full_population = False
+is_sampled = True
+sample_size = 100000
 
 
 ========================================
@@ -1126,6 +1473,17 @@ purpose에는
 DataFrame의 목적을
 
 짧고 정확하게 설명하십시오.
+
+
+DataQueryPlan의 데이터 범위 메타데이터는
+실제 SQL과 반드시 일치해야 합니다.
+
+- 전체 기준 조회/집계: full_result
+- 최종 분석 단위의 시각화용 행 표본: visual_sample
+- DuckDB에서 전체 기준 계산한 상관행렬: correlation_matrix
+
+샘플링했는데 is_sampled=False로 표시하거나,
+시각화용 표본인데 uses_full_population=True로 표시하지 마십시오.
 """
     )
 
