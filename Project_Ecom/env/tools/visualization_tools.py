@@ -73,6 +73,55 @@ SEMANTIC_ID_COLUMNS = {
 
 
 # =========================================================
+# 대용량 행 단위 시각화 안전 기준
+# =========================================================
+
+MAX_VISUALIZATION_SAMPLE_ROWS = 100_000
+VISUALIZATION_SAMPLE_RANDOM_STATE = 42
+
+
+def sample_rows_for_visualization(
+    data,
+    max_rows: int = MAX_VISUALIZATION_SAMPLE_ROWS,
+):
+    """
+    행 하나하나를 직접 그리는 차트가 너무 커지는 것을 방지합니다.
+
+    이 함수는 정확한 통계 계산을 대신하기 위한 샘플링이 아닙니다.
+    Data Agent가 DuckDB에서 전체 데이터 기준 집계/통계를 수행한 뒤에도
+    결과 행 수가 매우 많을 때 시각화 표현만 가볍게 하기 위한
+    마지막 안전장치입니다.
+
+    DataFrame과 Series 모두 지원합니다.
+    """
+
+    source_rows = len(data)
+
+    if source_rows <= max_rows:
+
+        return (
+            data,
+            False,
+            source_rows,
+        )
+
+
+    sampled = (
+        data.sample(
+            n=max_rows,
+            random_state=VISUALIZATION_SAMPLE_RANDOM_STATE,
+        )
+    )
+
+
+    return (
+        sampled,
+        True,
+        source_rows,
+    )
+
+
+# =========================================================
 # 한글 폰트 설정
 # =========================================================
 
@@ -895,6 +944,10 @@ def create_histogram(
 
     데이터가 심한 long-tail 형태라면
     y축을 자동으로 log scale로 변경할 수 있습니다.
+
+    대용량 결과에서는 정확한 분포 특성 판단은
+    전체 유효 데이터로 수행하고,
+    실제 matplotlib 표현만 최대 100,000행을 사용합니다.
     """
 
     chart_type = (
@@ -1001,33 +1054,14 @@ def create_histogram(
         )
 
 
-    configure_korean_font()
+    # -----------------------------------------------------
+    # 전체 유효 데이터 기준 분포 특성 계산
+    # -----------------------------------------------------
 
-
-    fig, ax = (
-        plt.subplots(
-            figsize=(
-                10,
-                6,
-            )
-        )
+    source_rows = len(
+        values
     )
 
-
-    ax.hist(
-        values,
-        bins=int(
-            bins
-        ),
-        color="mediumpurple",
-        edgecolor="black",
-        linewidth=0.8,
-    )
-
-
-    # -----------------------------------------------------
-    # Long-tail 자동 감지
-    # -----------------------------------------------------
 
     log_scale_applied = (
         False
@@ -1036,9 +1070,7 @@ def create_histogram(
 
     if (
         auto_log_scale
-        and len(
-            values
-        ) >= 20
+        and source_rows >= 20
     ):
 
         skewness = (
@@ -1081,14 +1113,51 @@ def create_histogram(
             and max_median_ratio > 20
         ):
 
-            ax.set_yscale(
-                "log"
-            )
-
-
             log_scale_applied = (
                 True
             )
+
+
+    # -----------------------------------------------------
+    # 실제 차트 표현용 행 샘플링
+    # -----------------------------------------------------
+
+    plot_values, sampled, _ = (
+        sample_rows_for_visualization(
+            values
+        )
+    )
+
+
+    configure_korean_font()
+
+
+    fig, ax = (
+        plt.subplots(
+            figsize=(
+                10,
+                6,
+            )
+        )
+    )
+
+
+    ax.hist(
+        plot_values,
+        bins=int(
+            bins
+        ),
+        color="mediumpurple",
+        edgecolor="black",
+        linewidth=0.8,
+    )
+
+
+    if log_scale_applied:
+
+        ax.set_yscale(
+            "log"
+        )
 
 
     ax.set_title(
@@ -1149,6 +1218,16 @@ def create_histogram(
     )
 
 
+    sampling_note = ""
+
+    if sampled:
+
+        sampling_note = (
+            f"시각화 표현을 위해 유효한 {source_rows:,}행 중 "
+            f"{len(plot_values):,}행을 무작위 표본으로 사용했습니다."
+        )
+
+
     return make_result(
 
         True,
@@ -1166,8 +1245,25 @@ def create_histogram(
 
         rows_used=
             len(
-                values
+                plot_values
             ),
+
+        source_rows=
+            source_rows,
+
+        sampled=
+            sampled,
+
+        sample_size=(
+            len(
+                plot_values
+            )
+            if sampled
+            else 0
+        ),
+
+        sampling_note=
+            sampling_note,
 
         bins=
             int(
@@ -1178,10 +1274,6 @@ def create_histogram(
             log_scale_applied,
     )
 
-
-# =========================================================
-# 4. 박스플롯
-# =========================================================
 
 def create_boxplot(
     df: pd.DataFrame,
@@ -1197,6 +1289,10 @@ def create_boxplot(
 
     category_column을 지정하면
     범주별 분포를 비교합니다.
+
+    대용량 데이터에서는 전체 유효 데이터에서
+    먼저 Top category를 결정한 뒤,
+    실제 차트 표현 단계에서만 최대 100,000행을 샘플링합니다.
     """
 
     chart_type = (
@@ -1297,6 +1393,15 @@ def create_boxplot(
     )
 
 
+    sampled = (
+        False
+    )
+
+    source_rows = (
+        0
+    )
+
+
     # -----------------------------------------------------
     # 범주별 Boxplot
     # -----------------------------------------------------
@@ -1310,11 +1415,37 @@ def create_boxplot(
                     value_column,
                 ]
             ]
+            .replace(
+                [
+                    np.inf,
+                    -np.inf,
+                ],
+                np.nan,
+            )
             .dropna()
             .copy()
         )
 
 
+        if plot_df.empty:
+
+            plt.close(
+                fig
+            )
+
+
+            return make_result(
+                False,
+                chart_type,
+                title,
+                error=(
+                    "박스플롯을 만들 수 있는 "
+                    "유효한 범주 데이터가 없습니다."
+                ),
+            )
+
+
+        # 전체 유효 데이터 기준으로 Top category 선정
         top_categories = (
             plot_df[
                 category_column
@@ -1338,6 +1469,18 @@ def create_boxplot(
                     top_categories
                 )
             ]
+        )
+
+
+        source_rows = len(
+            plot_df
+        )
+
+
+        plot_df, sampled, _ = (
+            sample_rows_for_visualization(
+                plot_df
+            )
         )
 
 
@@ -1461,6 +1604,18 @@ def create_boxplot(
             )
 
 
+        source_rows = len(
+            values
+        )
+
+
+        values, sampled, _ = (
+            sample_rows_for_visualization(
+                values
+            )
+        )
+
+
         ax.boxplot(
             values,
             patch_artist=True,
@@ -1524,6 +1679,16 @@ def create_boxplot(
     )
 
 
+    sampling_note = ""
+
+    if sampled:
+
+        sampling_note = (
+            f"시각화 표현을 위해 유효한 {source_rows:,}행 중 "
+            f"{rows_used:,}행을 무작위 표본으로 사용했습니다."
+        )
+
+
     return make_result(
 
         True,
@@ -1544,12 +1709,23 @@ def create_boxplot(
 
         rows_used=
             rows_used,
+
+        source_rows=
+            source_rows,
+
+        sampled=
+            sampled,
+
+        sample_size=(
+            rows_used
+            if sampled
+            else 0
+        ),
+
+        sampling_note=
+            sampling_note,
     )
 
-
-# =========================================================
-# 5. 산점도
-# =========================================================
 
 def create_scatterplot(
     df: pd.DataFrame,
@@ -1561,6 +1737,9 @@ def create_scatterplot(
 ):
     """
     두 숫자형 Feature의 관계를 확인합니다.
+
+    대용량 결과는 시각화 표현 단계에서만
+    최대 100,000행을 사용합니다.
     """
 
     chart_type = (
@@ -1689,6 +1868,18 @@ def create_scatterplot(
         )
 
 
+    source_rows = len(
+        plot_df
+    )
+
+
+    plot_df, sampled, _ = (
+        sample_rows_for_visualization(
+            plot_df
+        )
+    )
+
+
     configure_korean_font()
 
 
@@ -1762,6 +1953,16 @@ def create_scatterplot(
     )
 
 
+    sampling_note = ""
+
+    if sampled:
+
+        sampling_note = (
+            f"시각화 표현을 위해 유효한 {source_rows:,}행 중 "
+            f"{len(plot_df):,}행을 무작위 표본으로 사용했습니다."
+        )
+
+
     return make_result(
 
         True,
@@ -1784,23 +1985,51 @@ def create_scatterplot(
             len(
                 plot_df
             ),
+
+        source_rows=
+            source_rows,
+
+        sampled=
+            sampled,
+
+        sample_size=(
+            len(
+                plot_df
+            )
+            if sampled
+            else 0
+        ),
+
+        sampling_note=
+            sampling_note,
     )
 
-
-# =========================================================
-# 6. 상관계수 히트맵
-# =========================================================
 
 def create_correlation_heatmap(
     df: pd.DataFrame,
     title: str,
     columns: list[str] | None = None,
+    precomputed: bool = False,
+    row_label_column: str = "feature",
 ):
     """
     여러 숫자형 Feature 간
     Pearson 상관계수 행렬을 시각화합니다.
 
-    의미상 식별자는 자동 제외합니다.
+    precomputed=False
+    -----------------
+    작은 DataFrame에 대해 기존 방식대로
+    pandas.corr()를 계산합니다.
+
+    precomputed=True
+    ----------------
+    DuckDB에서 전체 데이터 기준으로 이미 계산한
+    상관계수 행렬을 그대로 시각화합니다.
+
+    대용량 상관관계 요청에서는
+    pandas로 수백만 행을 가져와 corr()하지 않고,
+    Data Agent가 DuckDB corr()로 계산한 작은 행렬을
+    전달하는 방식을 사용합니다.
     """
 
     chart_type = (
@@ -1825,111 +2054,315 @@ def create_correlation_heatmap(
         )
 
 
-    # -----------------------------------------------------
-    # 사용할 컬럼 선택
-    # -----------------------------------------------------
+    # =====================================================
+    # DuckDB에서 미리 계산한 상관행렬
+    # =====================================================
 
-    if columns:
+    if precomputed:
 
-        valid, error = (
-            validate_columns(
-                df,
-                columns,
-            )
-        )
-
-
-        if not valid:
+        if row_label_column not in df.columns:
 
             return make_result(
                 False,
                 chart_type,
                 title,
-                error=error,
+                error=(
+                    "사전 계산된 상관계수 행렬에는 "
+                    f"행 이름 컬럼 '{row_label_column}'이 필요합니다."
+                ),
             )
 
 
-        candidate_columns = (
-            columns
+        if columns:
+
+            valid, error = (
+                validate_columns(
+                    df,
+                    columns,
+                )
+            )
+
+
+            if not valid:
+
+                return make_result(
+                    False,
+                    chart_type,
+                    title,
+                    error=error,
+                )
+
+
+            matrix_columns = list(
+                columns
+            )
+
+        else:
+
+            matrix_columns = [
+
+                column
+
+                for column
+                in df.columns
+
+                if (
+                    column
+                    != row_label_column
+
+                    and
+
+                    pd.api.types.is_numeric_dtype(
+                        df[
+                            column
+                        ]
+                    )
+
+                    and
+
+                    not is_semantic_identifier(
+                        column
+                    )
+                )
+            ]
+
+
+        if len(
+            matrix_columns
+        ) < 2:
+
+            return make_result(
+                False,
+                chart_type,
+                title,
+                error=(
+                    "상관계수 히트맵에는 "
+                    "최소 2개 Feature가 필요합니다."
+                ),
+            )
+
+
+        corr = (
+            df
+            .set_index(
+                row_label_column
+            )[
+                matrix_columns
+            ]
+            .apply(
+                pd.to_numeric,
+                errors="coerce",
+            )
         )
 
+
+        # SQL 결과의 행 이름을 문자열로 통일
+        corr.index = [
+            str(
+                index
+            )
+            for index
+            in corr.index
+        ]
+
+
+        missing_rows = [
+
+            column
+
+            for column
+            in matrix_columns
+
+            if column
+            not in corr.index
+        ]
+
+
+        if missing_rows:
+
+            return make_result(
+                False,
+                chart_type,
+                title,
+                error=(
+                    "사전 계산 상관행렬의 행/열 Feature가 "
+                    "일치하지 않습니다. "
+                    f"누락 행: {missing_rows}"
+                ),
+            )
+
+
+        # 행과 열 순서를 동일하게 맞춰 정사각 행렬 생성
+        corr = (
+            corr.reindex(
+                index=
+                    matrix_columns,
+                columns=
+                    matrix_columns,
+            )
+        )
+
+
+        row_labels = (
+            matrix_columns
+        )
+
+        column_labels = (
+            matrix_columns
+        )
+
+        calculation_scope = (
+            "precomputed_full_population"
+        )
+
+
+    # =====================================================
+    # 기존 pandas correlation 계산
+    # =====================================================
 
     else:
 
-        candidate_columns = (
-            list(
-                df
-                .select_dtypes(
-                    include=[
-                        np.number
+        # 수십만~수백만 행을 pandas.corr()에 직접 전달하지 않도록 차단
+        if len(
+            df
+        ) > 500_000:
+
+            return make_result(
+                False,
+                chart_type,
+                title,
+                error=(
+                    "대용량 DataFrame의 상관계수를 pandas에서 "
+                    "직접 계산하지 않습니다. "
+                    "Data Agent가 DuckDB의 corr()로 전체 데이터 기준 "
+                    "상관계수를 먼저 계산한 뒤 correlation_matrix를 "
+                    "전달해야 합니다."
+                ),
+            )
+
+
+        # -------------------------------------------------
+        # 사용할 컬럼 선택
+        # -------------------------------------------------
+
+        if columns:
+
+            valid, error = (
+                validate_columns(
+                    df,
+                    columns,
+                )
+            )
+
+
+            if not valid:
+
+                return make_result(
+                    False,
+                    chart_type,
+                    title,
+                    error=error,
+                )
+
+
+            candidate_columns = (
+                columns
+            )
+
+
+        else:
+
+            candidate_columns = (
+                list(
+                    df
+                    .select_dtypes(
+                        include=[
+                            np.number
+                        ]
+                    )
+                    .columns
+                )
+            )
+
+
+        # -------------------------------------------------
+        # 실제 숫자형 Feature만 사용
+        # -------------------------------------------------
+
+        numeric_columns = [
+
+            column
+
+            for column
+            in candidate_columns
+
+            if (
+                column
+                in df.columns
+
+                and
+
+                pd.api.types.is_numeric_dtype(
+                    df[
+                        column
                     ]
                 )
-                .columns
-            )
-        )
 
+                and
 
-    # -----------------------------------------------------
-    # 실제 숫자형 Feature만 사용
-    # -----------------------------------------------------
-
-    numeric_columns = [
-
-        column
-
-        for column
-        in candidate_columns
-
-        if (
-            column
-            in df.columns
-
-            and
-
-            pd.api.types.is_numeric_dtype(
-                df[
+                not is_semantic_identifier(
                     column
-                ]
+                )
             )
-
-            and
-
-            not is_semantic_identifier(
-                column
-            )
-        )
-    ]
-
-
-    if len(
-        numeric_columns
-    ) < 2:
-
-        return make_result(
-            False,
-            chart_type,
-            title,
-            error=(
-                "상관계수 히트맵에는 "
-                "식별자가 아닌 숫자형 Feature가 "
-                "최소 2개 필요합니다."
-            ),
-        )
-
-
-    corr = (
-        df[
-            numeric_columns
         ]
-        .replace(
-            [
-                np.inf,
-                -np.inf,
-            ],
-            np.nan,
+
+
+        if len(
+            numeric_columns
+        ) < 2:
+
+            return make_result(
+                False,
+                chart_type,
+                title,
+                error=(
+                    "상관계수 히트맵에는 "
+                    "식별자가 아닌 숫자형 Feature가 "
+                    "최소 2개 필요합니다."
+                ),
+            )
+
+
+        corr = (
+            df[
+                numeric_columns
+            ]
+            .replace(
+                [
+                    np.inf,
+                    -np.inf,
+                ],
+                np.nan,
+            )
+            .corr()
         )
-        .corr()
-    )
+
+
+        matrix_columns = (
+            numeric_columns
+        )
+
+        row_labels = (
+            numeric_columns
+        )
+
+        column_labels = (
+            numeric_columns
+        )
+
+        calculation_scope = (
+            "pandas_full_dataframe"
+        )
 
 
     configure_korean_font()
@@ -1964,7 +2397,7 @@ def create_correlation_heatmap(
     ax.set_xticks(
         range(
             len(
-                numeric_columns
+                column_labels
             )
         )
     )
@@ -1973,21 +2406,21 @@ def create_correlation_heatmap(
     ax.set_yticks(
         range(
             len(
-                numeric_columns
+                row_labels
             )
         )
     )
 
 
     ax.set_xticklabels(
-        numeric_columns,
+        column_labels,
         rotation=45,
         ha="right",
     )
 
 
     ax.set_yticklabels(
-        numeric_columns
+        row_labels
     )
 
 
@@ -1997,13 +2430,13 @@ def create_correlation_heatmap(
 
     for row_index in range(
         len(
-            numeric_columns
+            row_labels
         )
     ):
 
         for column_index in range(
             len(
-                numeric_columns
+                column_labels
             )
         ):
 
@@ -2081,10 +2514,25 @@ def create_correlation_heatmap(
         ),
 
         columns=
-            numeric_columns,
+            matrix_columns,
 
         rows_used=
             len(
                 df
             ),
+
+        sampled=
+            False,
+
+        sample_size=
+            0,
+
+        sampling_note=
+            "",
+
+        precomputed=
+            precomputed,
+
+        calculation_scope=
+            calculation_scope,
     )

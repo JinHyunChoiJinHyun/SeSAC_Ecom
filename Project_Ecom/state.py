@@ -58,6 +58,35 @@ class AgentState(MessagesState):
     data_error: str
 
 
+    # -----------------------------------------------------
+    # 데이터 범위 / 샘플링 정책 메타데이터
+    # -----------------------------------------------------
+
+    # full_result:
+    #   전체 데이터 기준의 조회/집계 결과
+    # visual_sample:
+    #   시각화 목적의 행 단위 표본
+    # correlation_matrix:
+    #   DuckDB에서 전체 데이터 기준으로 계산한 상관계수 행렬
+    data_result_type: str
+
+    # SQL 결과가 전체 모집단을 그대로 나타내는지 여부
+    # visual_sample이면 False, correlation_matrix/full_result면 보통 True
+    data_uses_full_population: bool
+
+    # SQL 단계에서 시각화용 샘플을 사용했는지 여부
+    data_is_sampled: bool
+
+    # 요청한 최대 샘플 행 수. 샘플링하지 않았으면 0
+    data_sample_size: int
+
+    # 샘플링 사유
+    data_sampling_reason: str
+
+    # 사용자에게 설명할 데이터 범위 메모
+    data_scope_note: str
+
+
     # =====================================================
     # Prep Agent
     # =====================================================

@@ -2,36 +2,50 @@ import pandas as pd
 
 from typing import Literal
 
-from langgraph.graph import END
-from langgraph.types import Command
+from langgraph.graph import (
+    END,
+)
+
+from langgraph.types import (
+    Command,
+)
 
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
 )
 
-from state import AgentState
+
+from state import (
+    AgentState,
+)
+
 
 from supervisor_agent import (
     route_request,
 )
 
+
 from data_agent import (
     data_agent,
 )
+
 
 from prep_agent import (
     prep_agent,
 )
 
+
 from visualization_agent import (
     visualization_agent,
 )
+
 
 from env.tools.data_tools import (
     validate_select_sql,
     execute_sql_to_dataframe,
 )
+
 
 from env.tools.prep_tools import (
     check_dataframe_info,
@@ -44,6 +58,7 @@ from env.tools.prep_tools import (
     replace_infinite_with_nan,
     handle_feature_missing_values,
 )
+
 
 from env.tools.visualization_tools import (
     create_bar_chart,
@@ -61,12 +76,8 @@ from env.tools.visualization_tools import (
 
 def add_completed_step(
     state: AgentState,
-    step: str,
+    step: str
 ):
-    """
-    completed_steps에 동일한 작업이
-    중복 추가되지 않도록 합니다.
-    """
 
     completed_steps = list(
         state.get(
@@ -75,40 +86,42 @@ def add_completed_step(
         )
     )
 
+
     if step not in completed_steps:
 
         completed_steps.append(
             step
         )
 
+
     return completed_steps
 
 
 # =========================================================
-# 분석용 DataFrame 선택
+# 분석용 DataFrame 가져오기
 # =========================================================
 
 def get_analysis_dataframe(
-    state: AgentState,
+    state: AgentState
 ):
-    """
-    Prep Agent가 처리한 DataFrame이 있으면
-    processed_dataframe을 우선 사용합니다.
 
-    없으면 Data Agent가 조회한
-    원본 dataframe을 사용합니다.
+    """
+    processed_dataframe이 존재하면 우선 사용하고,
+    없으면 원본 dataframe을 사용합니다.
     """
 
     processed_df = state.get(
         "processed_dataframe"
     )
 
+
     if isinstance(
         processed_df,
-        pd.DataFrame,
+        pd.DataFrame
     ):
 
         return processed_df
+
 
     return state.get(
         "dataframe"
@@ -116,30 +129,23 @@ def get_analysis_dataframe(
 
 
 # =========================================================
-# 사용자 요청 Prep 작업 보장
+# 사용자가 명시적으로 요청한 Prep 작업 보장
 # =========================================================
 
 def enforce_requested_prep_actions(
     question: str,
-    actions: list[str],
+    actions: list[str]
 ):
-    """
-    LLM이 사용자가 명시적으로 요청한
-    품질 검사를 빠뜨리는 것을 방지합니다.
-    """
 
     result = list(
         actions
     )
 
+
     question_lower = (
         question.lower()
     )
 
-
-    # -----------------------------------------------------
-    # 결측치
-    # -----------------------------------------------------
 
     missing_keywords = [
         "결측",
@@ -148,6 +154,7 @@ def enforce_requested_prep_actions(
         "null",
         "nan",
     ]
+
 
     if any(
         keyword in question_lower
@@ -164,14 +171,11 @@ def enforce_requested_prep_actions(
             )
 
 
-    # -----------------------------------------------------
-    # 중복
-    # -----------------------------------------------------
-
     duplicate_keywords = [
         "중복",
         "duplicate",
     ]
+
 
     if any(
         keyword in question_lower
@@ -188,15 +192,12 @@ def enforce_requested_prep_actions(
             )
 
 
-    # -----------------------------------------------------
-    # 무한대
-    # -----------------------------------------------------
-
     infinite_keywords = [
         "무한대",
         "infinite",
         "inf 확인",
     ]
+
 
     if any(
         keyword in question_lower
@@ -213,7 +214,6 @@ def enforce_requested_prep_actions(
             )
 
 
-    # 중복 Action 제거
     return list(
         dict.fromkeys(
             result
@@ -232,54 +232,19 @@ def append_verification_sql(
     """
     Data Agent가 생성한 SQL이 존재하면
     최종 응답 마지막에 검증용 SQL을 추가합니다.
-
-    Data → Final뿐 아니라
-
-    Data → Prep → Final
-    Data → Visualization → Final
-    Data → Model → Final
-    Data → Experiment → Final
-
-    과 같은 흐름에서도 동일하게 적용됩니다.
-
-    이후 Delivery Agent가 final_answer를
-    Slack이나 Email로 전달하면
-    SQL도 함께 전달할 수 있습니다.
     """
 
-    sql_query = (
-        state.get(
-            "sql_query"
-        )
-    )
-
-
-    # Data Agent가 사용되지 않은 요청이면
-    # SQL을 추가하지 않습니다.
-    if not sql_query:
-
-        return final_answer
-
-
-    sql_query = (
-        str(
-            sql_query
-        )
-        .strip()
-    )
-
+    sql_query = state.get("sql_query")
 
     if not sql_query:
-
         return final_answer
 
+    sql_query = str(sql_query).strip()
 
-    data_purpose = (
-        state.get(
-            "data_purpose"
-        )
-    )
+    if not sql_query:
+        return final_answer
 
+    data_purpose = state.get("data_purpose")
 
     final_answer += (
         "\n\n"
@@ -288,14 +253,11 @@ def append_verification_sql(
         "==============================\n"
     )
 
-
     if data_purpose:
-
         final_answer += (
             "\n조회 목적:\n"
             f"{data_purpose}\n"
         )
-
 
     final_answer += (
         "\n사용된 SQL:\n"
@@ -304,8 +266,317 @@ def append_verification_sql(
         "```"
     )
 
-
     return final_answer
+
+
+# =========================================================
+# 대용량 시각화용 SQL 보정
+# =========================================================
+
+MAX_VISUAL_SAMPLE_ROWS = 100_000
+
+
+def ensure_visual_sample_sql(
+    sql_query: str,
+    sample_size: int = MAX_VISUAL_SAMPLE_ROWS,
+) -> str:
+    """
+    Data Agent가 visual_sample을 선택했지만
+    SQL에 실제 샘플링을 넣지 않은 경우를 대비한 안전장치입니다.
+
+    중요한 점:
+    원본 raw 이벤트를 먼저 샘플링하지 않고,
+    Data Agent가 만든 전체 집계/결합 SQL을 서브쿼리로 실행한 뒤
+    그 최종 행 결과에만 DuckDB reservoir sampling을 적용합니다.
+    """
+
+    clean_sql = (
+        str(sql_query)
+        .strip()
+        .rstrip(";")
+    )
+
+    upper_sql = clean_sql.upper()
+
+    # 이미 Data Agent가 샘플링을 넣었다면 중복 적용하지 않습니다.
+    if (
+        "USING SAMPLE" in upper_sql
+        or "TABLESAMPLE" in upper_sql
+    ):
+        return clean_sql + ";"
+
+    safe_sample_size = max(
+        1,
+        min(
+            int(sample_size or MAX_VISUAL_SAMPLE_ROWS),
+            MAX_VISUAL_SAMPLE_ROWS,
+        ),
+    )
+
+    return (
+        "SELECT *\n"
+        "FROM (\n"
+        f"{clean_sql}\n"
+        ") AS visual_source\n"
+        f"USING SAMPLE reservoir({safe_sample_size} ROWS);"
+    )
+
+
+# =========================================================
+# 관계 / 상관관계 요청의 데이터 범위 강제 보정
+# =========================================================
+
+RELATION_INTENT_KEYWORDS = [
+    "관계",
+    "상관관계",
+    "상관 관계",
+    "상관계수",
+    "상관 계수",
+    "관련성",
+    "연관성",
+    "correlation",
+    "relationship",
+]
+
+BEHAVIOR_FEATURE_KEYWORDS = {
+    "visit_count": [
+        "방문",
+        "페이지 방문",
+        "visit",
+    ],
+    "search_count": [
+        "검색",
+        "search",
+    ],
+    "cart_add_count": [
+        "장바구니 추가",
+        "카트 추가",
+        "add_to_cart",
+        "cart add",
+    ],
+    "cart_remove_count": [
+        "장바구니 삭제",
+        "장바구니 제거",
+        "카트 삭제",
+        "카트 제거",
+        "remove_from_cart",
+        "cart remove",
+    ],
+    "purchase_count": [
+        "구매",
+        "purchase",
+        "buy",
+    ],
+}
+
+
+def detect_relation_features(
+    question: str,
+) -> list[str]:
+    """
+    사용자 질문이 관계/상관관계 요청인지 확인하고,
+    질문에 명시된 고객 행동 Feature를 순서대로 반환합니다.
+
+    현재 프로젝트에서 확인된 행동 지표만 대상으로 합니다.
+    """
+
+    question_lower = (
+        str(question or "")
+        .lower()
+    )
+
+    has_relation_intent = any(
+        keyword in question_lower
+        for keyword in RELATION_INTENT_KEYWORDS
+    )
+
+    if not has_relation_intent:
+        return []
+
+    features = []
+
+    for feature_name, keywords in (
+        BEHAVIOR_FEATURE_KEYWORDS.items()
+    ):
+
+        if any(
+            keyword in question_lower
+            for keyword in keywords
+        ):
+
+            features.append(
+                feature_name
+            )
+
+    return features
+
+
+def validate_relation_sql_features(
+    sql_query: str,
+    feature_columns: list[str],
+) -> tuple[bool, list[str]]:
+    """
+    Data Agent가 만든 SQL에
+    관계 분석에 필요한 Feature alias가 모두 있는지 확인합니다.
+    """
+
+    sql_lower = (
+        str(sql_query or "")
+        .lower()
+    )
+
+    missing_features = [
+        column
+        for column in feature_columns
+        if column.lower() not in sql_lower
+    ]
+
+    return (
+        len(missing_features) == 0,
+        missing_features,
+    )
+
+
+def build_correlation_matrix_sql(
+    sql_query: str,
+    feature_columns: list[str],
+) -> str:
+    """
+    Data Agent가 생성한 고객 단위 Feature SQL을
+    전체 데이터 기준 correlation matrix SQL로 변환합니다.
+
+    원본 raw 이벤트를 샘플링하지 않습니다.
+    Data Agent SQL이 고객별 지표를 정확히 만든 뒤,
+    DuckDB corr()가 그 전체 결과를 사용합니다.
+    """
+
+    if len(feature_columns) < 3:
+        raise ValueError(
+            "correlation matrix 생성에는 "
+            "최소 3개의 Feature가 필요합니다."
+        )
+
+    clean_sql = (
+        str(sql_query)
+        .strip()
+        .rstrip(";")
+    )
+
+    # 이미 corr()를 사용한 SQL이면 중복 변환하지 않습니다.
+    if "corr(" in clean_sql.lower():
+        return clean_sql + ";"
+
+    pair_aliases = {}
+
+    corr_expressions = []
+
+    for left_index, left_column in enumerate(
+        feature_columns
+    ):
+
+        for right_index in range(
+            left_index + 1,
+            len(feature_columns),
+        ):
+
+            right_column = (
+                feature_columns[
+                    right_index
+                ]
+            )
+
+            alias = (
+                f"corr_{left_index}_{right_index}"
+            )
+
+            pair_aliases[
+                (
+                    left_column,
+                    right_column,
+                )
+            ] = alias
+
+            pair_aliases[
+                (
+                    right_column,
+                    left_column,
+                )
+            ] = alias
+
+            corr_expressions.append(
+                f"        corr({left_column}, {right_column}) "
+                f"AS {alias}"
+            )
+
+    corr_select = ",\n".join(
+        corr_expressions
+    )
+
+    row_queries = []
+
+    for row_column in feature_columns:
+
+        values = []
+
+        for column in feature_columns:
+
+            if column == row_column:
+
+                value_expression = (
+                    f"1.0 AS {column}"
+                )
+
+            else:
+
+                alias = pair_aliases[
+                    (
+                        row_column,
+                        column,
+                    )
+                ]
+
+                value_expression = (
+                    f"{alias} AS {column}"
+                )
+
+            values.append(
+                f"    {value_expression}"
+            )
+
+        row_query = (
+            "SELECT\n"
+            f"    '{row_column}' AS feature,\n"
+            + ",\n".join(
+                values
+            )
+            + "\nFROM correlation_values"
+        )
+
+        row_queries.append(
+            row_query
+        )
+
+    matrix_rows = (
+        "\n\nUNION ALL\n\n"
+        .join(
+            row_queries
+        )
+    )
+
+    return (
+        "WITH customer_metrics AS (\n"
+        "    SELECT *\n"
+        "    FROM (\n"
+        f"{clean_sql}\n"
+        "    ) AS base_metrics\n"
+        "),\n"
+        "correlation_values AS (\n"
+        "    SELECT\n"
+        f"{corr_select}\n"
+        "    FROM customer_metrics\n"
+        ")\n"
+        f"{matrix_rows};"
+    )
 
 
 # =========================================================
@@ -313,7 +584,7 @@ def append_verification_sql(
 # =========================================================
 
 def supervisor_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "data_agent",
@@ -329,12 +600,14 @@ def supervisor_node(
         "[Supervisor Agent]"
     )
 
+
     completed_steps = (
         state.get(
             "completed_steps",
             []
         )
     )
+
 
     print(
         f"completed_steps = "
@@ -345,6 +618,7 @@ def supervisor_node(
     question = state.get(
         "question"
     )
+
 
     if not question:
 
@@ -369,7 +643,7 @@ def supervisor_node(
                 state.get(
                     "dataframe"
                 ),
-                pd.DataFrame,
+                pd.DataFrame
             ),
 
         has_processed_dataframe=
@@ -377,7 +651,7 @@ def supervisor_node(
                 state.get(
                     "processed_dataframe"
                 ),
-                pd.DataFrame,
+                pd.DataFrame
             ),
 
         has_model_result=
@@ -419,6 +693,7 @@ def supervisor_node(
         f"{decision.next_agent}"
     )
 
+
     print(
         f"reason = "
         f"{decision.reason}"
@@ -448,7 +723,7 @@ def supervisor_node(
 # =========================================================
 
 def data_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "sql_executor",
@@ -493,7 +768,6 @@ def data_node(
 
 
         result = data_agent.invoke(
-
             {
                 "messages": [
                     HumanMessage(
@@ -505,7 +779,7 @@ def data_node(
 
             config={
                 "recursion_limit": 30
-            },
+            }
         )
 
 
@@ -539,6 +813,245 @@ def data_node(
         )
 
 
+        # -------------------------------------------------
+        # 데이터 범위 / 샘플링 메타데이터
+        # -------------------------------------------------
+
+        data_result_type = getattr(
+            plan,
+            "result_type",
+            "full_result",
+        )
+
+        data_uses_full_population = bool(
+            getattr(
+                plan,
+                "uses_full_population",
+                True,
+            )
+        )
+
+        data_is_sampled = bool(
+            getattr(
+                plan,
+                "is_sampled",
+                False,
+            )
+        )
+
+        data_sample_size = int(
+            getattr(
+                plan,
+                "sample_size",
+                0,
+            )
+            or 0
+        )
+
+        data_sampling_reason = str(
+            getattr(
+                plan,
+                "sampling_reason",
+                "",
+            )
+            or ""
+        ).strip()
+
+        data_scope_note = str(
+            getattr(
+                plan,
+                "scope_note",
+                "",
+            )
+            or ""
+        ).strip()
+
+
+        # -------------------------------------------------
+        # 관계 / 상관관계 요청은 LLM의 result_type보다
+        # 질문에 명시된 Feature 수를 우선하여 강제 보정
+        # -------------------------------------------------
+        #
+        # 2개 Feature 관계:
+        #   전체 원천 데이터에서 고객 단위 지표를 계산한 뒤
+        #   최종 행만 최대 100,000개 시각화 표본으로 사용
+        #
+        # 3개 이상 Feature 관계:
+        #   전체 고객 단위 지표를 DuckDB corr()로 계산하고
+        #   작은 correlation matrix만 pandas로 전달
+        # -------------------------------------------------
+
+        relation_features = (
+            detect_relation_features(
+                question
+            )
+        )
+
+        if len(relation_features) >= 2:
+
+            relation_sql_valid, missing_features = (
+                validate_relation_sql_features(
+                    sql_query=sql_query,
+                    feature_columns=relation_features,
+                )
+            )
+
+            if not relation_sql_valid:
+
+                raise ValueError(
+                    "관계 분석에 필요한 Feature가 "
+                    "Data Agent SQL에서 누락되었습니다: "
+                    f"{missing_features}"
+                )
+
+
+        if len(relation_features) >= 3:
+
+            sql_query = (
+                build_correlation_matrix_sql(
+                    sql_query=sql_query,
+                    feature_columns=relation_features,
+                )
+            )
+
+            data_result_type = (
+                "correlation_matrix"
+            )
+
+            data_uses_full_population = (
+                True
+            )
+
+            data_is_sampled = (
+                False
+            )
+
+            data_sample_size = 0
+
+            data_sampling_reason = ""
+
+            data_scope_note = (
+                "고객별 행동 지표는 전체 원천 데이터 기준으로 계산하고, "
+                "DuckDB corr()로 전체 고객 기준 상관계수를 계산한 뒤 "
+                "작은 상관계수 행렬만 시각화 단계에 전달합니다."
+            )
+
+
+        elif len(relation_features) == 2:
+
+            data_result_type = (
+                "visual_sample"
+            )
+
+            data_uses_full_population = (
+                False
+            )
+
+            data_is_sampled = (
+                True
+            )
+
+            data_sample_size = (
+                MAX_VISUAL_SAMPLE_ROWS
+            )
+
+            data_sampling_reason = (
+                "두 행동 지표의 관계를 점 단위로 표현하기 위해 "
+                "전체 원천 데이터에서 고객별 지표를 정확히 계산한 뒤 "
+                "최종 고객 행만 시각화용으로 표본 추출합니다."
+            )
+
+            data_scope_note = (
+                f"전체 원천 데이터 기준으로 고객별 지표를 계산한 뒤 "
+                f"관계 시각화를 위해 최대 "
+                f"{MAX_VISUAL_SAMPLE_ROWS:,}명의 고객 행을 사용합니다."
+            )
+
+
+        # -------------------------------------------------
+        # 메타데이터와 실제 SQL 강제 일치
+        # -------------------------------------------------
+        #
+        # 위 관계 요청 강제 보정에 해당하지 않는 일반 요청은
+        # Data Agent의 result_type을 사용합니다.
+        # -------------------------------------------------
+
+        if data_result_type == "visual_sample":
+
+            requested_sample_size = (
+                data_sample_size
+                if data_sample_size > 0
+                else MAX_VISUAL_SAMPLE_ROWS
+            )
+
+            data_sample_size = min(
+                requested_sample_size,
+                MAX_VISUAL_SAMPLE_ROWS,
+            )
+
+            sql_query = ensure_visual_sample_sql(
+                sql_query=sql_query,
+                sample_size=data_sample_size,
+            )
+
+            data_uses_full_population = False
+            data_is_sampled = True
+
+            if not data_sampling_reason:
+                data_sampling_reason = (
+                    "전체 원천 데이터에서 분석 단위를 정확히 계산한 뒤 "
+                    "행 단위 시각화를 위해 최종 결과만 표본 추출했습니다."
+                )
+
+            if not data_scope_note:
+                data_scope_note = (
+                    f"전체 원천 데이터 기준으로 지표를 계산한 뒤 "
+                    f"시각화용 최종 행을 최대 {data_sample_size:,}개 사용합니다."
+                )
+
+
+        elif data_result_type == "correlation_matrix":
+
+            data_uses_full_population = True
+            data_is_sampled = False
+            data_sample_size = 0
+
+            if not data_scope_note:
+                data_scope_note = (
+                    "상관계수는 DuckDB에서 전체 데이터 기준으로 계산하고 "
+                    "작은 상관계수 행렬만 후속 단계에 전달합니다."
+                )
+
+
+        else:
+
+            # full_result는 전체 결과를 의미하도록 메타데이터 정규화
+            data_result_type = "full_result"
+            data_uses_full_population = True
+            data_is_sampled = False
+            data_sample_size = 0
+
+
+        print(
+            "[Data 범위 정책]"
+        )
+
+        print(
+            "result_type =",
+            data_result_type,
+        )
+
+        print(
+            "uses_full_population =",
+            data_uses_full_population,
+        )
+
+        print(
+            "is_sampled =",
+            data_is_sampled,
+        )
+
+
         print(
             "[생성된 SQL]"
         )
@@ -566,6 +1079,24 @@ def data_node(
 
                     "data_purpose":
                         purpose,
+
+                    "data_result_type":
+                        data_result_type,
+
+                    "data_uses_full_population":
+                        data_uses_full_population,
+
+                    "data_is_sampled":
+                        data_is_sampled,
+
+                    "data_sample_size":
+                        data_sample_size,
+
+                    "data_sampling_reason":
+                        data_sampling_reason,
+
+                    "data_scope_note":
+                        data_scope_note,
 
                     "data_error":
                         message,
@@ -619,6 +1150,24 @@ def data_node(
             "data_purpose":
                 purpose,
 
+            "data_result_type":
+                data_result_type,
+
+            "data_uses_full_population":
+                data_uses_full_population,
+
+            "data_is_sampled":
+                data_is_sampled,
+
+            "data_sample_size":
+                data_sample_size,
+
+            "data_sampling_reason":
+                data_sampling_reason,
+
+            "data_scope_note":
+                data_scope_note,
+
             "data_error":
                 "",
         },
@@ -633,7 +1182,7 @@ def data_node(
 # =========================================================
 
 def sql_executor_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "supervisor",
@@ -689,6 +1238,7 @@ def sql_executor_node(
         df
     )
 
+
     columns = list(
         df.columns
     )
@@ -698,6 +1248,7 @@ def sql_executor_node(
         f"[조회 완료] "
         f"{row_count:,} rows"
     )
+
 
     print(
         f"[컬럼] "
@@ -745,7 +1296,7 @@ def sql_executor_node(
 # =========================================================
 
 def prep_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "supervisor",
@@ -782,7 +1333,7 @@ def prep_node(
 
     if not isinstance(
         df,
-        pd.DataFrame,
+        pd.DataFrame
     ):
 
         return Command(
@@ -799,10 +1350,6 @@ def prep_node(
                 "final_response",
         )
 
-
-    # -----------------------------------------------------
-    # 사전 진단
-    # -----------------------------------------------------
 
     info = (
         check_dataframe_info(
@@ -857,24 +1404,22 @@ dtype:
 사전 진단 정보
 ========================================
 
-아래 결과는 작업 계획을 위한
-사전 진단 정보입니다.
-
-아직 사용자가 요청한 Prep 작업이
-완료된 것으로 간주하지 마십시오.
+아래 결과는 작업 계획을 세우기 위한 미리보기입니다.
+아직 사용자가 요청한 Prep 작업이 완료된 것으로
+간주하지 마십시오.
 
 
-결측치:
+결측치 사전 진단:
 
 {missing_df.to_string(index=False)}
 
 
-중복:
+중복 사전 진단:
 
 {duplicate_info}
 
 
-무한대:
+무한대 값 사전 진단:
 
 {infinite_df.to_string(index=False)}
 
@@ -887,7 +1432,6 @@ dtype:
     try:
 
         result = prep_agent.invoke(
-
             {
                 "messages": [
                     HumanMessage(
@@ -899,7 +1443,7 @@ dtype:
 
             config={
                 "recursion_limit": 20
-            },
+            }
         )
 
 
@@ -946,11 +1490,8 @@ dtype:
 
     actions = (
         enforce_requested_prep_actions(
-
             question=
-                state[
-                    "question"
-                ],
+                state["question"],
 
             actions=
                 list(
@@ -985,10 +1526,6 @@ dtype:
     action_reports = {}
 
 
-    # -----------------------------------------------------
-    # DataFrame 정보
-    # -----------------------------------------------------
-
     if (
         "check_dataframe_info"
         in actions
@@ -1002,10 +1539,6 @@ dtype:
             )
         )
 
-
-    # -----------------------------------------------------
-    # 결측치
-    # -----------------------------------------------------
 
     if (
         "check_missing_values"
@@ -1028,10 +1561,6 @@ dtype:
         )
 
 
-    # -----------------------------------------------------
-    # 중복
-    # -----------------------------------------------------
-
     if (
         "check_duplicates"
         in actions
@@ -1045,10 +1574,6 @@ dtype:
             )
         )
 
-
-    # -----------------------------------------------------
-    # Timestamp 변환
-    # -----------------------------------------------------
 
     if (
         "convert_timestamp"
@@ -1067,10 +1592,6 @@ dtype:
         ] = report
 
 
-    # -----------------------------------------------------
-    # Timestamp 정렬
-    # -----------------------------------------------------
-
     if (
         "sort_by_timestamp"
         in actions
@@ -1087,10 +1608,6 @@ dtype:
             "sort_by_timestamp"
         ] = report
 
-
-    # -----------------------------------------------------
-    # 반복 이벤트 Feature
-    # -----------------------------------------------------
 
     if (
         "create_repeat_count_feature"
@@ -1162,6 +1679,21 @@ dtype:
                 ]
 
 
+            else:
+
+                group_columns = [
+                    column
+
+                    for column in [
+                        "client_id",
+                        "timestamp",
+                    ]
+
+                    if column
+                    in processed_df.columns
+                ]
+
+
         processed_df, report = (
             create_repeat_count_feature(
 
@@ -1177,10 +1709,6 @@ dtype:
             "create_repeat_count_feature"
         ] = report
 
-
-    # -----------------------------------------------------
-    # 무한대 확인
-    # -----------------------------------------------------
 
     if (
         "check_infinite_values"
@@ -1203,10 +1731,6 @@ dtype:
         )
 
 
-    # -----------------------------------------------------
-    # 무한대 → NaN
-    # -----------------------------------------------------
-
     if (
         "replace_infinite_with_nan"
         in actions
@@ -1223,10 +1747,6 @@ dtype:
             "replace_infinite_with_nan"
         ] = report
 
-
-    # -----------------------------------------------------
-    # Feature 결측치 처리
-    # -----------------------------------------------------
 
     if (
         "handle_feature_missing_values"
@@ -1266,10 +1786,6 @@ dtype:
             "handle_feature_missing_values"
         ] = report
 
-
-    # -----------------------------------------------------
-    # 처리 후 품질 확인
-    # -----------------------------------------------------
 
     after_info = (
         check_dataframe_info(
@@ -1410,7 +1926,7 @@ dtype:
 # =========================================================
 
 def visualization_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "supervisor",
@@ -1447,7 +1963,7 @@ def visualization_node(
 
     if not isinstance(
         df,
-        pd.DataFrame,
+        pd.DataFrame
     ):
 
         return Command(
@@ -1466,23 +1982,8 @@ def visualization_node(
 
 
     # =====================================================
-    # DataFrame 정보
+    # Agent 판단용 Context
     # =====================================================
-
-    row_count = len(
-        df
-    )
-
-
-    dtypes = {
-        column: str(
-            dtype
-        )
-
-        for column, dtype
-        in df.dtypes.items()
-    }
-
 
     numeric_columns = list(
         df.select_dtypes(
@@ -1491,75 +1992,117 @@ def visualization_node(
     )
 
 
-    datetime_columns = [
+    # 숫자로 저장되어 있어도 분석용 연속형 Feature가 아닌
+    # 식별자 / 범주 ID 컬럼은 별도로 관리합니다.
+    identifier_columns = {
+        "client_id",
+        "sku",
+        "category",
+        "url",
+    }
 
+
+    numeric_feature_columns = [
         column
+        for column in numeric_columns
+        if column not in identifier_columns
+    ]
 
-        for column
-        in df.columns
 
+    datetime_columns = [
+        column
+        for column in df.columns
         if pd.api.types.is_datetime64_any_dtype(
-            df[
-                column
-            ]
+            df[column]
         )
     ]
 
 
+    dtype_info = {
+        column: str(dtype)
+        for column, dtype in df.dtypes.items()
+    }
+
+
     # =====================================================
-    # 고유값 수
+    # 컬럼별 고유값 참고 정보
+    # =====================================================
+    #
+    # 수천만 행 DataFrame에서 모든 컬럼의 nunique()를
+    # 전체 데이터에 실행하면 응답이 다시 느려질 수 있습니다.
+    #
+    # 따라서
+    # - 200,000행 이하: 전체 데이터 기준
+    # - 200,000행 초과: 최대 100,000행의 간격 표본 기준
+    #
+    # 으로 cardinality 참고 정보를 만듭니다.
+    # 표본 기준 값은 정확한 전체 고유값 수가 아니라
+    # 차트 선택을 위한 참고 정보입니다.
     # =====================================================
 
-    unique_check_limit = (
-        200_000
+    row_count = len(
+        df
     )
 
 
-    if row_count <= unique_check_limit:
+    exact_unique_limit = 200_000
+    unique_sample_limit = 100_000
 
-        unique_source = (
-            df
-        )
 
-        unique_note = (
-            "전체 DataFrame 기준"
-        )
+    if row_count <= exact_unique_limit:
+
+        unique_source_df = df
+        unique_count_mode = "전체 데이터 기준"
 
     else:
 
-        unique_source = (
-            df.head(
-                unique_check_limit
+        step = max(
+            row_count
+            // unique_sample_limit,
+            1,
+        )
+
+
+        unique_source_df = (
+            df
+            .iloc[::step]
+            .head(
+                unique_sample_limit
             )
         )
 
-        unique_note = (
-            f"앞 {unique_check_limit:,}행 표본 기준"
+
+        unique_count_mode = (
+            f"표본 {len(unique_source_df):,}행 기준"
         )
 
 
-    unique_counts = {
+    unique_counts = {}
 
-        column:
-            int(
-                unique_source[
-                    column
-                ]
+
+    for column in df.columns:
+
+        try:
+
+            unique_counts[column] = int(
+                unique_source_df[column]
                 .nunique(
-                    dropna=True
+                    dropna=False
                 )
             )
 
-        for column
-        in df.columns
-    }
+        except Exception:
+
+            # list 등 hash 불가능한 값이 들어 있는 컬럼은
+            # 차트 선택용 고유값 계산에서 제외합니다.
+            unique_counts[column] = (
+                "계산 불가"
+            )
 
 
     sample_text = (
         df
-        .head(
-            10
-        )
+        .head(10)
         .to_string(
             index=False
         )
@@ -1572,43 +2115,55 @@ def visualization_node(
 {state["question"]}
 
 
-========================================
-현재 DataFrame
-========================================
+데이터 범위 메타데이터:
 
-전체 행 수:
+result_type:
+{state.get("data_result_type", "full_result")}
 
-{row_count}
+uses_full_population:
+{state.get("data_uses_full_population", True)}
 
+is_sampled:
+{state.get("data_is_sampled", False)}
+
+sample_size:
+{state.get("data_sample_size", 0)}
+
+sampling_reason:
+{state.get("data_sampling_reason", "")}
+
+scope_note:
+{state.get("data_scope_note", "")}
+
+
+현재 시각화 대상 DataFrame 정보:
+
+행 수:
+{len(df)}
 
 컬럼:
-
 {list(df.columns)}
 
-
 dtype:
+{dtype_info}
 
-{dtypes}
-
-
-숫자형 컬럼:
-
+숫자로 저장된 전체 컬럼:
 {numeric_columns}
 
+분석 가능한 숫자형 Feature 후보:
+{numeric_feature_columns}
+
+식별자 / 범주 ID 컬럼:
+{[column for column in df.columns if column in identifier_columns]}
 
 datetime 컬럼:
-
 {datetime_columns}
 
-
-컬럼별 고유값 수:
-
+컬럼별 고유값 참고 정보:
 {unique_counts}
 
-
 고유값 계산 기준:
-
-{unique_note}
+{unique_count_mode}
 
 
 샘플 데이터:
@@ -1616,38 +2171,15 @@ datetime 컬럼:
 {sample_text}
 
 
-========================================
-요청
-========================================
-
-사용자의 요청과
-
-현재 DataFrame의
-
-- 행 수
-- 컬럼
-- dtype
-- 고유값 수
-- 데이터 의미
-
-를 함께 고려하여
-
+현재 DataFrame에 실제 존재하는 컬럼만 사용하고,
+사용자 질문과 데이터 특징을 함께 고려하여
 가장 적절한 차트 하나를 계획하십시오.
-
-
-현재 DataFrame에 실제 존재하는
-컬럼만 사용하십시오.
 """
 
-
-    # =====================================================
-    # Visualization Plan 생성
-    # =====================================================
 
     try:
 
         result = visualization_agent.invoke(
-
             {
                 "messages": [
                     HumanMessage(
@@ -1659,7 +2191,7 @@ datetime 컬럼:
 
             config={
                 "recursion_limit": 20
-            },
+            }
         )
 
 
@@ -1705,43 +2237,190 @@ datetime 컬럼:
 
 
     # =====================================================
-    # Title 안전장치
+    # 사용자 표현 + DataFrame 구조 기반 차트 규칙 보정
+    # =====================================================
+    #
+    # LLM 계획을 기본으로 사용하되,
+    # 사용자가 차트를 직접 지정했거나
+    # 관계/상관관계처럼 변수 개수가 핵심인 경우에는
+    # 최소 규칙으로 한 번 더 보정합니다.
+    #
+    # 예:
+    # - 숫자 Feature 2개 관계 -> scatter
+    # - 숫자 Feature 3개 이상 전체 관계 -> heatmap
     # =====================================================
 
-    chart_title = (
-        plan.title.strip()
-        if plan.title
-        else ""
+    question_lower = (
+        state["question"]
+        .lower()
     )
 
 
-    if not chart_title:
+    data_result_type = state.get(
+        "data_result_type",
+        "full_result",
+    )
 
-        chart_title = (
-            state.get(
-                "question"
-            )
-            or "시각화 결과"
+    precomputed_correlation = (
+        data_result_type
+        == "correlation_matrix"
+    )
+
+
+    explicit_heatmap = any(
+        keyword in question_lower
+        for keyword in [
+            "히트맵",
+            "heatmap",
+        ]
+    )
+
+
+    explicit_scatter = any(
+        keyword in question_lower
+        for keyword in [
+            "산점도",
+            "scatter",
+        ]
+    )
+
+
+    relationship_request = any(
+        keyword in question_lower
+        for keyword in [
+            "상관관계",
+            "상관 관계",
+            "상관계수",
+            "상관 계수",
+            "correlation",
+            "correlation matrix",
+            "관계를 보여",
+            "관계 보여",
+            "관계를 알려",
+            "관계 알려",
+            "관계 분석",
+            "관련성을 보여",
+            "관련성 알려",
+            "연관성을 보여",
+            "연관성 알려",
+        ]
+    )
+
+
+    if precomputed_correlation:
+
+        plan.chart_type = (
+            "heatmap"
+        )
+
+        plan.heatmap_columns = [
+            column
+            for column in numeric_feature_columns
+            if column != "feature"
+        ]
+
+        plan.x_column = None
+        plan.y_column = None
+
+
+    elif explicit_heatmap:
+
+        plan.chart_type = (
+            "heatmap"
         )
 
 
-    # =====================================================
-    # Reason 안전장치
-    # =====================================================
+        if not plan.heatmap_columns:
+
+            plan.heatmap_columns = (
+                numeric_feature_columns
+            )
+
+
+    elif explicit_scatter:
+
+        plan.chart_type = (
+            "scatter"
+        )
+
+
+        if (
+            len(numeric_feature_columns)
+            >= 2
+        ):
+
+            if not plan.x_column:
+                plan.x_column = (
+                    numeric_feature_columns[0]
+                )
+
+
+            if not plan.y_column:
+                plan.y_column = (
+                    numeric_feature_columns[1]
+                )
+
+
+    elif relationship_request:
+
+        if (
+            len(numeric_feature_columns)
+            >= 3
+        ):
+
+            plan.chart_type = (
+                "heatmap"
+            )
+
+
+            plan.heatmap_columns = (
+                numeric_feature_columns
+            )
+
+
+            plan.x_column = None
+            plan.y_column = None
+
+
+        elif (
+            len(numeric_feature_columns)
+            == 2
+        ):
+
+            plan.chart_type = (
+                "scatter"
+            )
+
+
+            plan.x_column = (
+                numeric_feature_columns[0]
+            )
+
+
+            plan.y_column = (
+                numeric_feature_columns[1]
+            )
+
+
+    # title / reason이 비어 있어도
+    # Visualization Executor가 정상 실행되도록 fallback을 사용합니다.
+    chart_title = (
+        plan.title.strip()
+        if isinstance(plan.title, str)
+        and plan.title.strip()
+        else state["question"].strip()
+    )
+
 
     plan_reason = (
         plan.reason.strip()
-        if plan.reason
-        else ""
-    )
-
-
-    if not plan_reason:
-
-        plan_reason = (
-            "사용자의 요청과 현재 DataFrame 구조를 "
-            "기준으로 적절한 차트를 자동 선택했습니다."
+        if isinstance(plan.reason, str)
+        and plan.reason.strip()
+        else (
+            "사용자 요청과 DataFrame 구조를 기준으로 "
+            "가장 적절한 차트를 선택했습니다."
         )
+    )
 
 
     print(
@@ -1752,12 +2431,6 @@ datetime 컬럼:
     print(
         f"chart_type = "
         f"{plan.chart_type}"
-    )
-
-
-    print(
-        f"title = "
-        f"{chart_title}"
     )
 
 
@@ -1773,10 +2446,6 @@ datetime 컬럼:
 
     try:
 
-        # -------------------------------------------------
-        # Bar
-        # -------------------------------------------------
-
         if (
             plan.chart_type
             == "bar"
@@ -1784,36 +2453,18 @@ datetime 컬럼:
 
             chart_result = (
                 create_bar_chart(
-
                     df=df,
-
-                    x_column=
-                        plan.x_column,
-
-                    y_column=
-                        plan.y_column,
-
-                    title=
-                        chart_title,
-
-                    x_label=
-                        plan.x_label,
-
-                    y_label=
-                        plan.y_label,
-
-                    top_n=
-                        plan.top_n,
-
+                    x_column=plan.x_column,
+                    y_column=plan.y_column,
+                    title=chart_title,
+                    x_label=plan.x_label,
+                    y_label=plan.y_label,
+                    top_n=plan.top_n,
                     sort_descending=
                         plan.sort_descending,
                 )
             )
 
-
-        # -------------------------------------------------
-        # Line
-        # -------------------------------------------------
 
         elif (
             plan.chart_type
@@ -1822,30 +2473,15 @@ datetime 컬럼:
 
             chart_result = (
                 create_line_chart(
-
                     df=df,
-
-                    x_column=
-                        plan.x_column,
-
-                    y_column=
-                        plan.y_column,
-
-                    title=
-                        chart_title,
-
-                    x_label=
-                        plan.x_label,
-
-                    y_label=
-                        plan.y_label,
+                    x_column=plan.x_column,
+                    y_column=plan.y_column,
+                    title=chart_title,
+                    x_label=plan.x_label,
+                    y_label=plan.y_label,
                 )
             )
 
-
-        # -------------------------------------------------
-        # Histogram
-        # -------------------------------------------------
 
         elif (
             plan.chart_type
@@ -1854,30 +2490,15 @@ datetime 컬럼:
 
             chart_result = (
                 create_histogram(
-
                     df=df,
-
-                    column=
-                        plan.value_column,
-
-                    title=
-                        chart_title,
-
-                    x_label=
-                        plan.x_label,
-
-                    y_label=
-                        plan.y_label,
-
-                    bins=
-                        plan.bins,
+                    column=plan.value_column,
+                    title=chart_title,
+                    x_label=plan.x_label,
+                    y_label=plan.y_label,
+                    bins=plan.bins,
                 )
             )
 
-
-        # -------------------------------------------------
-        # Boxplot
-        # -------------------------------------------------
 
         elif (
             plan.chart_type
@@ -1886,33 +2507,22 @@ datetime 컬럼:
 
             chart_result = (
                 create_boxplot(
-
                     df=df,
-
                     value_column=
                         plan.value_column,
-
                     category_column=
                         plan.category_column,
-
                     title=
                         chart_title,
-
                     x_label=
                         plan.x_label,
-
                     y_label=
                         plan.y_label,
-
                     top_n_categories=
                         plan.top_n,
                 )
             )
 
-
-        # -------------------------------------------------
-        # Scatter
-        # -------------------------------------------------
 
         elif (
             plan.chart_type
@@ -1921,30 +2531,20 @@ datetime 컬럼:
 
             chart_result = (
                 create_scatterplot(
-
                     df=df,
-
                     x_column=
                         plan.x_column,
-
                     y_column=
                         plan.y_column,
-
                     title=
                         chart_title,
-
                     x_label=
                         plan.x_label,
-
                     y_label=
                         plan.y_label,
                 )
             )
 
-
-        # -------------------------------------------------
-        # Heatmap
-        # -------------------------------------------------
 
         elif (
             plan.chart_type
@@ -1959,14 +2559,15 @@ datetime 컬럼:
 
             chart_result = (
                 create_correlation_heatmap(
-
                     df=df,
-
                     title=
                         chart_title,
-
                     columns=
                         heatmap_columns,
+                    precomputed=
+                        precomputed_correlation,
+                    row_label_column=
+                        "feature",
                 )
             )
 
@@ -2007,10 +2608,6 @@ datetime 컬럼:
         )
 
 
-    # =====================================================
-    # Tool 자체 실패
-    # =====================================================
-
     if not chart_result.get(
         "success"
     ):
@@ -2020,12 +2617,6 @@ datetime 컬럼:
                 "error"
             )
             or "차트 생성 실패"
-        )
-
-
-        print(
-            f"[Visualization 실패] "
-            f"{error}"
         )
 
 
@@ -2050,16 +2641,44 @@ datetime 컬럼:
         )
 
 
-    # =====================================================
-    # Visualization 결과
-    # =====================================================
-
     visualization_result = {
-
         **chart_result,
 
         "plan_reason":
             plan_reason,
+
+        "data_result_type":
+            data_result_type,
+
+        "data_uses_full_population":
+            state.get(
+                "data_uses_full_population",
+                True,
+            ),
+
+        "data_is_sampled":
+            state.get(
+                "data_is_sampled",
+                False,
+            ),
+
+        "data_sample_size":
+            state.get(
+                "data_sample_size",
+                0,
+            ),
+
+        "data_sampling_reason":
+            state.get(
+                "data_sampling_reason",
+                "",
+            ),
+
+        "data_scope_note":
+            state.get(
+                "data_scope_note",
+                "",
+            ),
     }
 
 
@@ -2118,11 +2737,12 @@ datetime 컬럼:
 
 
 # =========================================================
-# Model Agent Placeholder
+# Model Agent Node
+# 아직 미구현
 # =========================================================
 
 def model_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "supervisor",
@@ -2148,11 +2768,12 @@ def model_node(
 
 
 # =========================================================
-# Experiment Agent Placeholder
+# Experiment Agent Node
+# 아직 미구현
 # =========================================================
 
 def experiment_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "supervisor",
@@ -2182,7 +2803,7 @@ def experiment_node(
 # =========================================================
 
 def final_response_node(
-    state: AgentState,
+    state: AgentState
 ) -> Command[
     Literal[
         "__end__"
@@ -2199,10 +2820,6 @@ def final_response_node(
         ""
     )
 
-
-    # =====================================================
-    # 오류
-    # =====================================================
 
     if error:
 
@@ -2223,7 +2840,7 @@ def final_response_node(
 
 
         # =================================================
-        # Visualization 결과
+        # Visualization 결과가 있는 경우
         # =================================================
 
         if (
@@ -2242,21 +2859,18 @@ def final_response_node(
 
             final_answer = (
                 "시각화가 완료되었습니다.\n\n"
-
-                "[차트]\n"
-
+                f"[차트]\n"
                 f"- 종류: "
                 f"{visualization_result.get('chart_type', '')}\n"
-
                 f"- 제목: "
                 f"{visualization_result.get('title', '')}\n"
-
                 f"- 선택 이유: "
                 f"{visualization_result.get('plan_reason', '')}\n"
-
                 f"- 저장 위치: "
                 f"{state.get('visualization_path', '')}\n"
             )
+
+
 
 
             # 히스토그램 Log Scale 적용 여부
@@ -2283,8 +2897,73 @@ def final_response_node(
                         "빈도 축에 log scale을 적용했습니다.\n"
                     )
 
+            data_scope_note = (
+                visualization_result.get(
+                    "data_scope_note",
+                    "",
+                )
+                or ""
+            )
 
-            # Prep도 같이 수행한 경우
+            data_is_sampled = bool(
+                visualization_result.get(
+                    "data_is_sampled",
+                    False,
+                )
+            )
+
+            tool_sampled = bool(
+                visualization_result.get(
+                    "sampled",
+                    False,
+                )
+            )
+
+            if (
+                visualization_result.get(
+                    "data_result_type"
+                )
+                == "correlation_matrix"
+            ):
+                final_answer += (
+                    "\n[데이터 범위]\n"
+                    "- 상관계수는 DuckDB에서 전체 데이터 기준으로 계산했습니다.\n"
+                    "- pandas에는 작은 상관계수 행렬만 전달했습니다.\n"
+                )
+
+            elif data_is_sampled:
+                final_answer += (
+                    "\n[데이터 범위]\n"
+                    "- 정확한 원천 집계는 DuckDB에서 수행하고, "
+                    "행 단위 시각화를 위해 표본을 사용했습니다.\n"
+                )
+
+                if data_scope_note:
+                    final_answer += (
+                        f"- {data_scope_note}\n"
+                    )
+
+            elif data_scope_note:
+                final_answer += (
+                    "\n[데이터 범위]\n"
+                    f"- {data_scope_note}\n"
+                )
+
+            if tool_sampled:
+                sampling_note = (
+                    visualization_result.get(
+                        "sampling_note",
+                        "",
+                    )
+                    or ""
+                )
+
+                if sampling_note:
+                    final_answer += (
+                        f"- {sampling_note}\n"
+                    )
+
+
             if (
                 "prep"
                 in completed_steps
@@ -2300,24 +2979,16 @@ def final_response_node(
 
                 final_answer += (
                     "\n[선행 전처리]\n"
-                )
-
-
-                if prep_actions:
-
-                    final_answer += (
+                    + (
                         "\n".join(
                             f"- {action}"
                             for action
                             in prep_actions
                         )
+                        if prep_actions
+                        else "- 추가 전처리 없음"
                     )
-
-                else:
-
-                    final_answer += (
-                        "- 추가 전처리 없음"
-                    )
+                )
 
 
         # =================================================
@@ -2334,7 +3005,6 @@ def final_response_node(
                     "data_quality_report",
                     {}
                 )
-                or {}
             )
 
 
@@ -2373,16 +3043,11 @@ def final_response_node(
                     "[수행 작업]\n"
                     + "\n".join(
                         f"- {action}"
-                        for action
-                        in actions
+                        for action in actions
                     )
                     + "\n\n"
                 )
 
-
-            # ---------------------------------------------
-            # 결측치 결과
-            # ---------------------------------------------
 
             missing_report = (
                 action_reports.get(
@@ -2394,11 +3059,9 @@ def final_response_node(
             if missing_report is not None:
 
                 missing_columns = [
-
                     item
 
-                    for item
-                    in missing_report
+                    for item in missing_report
 
                     if item.get(
                         "null_count",
@@ -2408,7 +3071,6 @@ def final_response_node(
 
 
                 total_missing = sum(
-
                     item.get(
                         "null_count",
                         0
@@ -2421,18 +3083,12 @@ def final_response_node(
 
                 final_answer += (
                     "[결측치 검사]\n"
-
                     f"- 전체 결측치: "
                     f"{total_missing:,}개\n"
-
                     f"- 결측치가 있는 컬럼: "
                     f"{len(missing_columns)}개\n\n"
                 )
 
-
-            # ---------------------------------------------
-            # 중복 결과
-            # ---------------------------------------------
 
             duplicate_report = (
                 action_reports.get(
@@ -2445,36 +3101,26 @@ def final_response_node(
 
                 final_answer += (
                     "[중복 검사]\n"
-
                     f"- 전체 행: "
                     f"{duplicate_report.get('row_count', 0):,}개\n"
-
                     f"- 중복 행: "
                     f"{duplicate_report.get('duplicate_rows', 0):,}개\n"
-
                     f"- 중복 비율: "
                     f"{duplicate_report.get('duplicate_ratio', 0):.2%}\n\n"
                 )
 
 
-            # ---------------------------------------------
-            # 처리된 DataFrame
-            # ---------------------------------------------
-
             if isinstance(
                 processed_df,
-                pd.DataFrame,
+                pd.DataFrame
             ):
 
                 final_answer += (
                     "[처리된 DataFrame]\n"
-
                     f"- 행: "
                     f"{len(processed_df):,}\n"
-
                     f"- 열: "
                     f"{len(processed_df.columns):,}\n"
-
                     f"- 컬럼: "
                     f"{list(processed_df.columns)}\n"
                 )
@@ -2482,9 +3128,7 @@ def final_response_node(
 
                 preview = (
                     processed_df
-                    .head(
-                        10
-                    )
+                    .head(10)
                     .to_string(
                         index=False
                     )
@@ -2498,7 +3142,7 @@ def final_response_node(
 
 
         # =================================================
-        # Data 조회만 수행한 경우
+        # Data 결과만 있는 경우
         # =================================================
 
         else:
@@ -2510,7 +3154,7 @@ def final_response_node(
 
             if isinstance(
                 df,
-                pd.DataFrame,
+                pd.DataFrame
             ):
 
                 row_count = len(
@@ -2559,13 +3203,12 @@ def final_response_node(
             else:
 
                 final_answer = (
-                    "현재까지 생성된 "
-                    "데이터 결과가 없습니다."
+                    "현재까지 생성된 데이터 결과가 없습니다."
                 )
 
 
         # =================================================
-        # 아직 구현하지 않은 Agent 안내
+        # 미구현 Agent 안내
         # =================================================
 
         reason = state.get(
@@ -2585,34 +3228,11 @@ def final_response_node(
             )
 
 
-    # =====================================================
-    # 기반 데이터 검증용 SQL 추가
-    # =====================================================
-    #
-    # Data Agent를 사용했다면
-    # 성공/실패 여부와 관계없이
-    # 생성된 SQL을 최종 응답에 포함합니다.
-    #
-    # 이후 Slack Delivery Agent가
-    # final_answer를 그대로 전달하면
-    # 사용자에게 SQL까지 함께 전달됩니다.
-    # =====================================================
-
-    final_answer = (
-        append_verification_sql(
-
-            final_answer=
-                final_answer,
-
-            state=
-                state,
-        )
+    final_answer = append_verification_sql(
+        final_answer=final_answer,
+        state=state,
     )
 
-
-    # =====================================================
-    # 최종 메시지 생성
-    # =====================================================
 
     message = AIMessage(
 
