@@ -1,0 +1,128 @@
+import logging
+import time
+from pathlib import Path
+
+from env.db_client import get_duckdb_connection
+from config import(
+    BASE_DIR
+)
+
+logger = logging.getLogger(__name__)
+
+SQL_DIR = BASE_DIR / "database" / "sql"
+
+# SQL 실행 순서 (단계명, SQL 파일명)
+SQL_EXECUTION_STEPS = [
+    ("라벨 테이블 생성", "label.sql"),
+    ("특징 테이블 생성", "features.sql"),
+    ("학습용 테이블 생성", "build_mart.sql"),
+]
+
+# MART 테이블 검증용 쿼리
+VALIDATION_QUERY = """
+    SELECT
+        COUNT(*) AS total_rows,
+        COUNT(DISTINCT cart_event_id) AS unique_events,
+        COUNT(*) FILTER (WHERE label = 1) AS purchase_count,
+        COUNT(*) FILTER (WHERE label = 0) AS non_purchase_count,
+        COUNT(*) FILTER (WHERE label IS NULL) AS null_label_count
+    FROM mart.cart_features
+"""
+
+def execute_sql_file(conn, file_path:Path) -> None:
+    """SQL 파일을 읽어 실행"""
+    sql = file_path.read_text(encoding="utf-8")
+
+    try:
+        conn.execute(sql)
+    except Exception as e:
+        raise RuntimeError(f"SQL 실행 실패: {file_path.name}") from e
+
+def validate_mart(conn) -> dict:
+    """MART 테이블(학습용 테이블) 결과 검사"""
+    # 집계 결과 dict로 반환
+    mart_summary = conn.execute(VALIDATION_QUERY).fetchdf().iloc[0].to_dict() # 첫 행 반환(전체 집계 결과는 1행)
+    mart_summary = {key: int(value) for key, value in mart_summary.items()}
+
+    errors = []
+
+    # 조건 검증
+    # 1) 빈 테이블 검증
+    if mart_summary["total_rows"] == 0:
+        errors.append("MART 테이블이 비어있습니다.")
+
+    # 2) 중복 검증
+    duplicate_count = mart_summary["total_rows"] - mart_summary["unique_events"]
+    if duplicate_count > 0:
+        errors.append(f"cart_event_id 중복 {duplicate_count}건 발생)")
+
+    # 3) label 유효성 검증 (0/1/NULL 이외의 값)
+    invalid_label_count = (
+        mart_summary["total_rows"]
+        - mart_summary["purchase_count"]
+        - mart_summary["non_purchase_count"]
+        - mart_summary["null_label_count"]
+    )
+
+    if invalid_label_count > 0:
+        errors.append(f"label에 허용되지 않은 값 존재 {invalid_label_count}건")
+
+    if errors:
+        raise ValueError("MART 테이블 검증 실패:\n- " + "\n- ".join(errors))
+
+    return mart_summary
+
+def build_dataset():
+    """라벨, 득징, 학습용 테이블 생성"""
+
+    # 파일 존재 여부 확인
+    paths = [SQL_DIR / filename for _, filename in SQL_EXECUTION_STEPS] # 경로 생성
+    missing_file = [path for path in paths if not path.exists()] # 경로 존재 검증
+
+    if missing_file:
+        raise FileNotFoundError(f"SQL 파일이 없습니다: {missing_file}")
+
+    # DB 연결
+    conn = get_duckdb_connection(read_only=True)
+
+    try:
+        conn.begin()
+
+        for step_name, file_name in SQL_EXECUTION_STEPS:
+            path = SQL_DIR / file_name
+            start_time = time.perf_counter() # 시작 시간 (소요 시간 측정)
+
+            execute_sql_file(conn, path)
+            logger.info("%s 완료 (%.1fs)",step_name, time.perf_counter() - start_time)
+
+        # MART 테이블 검증 및 요약 반환
+        mart_summary = validate_mart(conn) 
+        conn.commit()
+
+    except Exception:
+        # 테이블 생성 실패 시
+        conn.rollback()
+        logger.exception("데이터셋 생성 실패 - 변경 사항 되돌림")
+        raise
+
+    finally:
+        conn.close() # db 연결 종료
+
+    logger.info(
+        "MART 생성 완료: 전체 %d행, 구매 %d, 비구매 %d, 라벨 없음 %d",
+        mart_summary["total_rows"],
+        mart_summary["purchase_count"],
+        mart_summary["nont_purchase_count"],
+        mart_summary["null_label_count"],
+    )
+
+    return mart_summary
+
+if __name__ == "__main__":
+    # 직접 실행 시에만 로그 설정(import 시 실행하는 파일의 로그 설정에 영향을 주지 않도록)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    build_dataset()
+ 

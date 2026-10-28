@@ -13,7 +13,7 @@ DB_PATH = PROJECT_ROOT / "database" / "synerise.duckdb"
 def get_duckdb_connection(read_only=True):
 
     try:
-        # database 폴더가 없으면 생성
+        # database 폴더가 없으면(추후 고정 구조로 변환 그떄 삭제하면 될듯)
         DB_PATH.parent.mkdir(
             parents=True,
             exist_ok=True
