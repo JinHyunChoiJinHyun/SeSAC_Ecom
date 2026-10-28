@@ -1,6 +1,12 @@
 # 환경설정
 .env
 
+# data 폴더
+synerise_dataset/
+database/
+delivery_output/
+visualization_output/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

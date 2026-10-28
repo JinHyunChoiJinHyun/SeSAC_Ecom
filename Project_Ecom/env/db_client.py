@@ -31,6 +31,10 @@ def get_duckdb_connection(read_only=True):
             read_only=read_only
         )
 
+        # 보안 관련 (추후 논의)
+        # client.execute("SET enable_external_access = false") # 외부 파일 접근 차단
+        # client.execute("SET lock_configuration = true") # 보안 설정 변경 방지
+
     except Exception as e:
         print(f"[DuckDB 연결 오류] {repr(e)}")
         client = None
