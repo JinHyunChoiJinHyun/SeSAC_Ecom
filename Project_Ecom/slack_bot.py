@@ -31,6 +31,7 @@ python slack_bot.py
 
 import logging
 import os
+import time
 
 from collections import (
     deque,
@@ -63,6 +64,27 @@ BASE_DIR = (
 LOGGER = logging.getLogger(
     "ecom.slack"
 )
+
+
+STATUS_RUNNING = "🔄 요청을 처리하고 있습니다…"
+STATUS_FAILED = (
+    "⚠️ 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요. "
+    "문제가 계속되면 담당자에게 문의해 주세요."
+)
+STATUS_SHUTDOWN = (
+    "⚠️ 봇이 종료되어 요청을 처리하지 못했습니다. "
+    "서비스가 재개된 후 다시 요청해 주세요."
+)
+
+
+def get_queued_status(ahead):
+    """접수 시점의 대기 상황을 안내합니다."""
+    if ahead == 0:
+        return "⏳ 요청을 접수했습니다. 곧 처리를 시작합니다."
+    return (
+        "⏳ 요청을 접수했습니다. 앞에 처리 중이거나 "
+        f"대기 중인 요청이 {ahead}건 있습니다."
+    )
 
 
 # =========================================================
@@ -190,10 +212,7 @@ def get_mention_question(
     )
 
 
-    return (
-        question
-        or None
-    )
+    return question
 
 
 # =========================================================
@@ -330,6 +349,14 @@ class SlackBridge:
             Lock()
         )
 
+        # -------------------------------------------------
+        # 실행 중이거나 대기 중인 요청과 상태 메시지 정보를 관리합니다.
+        # Future -> (client, event, status_ts)
+        # -------------------------------------------------
+        self.pending = {}
+        # 종료가 시작되면 새로운 요청을 접수하지 않습니다.
+        self.closing = False
+
 
     # =====================================================
     # DM 수신
@@ -446,69 +473,113 @@ class SlackBridge:
         client,
         question,
     ):
-
-        if (
-            question
-            is None
-        ):
-
+        if question is None:
             return
 
-
+        event = event.copy()
         event_key = (
-            body.get(
-                "team_id"
-            ),
-
-            event.get(
-                "channel"
-            ),
-
-            body.get(
-                "event_id"
-            )
-            or event.get(
-                "ts"
-            ),
+            body.get("team_id"),
+            event.get("channel"),
+            body.get("event_id") or event.get("ts"),
         )
-
 
         # -------------------------------------------------
         # 중복 Event 차단
+        # 접수 순서와 대기 건수도 같은 잠금 안에서 관리합니다.
         # -------------------------------------------------
-
         with self.event_lock:
+            if event_key in self.seen:
+                return
+            self.seen.append(event_key)
 
-            if (
-                event_key
-                in self.seen
-            ):
-
+            # -------------------------------------------------
+            # 질문 확인
+            # 빈 멘션은 대기열에 넣지 않고 즉시 입력을 안내합니다.
+            # -------------------------------------------------
+            if not question:
+                self._notify(
+                    client, event,
+                    "봇 멘션과 함께 요청할 내용을 입력해 주세요.",
+                )
                 return
 
+            # 종료 중에 도착한 요청은 등록하지 않고 안내합니다.
+            if self.closing:
+                self._notify(client, event, STATUS_SHUTDOWN)
+                return
 
-            self.seen.append(
-                event_key
+            # -------------------------------------------------
+            # 접수 시점의 실행 중 + 대기 중 요청 수를 안내합니다.
+            # 상태 메시지를 먼저 게시해 작업 시작 전에 ts를 확보합니다.
+            # -------------------------------------------------
+            ahead = sum(not future.done() for future in self.pending)
+            status_ts = self._post_status(
+                client, event, get_queued_status(ahead),
             )
-
-
-        # -------------------------------------------------
-        # Slack Event 처리는 빠르게 종료하고
-        # 실제 분석은 별도 Thread에서 순차 실행
-        # -------------------------------------------------
-
-        return (
-            self.executor.submit(
-
-                self._process,
-
-                event.copy(),
-
-                question,
-
-                client,
+            # -------------------------------------------------
+            # 실제 요청 처리는 별도 Thread에서 순차 실행합니다.
+            # -------------------------------------------------
+            future = self.executor.submit(
+                self._process, event, question, client, status_ts,
             )
-        )
+            self.pending[future] = (client, event, status_ts)
+
+        # 이미 완료된 Future는 즉시 콜백을 실행하므로 잠금 밖에서 등록합니다.
+        future.add_done_callback(self._forget)
+        return future
+
+    # =====================================================
+    # 완료된 요청 정리
+    # =====================================================
+
+    def _forget(self, future):
+        """완료되거나 취소된 요청을 목록에서 제거합니다."""
+        with self.event_lock:
+            self.pending.pop(future, None)
+
+    # =====================================================
+    # 요청 상태 메시지 게시 및 수정
+    # =====================================================
+
+    def _post_status(self, client, event, text):
+        """요청별 상태 메시지를 게시합니다."""
+        try:
+            response = client.chat_postMessage(
+                channel=event["channel"],
+                text=text,
+                thread_ts=event.get("thread_ts"),
+            )
+            return response.get("ts")
+        except Exception as exc:
+            LOGGER.error(
+                "Slack 상태 메시지 전송 실패 (%s)", type(exc).__name__,
+            )
+            return None
+
+    def _set_status(self, client, event, status_ts, text):
+        """기존 상태 메시지를 수정합니다."""
+        # 게시에 실패해 ts가 없으면 수정은 건너뛰고 요청 처리는 계속합니다.
+        if not status_ts:
+            return False
+        try:
+            client.chat_update(
+                channel=event["channel"], ts=status_ts, text=text,
+            )
+            return True
+        except Exception as exc:
+            LOGGER.error(
+                "Slack 상태 메시지 수정 실패 (%s)", type(exc).__name__,
+            )
+            return False
+
+    # =====================================================
+    # 종료로 중단된 요청 안내
+    # =====================================================
+
+    def _notify_shutdown(self, client, event, status_ts):
+        """중단된 요청에 종료 사실을 안내합니다."""
+        if not self._set_status(client, event, status_ts, STATUS_SHUTDOWN):
+            self._notify(client, event, STATUS_SHUTDOWN)
 
 
     # =====================================================
@@ -557,85 +628,45 @@ class SlackBridge:
         event,
         question,
         client,
+        status_ts=None,
     ):
-
         # =================================================
-        # 질문 확인
+        # 처리 시작 상태와 경과 시간 기록
         # =================================================
-
-        if not question:
-
-            self._notify(
-                client=
-                    client,
-
-                event=
-                    event,
-
-                text=
-                    "봇 멘션과 함께 "
-                    "분석할 질문을 입력해 주세요.",
-            )
-
-            return
-
+        started = time.perf_counter()
+        self._set_status(client, event, status_ts, STATUS_RUNNING)
 
         # =================================================
         # Multi Agent 실행
         # =================================================
-
         try:
+            result = self.runner(question)
+            # 예외 없이 오류 State가 반환된 경우도 실패로 처리합니다.
+            if result.get("error"):
+                raise RuntimeError(result["error"])
 
-            result = (
-                self.runner(
-                    question
-                )
-            )
-
-
-            answer = (
-                result.get(
-                    "final_answer"
-                )
-            )
-
-
-            if (
-                not isinstance(
-                    answer,
-                    str,
-                )
-                or not answer.strip()
-            ):
-
-                raise ValueError(
-                    "최종 답변이 없습니다."
-                )
-
-
+            # 최종 답변이 실제로 생성되었는지 확인합니다.
+            answer = result.get("final_answer")
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("최종 답변이 없습니다.")
         except Exception as exc:
-
             LOGGER.exception(
-                "프로젝트 실행 실패 (%s)",
-                type(exc).__name__,
+                "프로젝트 실행 실패 (%s)", type(exc).__name__,
             )
-
-
-            self._notify(
-                client=
-                    client,
-
-                event=
-                    event,
-
-                text=
-                    "분석 중 오류가 발생했습니다. "
-                    "실행 터미널과 로그를 확인해 주세요.",
-            )
-
-
+            # 기존 상태 수정에 실패한 경우에만 새 실패 안내를 보냅니다.
+            if not self._set_status(client, event, status_ts, STATUS_FAILED):
+                self._notify(client, event, STATUS_FAILED)
             return
 
+        # =================================================
+        # 처리 완료 상태 안내
+        # 결과 생성 시간만 표시하고 기존 Delivery로 결과를 전송합니다.
+        # =================================================
+        elapsed = time.perf_counter() - started
+        self._set_status(
+            client, event, status_ts,
+            f"✅ 요청 처리 완료 ({elapsed:.1f}초). 결과를 전송합니다.",
+        )
 
         # =================================================
         # Delivery Agent 실행
@@ -695,9 +726,9 @@ class SlackBridge:
                     event,
 
                 text=
-                    "분석은 완료되었지만 "
-                    "결과 전달 중 오류가 발생했습니다. "
-                    "실행 로그를 확인해 주세요.",
+                    "요청 처리는 완료되었지만 결과를 전송하지 못했습니다. "
+                    "잠시 후 다시 시도해 주세요. "
+                    "문제가 계속되면 담당자에게 문의해 주세요.",
             )
 
 
@@ -731,8 +762,9 @@ class SlackBridge:
                     event,
 
                 text=
-                    "분석은 완료되었지만 "
-                    "Slack 결과 전송에 실패했습니다.",
+                    "요청 처리는 완료되었지만 결과를 전송하지 못했습니다. "
+                    "잠시 후 다시 시도해 주세요. "
+                    "문제가 계속되면 담당자에게 문의해 주세요.",
             )
 
 
@@ -766,7 +798,7 @@ class SlackBridge:
                 text=
                     "최종 답변은 전송했지만 "
                     "일부 결과 파일을 첨부하지 못했습니다. "
-                    "실행 로그를 확인해 주세요.",
+                    "다시 요청해 주시고, 문제가 계속되면 담당자에게 문의해 주세요.",
             )
 
 
@@ -774,19 +806,56 @@ class SlackBridge:
     # 종료
     # =====================================================
 
-    def close(
-        self,
-    ):
-
+    def close(self):
+        """대기 요청을 취소하고 실행 중인 요청을 마무리합니다."""
         # -------------------------------------------------
-        # 아직 실행되지 않은 대기 요청은 취소하고
-        # 실행 중인 요청은 종료될 때까지 기다립니다.
+        # 새 요청 접수를 막고 취소 전 요청 목록을 보관합니다.
         # -------------------------------------------------
+        with self.event_lock:
+            self.closing = True
+            # 취소 콜백이 목록을 지우기 전에 요청 정보를 복사합니다.
+            jobs = list(self.pending.items())
 
-        self.executor.shutdown(
-            wait=True,
-            cancel_futures=True,
-        )
+        try:
+            # -------------------------------------------------
+            # 아직 실행되지 않은 대기 요청은 취소하고 종료를 안내합니다.
+            # 실행 중인 요청은 결과 전송까지 마칠 수 있도록 유지합니다.
+            # -------------------------------------------------
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            for future, job in jobs:
+                if future.cancelled():
+                    self._notify_shutdown(*job)
+
+            running = [(future, job) for future, job in jobs if not future.done()]
+            if not running:
+                return
+
+            print(
+                "실행 중인 요청을 마무리한 뒤 종료합니다. "
+                "바로 끄려면 Ctrl+C를 한 번 더 누르세요."
+            )
+            # Windows에서도 두 번째 Ctrl+C를 받도록 짧게 나누어 기다립니다.
+            while not all(future.done() for future, _ in running):
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            # 두 번째 Ctrl+C에는 실행 중인 요청에도 중단을 안내합니다.
+            for future, job in jobs:
+                if not future.done():
+                    self._notify_shutdown(*job)
+            raise
+
+
+# =========================================================
+# 첫 번째 종료 입력 대기
+# =========================================================
+
+def wait_until_interrupted():
+    """메인 스레드에서 종료 입력을 기다립니다."""
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("종료 요청을 받았습니다. 대기 중인 요청에 안내를 보냅니다.")
 
 
 # =========================================================
@@ -1055,28 +1124,29 @@ def main():
         )
 
 
-        handler.start()
+        # Windows의 기본 Ctrl+C 처리를 유지하도록 직접 연결 후 기다립니다.
+        handler.connect()
+        wait_until_interrupted()
 
 
     finally:
-
-        # =================================================
-        # Socket 종료
-        # =================================================
-
-        if (
-            handler
-            is not None
-        ):
-
-            handler.close()
-
-
-        # =================================================
-        # ThreadPool 종료
-        # =================================================
-
-        bridge.close()
+        # Socket을 먼저 닫고 요청 처리를 마무리합니다.
+        try:
+            try:
+                # =================================================
+                # Socket 종료
+                # =================================================
+                if handler is not None:
+                    handler.close()
+            finally:
+                # =================================================
+                # ThreadPool 종료
+                # =================================================
+                bridge.close()
+        except KeyboardInterrupt:
+            # 실행 중인 Worker를 기다리지 않고 프로세스를 즉시 종료합니다.
+            print("강제 종료합니다.", flush=True)
+            os._exit(1)
 
 
 # =========================================================
