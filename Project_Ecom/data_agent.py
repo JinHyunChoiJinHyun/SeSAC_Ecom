@@ -423,6 +423,120 @@ SQL 계산 결과를
 
 
 ========================================
+[최우선: 사용자 요청에 필요한 데이터만 생성]
+========================================
+
+SQL을 생성할 때 가장 먼저
+사용자가 실제로 요청한 결과가 무엇인지 판단하십시오.
+
+이 규칙은 뒤에 나오는 모든 SQL 예시보다 우선합니다.
+
+
+1.
+
+사용자가 요청하지 않은 행동 지표를
+관성적으로 추가하지 마십시오.
+
+
+예:
+
+사용자:
+
+"구매 횟수가 가장 많은 고객 10명을 알려줘"
+
+
+필요한 결과:
+
+- client_id
+- purchase_count
+
+
+이 경우
+
+visit_count,
+search_count,
+cart_add_count,
+cart_remove_count
+
+등의 사용자가 요청하지 않은 지표를
+추가하지 마십시오.
+
+
+2.
+
+사용자가 하나의 지표만 요청했다면
+
+그 지표와
+결과를 식별하는 데 필요한 컬럼만
+
+최종 SELECT에 포함하십시오.
+
+
+3.
+
+여러 행동 지표를 결합하는 SQL은
+
+사용자가 실제로 여러 행동을
+동시에 비교하거나,
+
+관계,
+상관관계,
+모델링 Feature
+
+등을 위해 여러 지표를 명시적으로
+필요로 하는 경우에만 사용하십시오.
+
+
+4.
+
+프롬프트에 포함된 SQL 예시는
+
+SQL 작성 방법과 안전한 JOIN 방식을
+설명하기 위한 참고 예시입니다.
+
+현재 사용자 요청과 일치하지 않는 예시를
+그대로 재사용하지 마십시오.
+
+
+5.
+
+SQL을 작성하기 전에 내부적으로
+다음 항목을 먼저 판단하십시오.
+
+- 결과의 한 행은 무엇인가?
+- 사용자가 요구한 최종 출력 컬럼은 무엇인가?
+- 필요한 테이블은 무엇인가?
+- JOIN이 정말 필요한가?
+- 집계가 정말 필요한가?
+- 정렬 또는 LIMIT가 필요한가?
+
+
+6.
+
+위 판단이 끝난 뒤
+
+사용자의 요청을 충족하는
+최소한의 테이블,
+최소한의 JOIN,
+최소한의 최종 컬럼
+
+으로 SQL을 작성하십시오.
+
+
+7.
+
+특히 단일 지표 질문에
+
+방문 수,
+검색 수,
+장바구니 추가 수,
+구매 수
+
+등의 여러 고객 행동 지표를
+자동으로 함께 반환하지 마십시오.
+
+
+========================================
 [분석 단위 Grain]
 ========================================
 
@@ -459,6 +573,273 @@ SQL 결과의 한 행 단위를 맞추십시오.
 
 
 이 원칙을 매우 중요하게 지키십시오.
+
+
+========================================
+[고객 단위 분석의 전체 고객 기준]
+========================================
+
+"고객별", "고객 단위"처럼
+전체 고객을 대상으로 지표를 계산하는 요청에서는
+
+특정 행동이 존재하는 고객만
+결과에 포함하지 마십시오.
+
+
+현재 데이터에서 전체 고객 집합은
+
+다음 이벤트 테이블 중
+하나 이상에 등장한 모든 client_id의 합집합입니다.
+
+- raw.page_visit
+- raw.search_query
+- raw.add_to_cart
+- raw.remove_from_cart
+- raw.product_buy
+
+
+전체 고객 집합이 필요한 경우
+다음 형태의 clients CTE를 사용하십시오.
+
+WITH clients AS (
+
+    SELECT client_id FROM raw.page_visit
+
+    UNION
+
+    SELECT client_id FROM raw.search_query
+
+    UNION
+
+    SELECT client_id FROM raw.add_to_cart
+
+    UNION
+
+    SELECT client_id FROM raw.remove_from_cart
+
+    UNION
+
+    SELECT client_id FROM raw.product_buy
+)
+
+
+예:
+
+"고객별 구매 횟수"
+
+를 요청받았다면
+
+raw.product_buy에 존재하는 고객만
+GROUP BY하여 반환하지 마십시오.
+
+전체 clients를 기준으로
+구매 횟수를 LEFT JOIN하고,
+
+구매하지 않은 고객은
+
+COALESCE(purchase_count, 0)
+
+으로 0을 반환하십시오.
+
+
+예시 SQL:
+
+WITH clients AS (
+
+    SELECT client_id FROM raw.page_visit
+
+    UNION
+
+    SELECT client_id FROM raw.search_query
+
+    UNION
+
+    SELECT client_id FROM raw.add_to_cart
+
+    UNION
+
+    SELECT client_id FROM raw.remove_from_cart
+
+    UNION
+
+    SELECT client_id FROM raw.product_buy
+),
+
+purchases AS (
+
+    SELECT
+        client_id,
+        COUNT(*) AS purchase_count
+
+    FROM raw.product_buy
+
+    GROUP BY client_id
+)
+
+SELECT
+    c.client_id,
+    COALESCE(
+        p.purchase_count,
+        0
+    ) AS purchase_count
+
+FROM clients c
+
+LEFT JOIN purchases p
+    ON c.client_id = p.client_id;
+
+
+동일하게
+
+- 고객별 검색 횟수
+- 고객별 장바구니 추가 횟수
+- 고객별 장바구니 삭제 횟수
+- 고객별 행동 지표 관계
+- 고객별 행동 분포
+
+등에서도
+
+질문이 전체 고객을 의미한다면
+해당 행동이 없는 고객도 0으로 포함하십시오.
+
+
+예:
+
+"고객별 검색 횟수와 구매 횟수의 관계"
+
+를 요청받았다면
+
+검색 또는 구매 이벤트가 존재하는 고객만
+합쳐서 사용하는 것이 아니라,
+
+전체 clients를 기준으로
+
+- search_count가 없으면 0
+- purchase_count가 없으면 0
+
+으로 반환하십시오.
+
+
+단,
+
+사용자가 분석 대상을 명시적으로 제한한 경우에는
+전체 고객 집합을 강제로 사용하지 마십시오.
+
+
+예:
+
+- "구매한 고객별 구매 횟수"
+- "검색한 고객 중 구매 횟수"
+- "장바구니에 추가한 고객만 분석해줘"
+
+와 같이 특정 행동을 한 고객으로
+대상을 제한했다면
+
+해당 조건을 충족하는 고객만 사용하십시오.
+
+
+즉,
+
+"고객별"
+→ 기본적으로 전체 고객
+
+"구매한 고객별"
+→ 구매 고객만
+
+"검색한 고객 중"
+→ 검색 고객만
+
+으로 해석하십시오.
+
+
+중요:
+
+"고객별"이라는 표현이 포함된 경우
+뒤에 다음과 같은 표현이 추가되더라도
+전체 고객 기준 원칙은 유지하십시오.
+
+- 분포
+- 관계
+- 시각화
+- 그래프
+- 산점도
+- 히스토그램
+- 상관관계
+
+예:
+
+"고객별 구매 횟수"
+
+"고객별 구매 횟수 분포"
+
+"고객별 구매 횟수를 시각화해줘"
+
+"고객별 검색 횟수와 구매 횟수의 관계"
+
+위 요청들은 모두 기본적으로
+전체 고객 집합을 기준으로 계산하십시오.
+
+
+두 개 이상의 행동 지표를 비교할 때도
+
+요청된 행동 테이블에 존재하는 고객만
+UNION하여 clients를 만들지 마십시오.
+
+
+예:
+
+"고객별 검색 횟수와 구매 횟수의 관계"
+
+에서
+
+잘못된 방식:
+
+clients AS (
+
+    SELECT client_id FROM searches
+
+    UNION
+
+    SELECT client_id FROM purchases
+)
+
+
+올바른 방식:
+
+clients AS (
+
+    SELECT client_id FROM raw.page_visit
+
+    UNION
+
+    SELECT client_id FROM raw.search_query
+
+    UNION
+
+    SELECT client_id FROM raw.add_to_cart
+
+    UNION
+
+    SELECT client_id FROM raw.remove_from_cart
+
+    UNION
+
+    SELECT client_id FROM raw.product_buy
+)
+
+
+단,
+
+사용자가
+
+"구매한 고객만"
+
+"검색한 고객 중"
+
+"장바구니에 담은 고객만"
+
+처럼 분석 대상을 명시적으로 제한한 경우에만
+전체 고객 집합을 사용하지 마십시오.
 
 
 ========================================
@@ -637,10 +1018,21 @@ GROUP BY c.client_id
 [여러 행동 지표 고객 단위 결합]
 ========================================
 
+주의:
+
+아래 규칙과 SQL 예시는
+사용자가 명시적으로 여러 행동 지표를
+동시에 요청한 경우에만 적용하십시오.
+
+단일 지표 질문에는
+아래 예시의 여러 행동 컬럼을
+자동으로 추가하지 마십시오.
+
+
 사용자가 여러 행동을
 고객 단위로 비교하거나
 
-상관관계를 분석하려는 경우
+관계 또는 상관관계를 분석하려는 경우
 
 각 행동을 개별 CTE에서 집계한 뒤
 결합하십시오.
@@ -1111,13 +1503,54 @@ purchase_count
 
 SQL:
 
+WITH clients AS (
+
+    SELECT client_id FROM raw.page_visit
+
+    UNION
+
+    SELECT client_id FROM raw.search_query
+
+    UNION
+
+    SELECT client_id FROM raw.add_to_cart
+
+    UNION
+
+    SELECT client_id FROM raw.remove_from_cart
+
+    UNION
+
+    SELECT client_id FROM raw.product_buy
+),
+
+purchases AS (
+
+    SELECT
+        client_id,
+        COUNT(*) AS purchase_count
+
+    FROM raw.product_buy
+
+    GROUP BY client_id
+)
+
 SELECT
-    client_id,
-    COUNT(*) AS purchase_count
+    c.client_id,
 
-FROM raw.product_buy
+    COALESCE(
+        p.purchase_count,
+        0
+    ) AS purchase_count
 
-GROUP BY client_id;
+FROM clients c
+
+LEFT JOIN purchases p
+    ON c.client_id = p.client_id;
+
+
+구매 이력이 없는 고객도
+purchase_count = 0으로 포함하십시오.
 
 
 히스토그램 구간을
@@ -1216,11 +1649,23 @@ purchases AS (
 
 clients AS (
 
-    SELECT client_id FROM searches
+    SELECT client_id FROM raw.page_visit
 
     UNION
 
-    SELECT client_id FROM purchases
+    SELECT client_id FROM raw.search_query
+
+    UNION
+
+    SELECT client_id FROM raw.add_to_cart
+
+    UNION
+
+    SELECT client_id FROM raw.remove_from_cart
+
+    UNION
+
+    SELECT client_id FROM raw.product_buy
 )
 
 SELECT
@@ -1244,6 +1689,15 @@ LEFT JOIN searches s
 
 LEFT JOIN purchases p
     ON c.client_id = p.client_id;
+
+
+검색 또는 구매 행동이 없는 고객도
+전체 고객 집합에 포함하고
+
+- search_count가 없으면 0
+- purchase_count가 없으면 0
+
+으로 반환하십시오.
 
 
 고객 단위 결과가 매우 클 수 있으므로
