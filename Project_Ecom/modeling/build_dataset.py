@@ -3,17 +3,17 @@ import logging
 import time
 from pathlib import Path
 from config import(
-    BASE_DIR
+    PROJECT_ROOT
 )
 
 # 모듈 경로에 현재 루트 추가
-sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from database.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
-SQL_DIR = BASE_DIR / "database" / "sql"
+SQL_DIR = PROJECT_ROOT / "database" / "sql"
 
 # SQL 실행 순서 (단계명, SQL 파일명)
 SQL_EXECUTION_STEPS = [
