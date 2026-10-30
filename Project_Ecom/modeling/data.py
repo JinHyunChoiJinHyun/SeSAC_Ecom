@@ -117,6 +117,10 @@ def load_prediction_data(prediction_hour: int) -> pd.DataFrame:
     # 예측 데이터 조회
     df = _load_mart_data(PREDICTION_COLUMNS, is_labeled=False, prediction_hour=prediction_hour)
 
+    # 예측 대상이 없는 경우 에러가 아닌 빈 값 반환 (장바구니 이벤트가 없거나 이미 구매한 정상 상황)
+    if df.empty:
+        return df
+
     # df 검증
     _validate_keys(df, "예측")
 

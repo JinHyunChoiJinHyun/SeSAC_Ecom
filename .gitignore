@@ -6,7 +6,9 @@ synerise_dataset/
 synerise.duckdb
 delivery_output/
 visualization_output/
-model/
+
+# model 폴더
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

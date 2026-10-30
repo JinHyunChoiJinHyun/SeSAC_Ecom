@@ -5,6 +5,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1] # 프로젝트 기준 경로:
 DB_PATH = PROJECT_ROOT / "database" / "synerise.duckdb"
 MODEL_DIR = PROJECT_ROOT / "modeling" / "models"
 REPORT_DIR = PROJECT_ROOT / "modeling" / "reports"
+SQL_DIR = PROJECT_ROOT / "database" / "sql"
 
 # MART 데이터
 TRAINING_TABLE = "mart.purchase_training_data"
@@ -44,6 +45,11 @@ PURCHASE_DEADLINE_DAYS = 7 # 구매 데드라인 (변경 시 SQL 쿼리 변경 �
 # 예측
 PREDICTION_MODEL_NAME = "lightgbm"                   # 예측에 사용할 모델
 PREDICTIONS_TABLE = "purchase_predictions"
+
+# 구매 확률이 애매한 고객 범위 (확률 순위 70% ~ 95% 사이, 하위 70%와 상위 5%는 프로모션 범위에서 제외) -> 가설값이므로 추후 수정
+# 0% ────────── 70% ────── 95% ── 100%
+# [ 하위 70% 제외 ][ 대상 25% ][ 상위 5% 제외 ]
+PROMOTION_TARGET_PERCENTILES = (0.70, 0.95) 
 
 def get_model_file_name(model_name: str, prediction_hour: int) -> str:
     """모델 파일 이름 규칙
