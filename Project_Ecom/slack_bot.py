@@ -30,6 +30,7 @@ python slack_bot.py
 
 
 import logging
+import json
 import os
 import time
 
@@ -610,6 +611,7 @@ class SlackBridge:
                     ),
             )
 
+            return True
 
         except Exception as exc:
 
@@ -617,6 +619,7 @@ class SlackBridge:
                 "Slack 안내 전송 실패 (%s)",
                 type(exc).__name__,
             )
+            return False
 
 
     # =====================================================
@@ -630,6 +633,30 @@ class SlackBridge:
         client,
         status_ts=None,
     ):
+        # 결과 검증과 Slack 전송까지 같은 요청 ID로 기록합니다.
+        from env.logger import request_log
+
+        with request_log(question):
+            return self._process_request(event, question, client, status_ts)
+
+    def _record_result(self, event, analysis_status, delivery_status="unknown", **details):
+        """안내 문구 대신 명시적인 처리 결과를 공통 로그에 기록합니다."""
+        from env.logger import get_logger
+
+        get_logger().info(
+            "ADMIN_RESULT %s",
+            json.dumps(
+                {
+                    "analysis_status": analysis_status,
+                    "delivery_status": delivery_status,
+                    "channel": event.get("channel", ""),
+                    **details,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def _process_request(self, event, question, client, status_ts=None):
         # =================================================
         # 처리 시작 상태와 경과 시간 기록
         # =================================================
@@ -654,14 +681,22 @@ class SlackBridge:
                 "프로젝트 실행 실패 (%s)", type(exc).__name__,
             )
             # 기존 상태 수정에 실패한 경우에만 새 실패 안내를 보냅니다.
-            if not self._set_status(client, event, status_ts, STATUS_FAILED):
-                self._notify(client, event, STATUS_FAILED)
+            notified = self._set_status(client, event, status_ts, STATUS_FAILED)
+            if not notified:
+                notified = self._notify(client, event, STATUS_FAILED)
+            # 실패 안내 전송 여부와 답변 생성 실패를 별도로 기록합니다.
+            self._record_result(
+                event, "failed", "not_attempted",
+                failure_notice_status="success" if notified else "failed",
+                error_type=type(exc).__name__,
+            )
             return
 
         # =================================================
         # 처리 완료 상태 안내
         # 결과 생성 시간만 표시하고 기존 Delivery로 결과를 전송합니다.
         # =================================================
+        self._record_result(event, "completed")
         elapsed = time.perf_counter() - started
         self._set_status(
             client, event, status_ts,
@@ -712,6 +747,9 @@ class SlackBridge:
 
         except Exception as exc:
 
+            self._record_result(
+                event, "completed", "failed", error_type=type(exc).__name__,
+            )
             LOGGER.exception(
                 "Delivery Agent 실행 실패 (%s)",
                 type(exc).__name__,
@@ -734,6 +772,12 @@ class SlackBridge:
 
             return
 
+
+        # 답변 생성과 Slack 전송 결과를 구분합니다.
+        delivery_status = delivery_result.get("status", "unknown")
+        if delivery_status not in {"success", "failed", "partial_success"}:
+            delivery_status = "unknown"
+        self._record_result(event, "completed", delivery_status)
 
         # =================================================
         # Delivery 실패
@@ -961,7 +1005,6 @@ def main():
 
     from env.logger import (
         configure_logging,
-        request_log,
     )
 
 
@@ -997,19 +1040,16 @@ def main():
         question,
     ):
 
-        with request_log(
-            question
-        ):
+        # 요청 로그는 SlackBridge에서 결과 검증과 전송까지 함께 관리합니다.
+        return (
+            run_project_agent(
+                graph=
+                    graph,
 
-            return (
-                run_project_agent(
-                    graph=
-                        graph,
-
-                    question=
-                        question,
-                )
+                question=
+                    question,
             )
+        )
 
 
     # =====================================================
