@@ -17,7 +17,9 @@ from config import(
     REPORT_DIR,
     FEATURE_COLUMNS,
     LABEL_COLUMN,
-    PREDICTION_HOURS
+    PREDICTION_HOURS,
+    PURCHASE_DEADLINE_DAYS,
+    get_model_file_name
 )
 
 # 모듈 경로에 현재 루트 추가
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 #   positive_rate 0.0268 : 무작위로 뽑았는데 실제 구매자일 확률 (테스트 전체 중 실제 구매 약 2만 9천 건)
 #   pr_auc        0.0325 : 모델이 기준을 두고 뽑았는데 실제 구매자일 확률 3.2% (positive_rate보다 약 1.2배 나음)
 #   roc_auc       0.5501 : 0.5(무작위)에 가까움 → 카테고리만으로는 구분 능력이 거의 없음
-#   brier_score   0.02609: 확률이 부풀려지진 않았으나 positive_rate의 brier_score(0.02605)와 점수가 같으므로 잘 에측하지 못함
+#   brier_score   0.02609: 각 이벤트마다 예측한 구매 확률이 크게 부풀려지진 않았으나 기준 없이 positive_rate로 예측한 MSE(0.02605)와 비슷하므로 잘 예측하지 못함
 def evaluate_predictions(y_true, probabilities) -> dict:
     """
     구매 확률 예측 성능 평가
@@ -44,10 +46,19 @@ def evaluate_predictions(y_true, probabilities) -> dict:
     # 테스트할 데이터의 실제 정답에 구매(1)와 미구매(0)가 모두 있는지 검증
     has_both_labels = pd.Series(y_true).nunique() == 2
     return {
-        "positive_rate": float(np.mean(y_true)), # 무작위로 뽑았는데 구매자일 확률 (PR-AUC의 기준점)
-        "pr_auc": average_precision_score(y_true, probabilities) if has_both_labels else np.nan, # 모델이 기준(예측 확률)을 두고 높은 순서로 뽑았을 때 실제 구매자의 비율 (positive_rate보다 높고 1에 가까울수록 잘 예측)
-        "roc_auc": roc_auc_score(y_true, probabilities) if has_both_labels else np.nan, # 구매 확률이 구매자와 미구매자를 잘 구분하는지 (1에 가까울수록 잘 구분)
-        "brier_score": brier_score_loss(y_true, probabilities) # 예측한 구매 확률이 수치적으로 정확한지 (0에 가까울수록 정확)
+        # 무작위로 뽑았는데 구매자일 확률 (PR-AUC의 기준점)
+        "positive_rate": float(np.mean(y_true)), 
+
+        # 모델이 기준(예측 확률)을 두고 높은 순서로 뽑았을 때 실제 구매자의 비율 (positive_rate보다 높고 1에 가까울수록 잘 예측)
+        "pr_auc": average_precision_score(y_true, probabilities) if has_both_labels else np.nan, 
+
+        # 구매 확률이 구매자와 미구매자를 잘 구분하는지 (1에 가까울수록 잘 구분)
+        "roc_auc": roc_auc_score(y_true, probabilities) if has_both_labels else np.nan, 
+
+        # 예측 확률과 실제 라벨의 평균제곱오차(MSE)로 구매 확률의 정확도 평가 (0에 가까울수록 정확) * MSE = (예측 확률 - 라벨)²의 평균
+        # 실제 구매(1)일 때  0.9 예측 → 0.01 (확실히 맞힘)  /  0.1 예측 → 0.81 (확실히 틀림)
+        # 실제 미구매(0)일 때 0.1 예측 → 0.01 (확실히 맞힘)  /  0.9 예측 → 0.81 (확실히 틀림)
+        "brier_score": brier_score_loss(y_true, probabilities) 
     }
 
 def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> list[dict]:
@@ -77,7 +88,10 @@ def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> li
             **evaluate_predictions(y_test, probabilities) # dict를 하나씩 꺼내서 반환
         })
 
-        joblib.dump(model, MODEL_DIR / f"{model_name}_{prediction_hour}h.joblib")
+        # 학습이 끝난 모델 저장        
+        model_file = get_model_file_name(model_name, prediction_hour)
+        model_path = MODEL_DIR / f"{model_file}.joblib"
+        joblib.dump(model, model_path)
         logger.info("%s시간 %s 완료", prediction_hour, model_name)
 
     return results
@@ -95,7 +109,8 @@ def main():
 
     # 레포트 생성
     report = pd.DataFrame(all_result)
-    report.to_csv(REPORT_DIR / "model_comparison.csv", index=False)
+    report_path = REPORT_DIR / f"model_comparison_deadline_{PURCHASE_DEADLINE_DAYS}d.csv"
+    report.to_csv(report_path, index=False)
     print(report.to_string(index=False))
 
 if __name__ == "__main__":

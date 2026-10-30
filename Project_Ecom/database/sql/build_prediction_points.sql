@@ -15,8 +15,9 @@ WITH cart_events_distinct AS (
     AND "timestamp" IS NOT NULL
 ),
 
--- 장바구니 이벤트 ID 생성 (담은 시간 순으로 1부터 부여)
+-- 장바구니 이벤트 ID 생성
 SELECT
+    -- 담은 시간 순으로 1부터 부여
     ROW_NUMBER() OVER(
         ORDER BY
             cart_timestamp,
@@ -54,17 +55,25 @@ SELECT
     c.cart_timestamp,
     h.hours_after_cart,
 
-    -- 아래 시점끼자의 행동만 특징으로 사용 (담은 시간 + N시간)
+    -- 예측 기준 시점(담은 시간 + N시간)까지의 행동만 특징으로 사용
     c.cart_timestamp
     + h.hours_after_cart * INTERVAL '1 hour' -- 숫자를 시간으로 변환 (예: 24 -> 24시간)
     AS prediction_timestamp,
 
     -- 구매 여부 판단 마감 시점
     c.cart_timestamp + INTERVAL '7 days'
-    AS purchase_deadline_timestamp
+    AS purchase_deadline_timestamp,
+
+    -- 예측 가능 여부: 예측 기준 시점까지의 행동이 데이터 내에 모두 존재하는지
+    c.cart_timestamp + h.hours_after_cart * INTERVAL '1 hour'
+    <= e.purchase_data_end_timestamp
+    AS is_prediction_ready,
+
+    -- 학습 가능 여부: 데드라인이 지나 구매 여부 확정이 가능한지
+    c.cart_timestamp + INTERVAL '7 days'
+    <= e.purchase_data_end_timestamp
+    AS is_label_ready
+
 FROM modeling.cart_events c
 CROSS JOIN prediction_hour_options h
 CROSS JOIN purchase_data_end e
-
--- 장바구니에 담은 후 7일내 구매 여부 판단이 가능한 데이터만 사용
-WHERE c.cart_timestamp + INTERVAL '7 days' <= e.purchase_data_end_timestamp;
