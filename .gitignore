@@ -3,9 +3,13 @@
 
 # data 폴더
 synerise_dataset/
-database/
+synerise.duckdb
+synerise.duckdb.wal
 delivery_output/
 visualization_output/
+
+# model 폴더
+models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
