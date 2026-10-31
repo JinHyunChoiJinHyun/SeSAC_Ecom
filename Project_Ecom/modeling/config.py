@@ -44,7 +44,7 @@ PURCHASE_DEADLINE_DAYS = 7 # 구매 데드라인 (변경 시 SQL 쿼리 변경 �
 
 # 예측
 PREDICTION_MODEL_NAME = "lightgbm"                   # 예측에 사용할 모델
-PREDICTIONS_TABLE = "purchase_predictions"
+PREDICTIONS_TABLE = "mart.purchase_predictions"
 
 # 구매 확률이 애매한 고객 범위 (확률 순위 70% ~ 95% 사이, 하위 70%와 상위 5%는 프로모션 범위에서 제외) -> 가설값이므로 추후 수정
 # 0% ────────── 70% ────── 95% ── 100%

@@ -25,8 +25,8 @@ from config import(
 # 모듈 경로에 현재 루트 추가
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data import temporal_split, load_training_data
-from models import build_models
+from modeling.data_loader import temporal_split, load_training_data
+from modeling.model_definitions import build_models
 
 logger = logging.getLogger(__name__)
 

@@ -27,7 +27,7 @@ from config import(
 # 모듈 경로에 현재 루트 추가
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from data import load_prediction_data
+from modeling.data_loader import load_prediction_data
 from database.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,6 @@ def assign_promotion_segment(purchase_probabilities: pd.Series) -> pd.Series:
     segment[purchase_probabilities >= upper_value] = SEGMENT_HIGH # 조건이 일치하면 "high"로 덮어쓰기
 
     return segment
-
-
 
 def predict_purchase_probability(prediction_hour: int, predicted_at: datetime) -> pd.DataFrame:
     """예측 기준 시점에 대해 구매 확률 계산"""
