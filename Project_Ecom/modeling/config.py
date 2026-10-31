@@ -51,8 +51,8 @@ PREDICTIONS_TABLE = "mart.purchase_predictions"
 # [ 하위 70% 제외 ][ 대상 25% ][ 상위 5% 제외 ]
 PROMOTION_TARGET_PERCENTILES = (0.70, 0.95) 
 
-def get_model_file_name(model_name: str, prediction_hour: int) -> str:
-    """모델 파일 이름 규칙
+def get_model_name(model_name: str, prediction_hour: int) -> str:
+    """모델 이름 규칙
     예) lightgbm_24h_deadline_7d
     """
 

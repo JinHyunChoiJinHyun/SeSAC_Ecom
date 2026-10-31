@@ -19,7 +19,7 @@ from config import(
     LABEL_COLUMN,
     PREDICTION_HOURS,
     PURCHASE_DEADLINE_DAYS,
-    get_model_file_name
+    get_model_name
 )
 
 # 모듈 경로에 현재 루트 추가

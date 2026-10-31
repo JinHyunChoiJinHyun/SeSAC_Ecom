@@ -21,7 +21,7 @@ from config import(
     PREDICTION_MODEL_NAME,
     PREDICTIONS_TABLE,
     PROMOTION_TARGET_PERCENTILES,
-    get_model_file_name
+    get_model_name
 )
 
 # 모듈 경로에 현재 루트 추가
@@ -81,8 +81,8 @@ def predict_purchase_probability(prediction_hour: int, predicted_at: datetime) -
         return pd.DataFrame(columns=PREDICTION_RESULT_COLUMNS)
 
     # 저장된 모델 불러와 구매 확률 계산
-    model_file_name = get_model_file_name(PREDICTION_MODEL_NAME, prediction_hour)
-    model = joblib.load(MODEL_DIR / f"{model_file_name}.joblib")
+    model_name = get_model_name(PREDICTION_MODEL_NAME, prediction_hour)
+    model = joblib.load(MODEL_DIR / f"{model_name}.joblib")
 
     purchase_probability = model.predict_proba(df[FEATURE_COLUMNS])[:, 1] # 구매 확률(두번째 행)만 반환
 
@@ -91,39 +91,47 @@ def predict_purchase_probability(prediction_hour: int, predicted_at: datetime) -
     result_df["predicted_at"] = predicted_at
     result_df["purchase_probability"] = purchase_probability
     result_df["promotion_segment"] = assign_promotion_segment(result_df["purchase_probability"])
-    result_df["model_name"] = model_file_name
+    result_df["model_name"] = model_name
 
     logger.info("%s시간 예측 완료 (%s건)", prediction_hour, len(result_df))
     return result_df[PREDICTION_RESULT_COLUMNS]
 
-def save_predictions(prediction_results_df: pd.DataFrame) -> None:
+def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime) -> None:
     """예측 결과 DB 저장"""
+
+    # 예측에 사용된 모델들의 이름 저장
+    model_names = [get_model_name(PREDICTION_MODEL_NAME, hour) for hour in PREDICTION_HOURS]
+    model_name_placeholders = ", ".join("?" for _ in model_names) # 실행된 모델의 수만큼 ? 생성
+    
     conn = get_duckdb_connection(read_only=False)
     
     try:
         conn.begin()
 
-        # 예측 결과 테이블 생성
+        # 예측 결과 테이블 생성 (없는 경우만)
         conn.execute(CREATE_PREDICTIONS_TABLE_SQL.read_text(encoding="utf-8"))
 
-        # df를 테이블처럼 사용할 수 있게 등록
-        conn.register("new_predictions", prediction_results_df)
-
-        # 예측 결과 테이블에 동일 날짜/동일 모델로 저장된 결과 존재할 시 삭제 (같은 날 재실행 시 중복 저장 방지)
+        # 실행 날짜 + 실행된 모델 전체의 기존 결과 삭제 (df 값 존재 유무와 관계없이 삭제)
         conn.execute(f"""
             DELETE FROM {PREDICTIONS_TABLE}
-            WHERE CAST(predicted_at AS DATE) IN (SELECT DISTINCT CAST(predicted_at AS DATE) FROM new_predictions)
-            AND model_name IN (SELECT DISTINCT model_name FROM new_predictions)
-        """)
+            WHERE CAST(predicted_at AS DATE) = CAST(? AS DATE)
+            AND model_name IN ({model_name_placeholders})
+        """,[predicted_at, *model_names]) # 첫번쨰 ?에 실행 시각, 나머지 ?에 모델 이름 입력
 
-        # 등록한 df 테이블(new_prediction)을 조회해 예측 결과 테이블에 추가
-        column_list = ", ".join(f'"{column}"' for column in PREDICTION_RESULT_COLUMNS)
-        conn.execute(f"""
-            INSERT INTO {PREDICTIONS_TABLE} ({column_list})
-            SELECT {column_list} FROM new_predictions
-        """)
+        # 새 df 결과 값이 존재할 떄만 값 추가
+        if not prediction_results_df.empty:
 
-        conn.commit()
+            # df를 테이블처럼 사용할 수 있게 등록
+            conn.register("new_predictions", prediction_results_df)
+
+            # 등록한 df 테이블(new_predictions)을 조회해 예측 결과 테이블에 추가
+            column_list = ", ".join(f'"{column}"' for column in PREDICTION_RESULT_COLUMNS)
+            conn.execute(f"""
+                INSERT INTO {PREDICTIONS_TABLE} ({column_list})
+                SELECT {column_list} FROM new_predictions
+            """)
+
+        conn.commit() # 트랜잭션 내 삭제와 삽입 함께 반영 (모두 성공 시 반영 하나라도 실패 시 롤백)
 
     except Exception:
         conn.rollback()
@@ -161,7 +169,6 @@ def summarize_predictions(prediction_results_df: pd.DataFrame) -> pd.DataFrame:
 
     return summary.join(segment_counts)
 
-# 호출 예시: 어제 담은 장바구니 고객 구매 확률 예측해 줘
 def main():
     # 예측 시점 설정
     predicted_at = datetime.now()
@@ -170,16 +177,19 @@ def main():
     predictions = [predict_purchase_probability(hour, predicted_at) for hour in PREDICTION_HOURS]
     non_empty_predictions = [df for df in predictions if not df.empty]
 
-    # 값이 있는 df가 없을 시 종료
-    if not non_empty_predictions:
-        logger.info("저장할 예측 결과가 없습니다.")
-        return
-
     # 시점별 예측 결과 결합
-    prediction_results_df = pd.concat(non_empty_predictions, ignore_index=True)
+    prediction_results_df = (
+        pd.concat(non_empty_predictions, ignore_index=True) # if 조건 만족 시 예측 결과 결합
+        if non_empty_predictions
+        else pd.DataFrame(columns=PREDICTION_RESULT_COLUMNS) # 예측 결과가 모두 비었을 경우 컬럼만 있는 빈 df 생성
+    ) # 엑셀 IF와 같은 문법
 
-    # df 저장
-    save_predictions(prediction_results_df)
+    # df 저장 (결과가 비어도 호출 필요)
+    save_predictions(prediction_results_df, predicted_at)
+
+    if prediction_results_df.empty:
+        logger.info("저장할 예측 결과가 없어 오늘 날짜의 기존 결과만 삭제했습니다.")
+        return
 
     # 실행 결과 요약
     logger.info(
