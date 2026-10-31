@@ -89,8 +89,8 @@ def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> li
         })
 
         # 학습이 끝난 모델 저장        
-        model_file_name = get_model_file_name(model_name, prediction_hour)
-        model_path = MODEL_DIR / f"{model_file_name}.joblib"
+        model_name = get_model_name(model_name, prediction_hour)
+        model_path = MODEL_DIR / f"{model_name}.joblib"
         joblib.dump(model, model_path)
         logger.info("%s시간 %s 완료", prediction_hour, model_name)
 
