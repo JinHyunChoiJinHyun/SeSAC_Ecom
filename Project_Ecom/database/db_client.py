@@ -1,5 +1,8 @@
+import logging
 from pathlib import Path
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 
 # 프로젝트 루트
@@ -7,7 +10,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # DuckDB 파일 경로
 DB_PATH = PROJECT_ROOT / "database" / "synerise.duckdb"
-
 
 # DuckDB 연결 객체 생성 함수
 def get_duckdb_connection(read_only=True):
@@ -36,7 +38,8 @@ def get_duckdb_connection(read_only=True):
         # client.execute("SET lock_configuration = true") # 보안 설정 변경 방지
 
     except Exception as e:
-        print(f"[DuckDB 연결 오류] {repr(e)}")
-        client = None
+        # 원인을 로그로 남기고 에러는 상위로 전파
+        logger.exception("DuckDB 연결 실패: %s (read_only-%s)", DB_PATH, read_only)
+        raise
 
     return client

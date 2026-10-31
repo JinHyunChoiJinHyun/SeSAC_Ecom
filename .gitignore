@@ -4,6 +4,7 @@
 # data 폴더
 synerise_dataset/
 synerise.duckdb
+synerise.duckdb.wal
 delivery_output/
 visualization_output/
 

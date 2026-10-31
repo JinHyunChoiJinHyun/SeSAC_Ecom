@@ -72,11 +72,12 @@ def assign_promotion_segment(purchase_probabilities: pd.Series) -> pd.Series:
 
 def predict_purchase_probability(prediction_hour: int, predicted_at: datetime) -> pd.DataFrame:
     """예측 기준 시점에 대해 구매 확률 계산"""
-    try:
-        df = load_prediction_data(prediction_hour)
-    except ValueError:
+    df = load_prediction_data(prediction_hour)
+
+    # 예측 대상이 없는 경우 빈 df 반환 (모델을 불러오기 전에 확인하여 불필요한 로드 및 빈 입력 예측 방지)
+    if df.empty: 
         # 예측 대상이 없는 경우 빈 df 반환 (장바구니 이벤트가 없거나 이미 구매한 정상 상황)
-        logging.info("%s시간 예측 대상 없음", prediction_hour)
+        logger.info("%s시간 예측 대상 없음", prediction_hour)
         return pd.DataFrame(columns=PREDICTION_RESULT_COLUMNS)
 
     # 저장된 모델 불러와 구매 확률 계산
@@ -127,6 +128,7 @@ def save_predictions(prediction_results_df: pd.DataFrame) -> None:
     except Exception:
         conn.rollback()
         logger.exception("예측 결과 저장 실패 - 변경 사항 되돌림")
+        raise
 
     finally:
         conn.close()
