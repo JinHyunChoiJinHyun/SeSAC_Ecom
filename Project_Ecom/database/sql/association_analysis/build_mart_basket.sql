@@ -9,6 +9,8 @@
         COUNT(DISTINCT sku) AS product_count -- 구매한 상품 종류 수
     FROM clean.product_buy
     WHERE sku IS NOT NULL
+    AND client_id IS NOT NULL
+    AND timestamp IS NOT NULL
     GROUP BY
         client_id,
         timestamp;

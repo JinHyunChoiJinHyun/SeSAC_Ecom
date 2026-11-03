@@ -10,7 +10,7 @@ data_end AS (
 -- 담기 이벤트 + 같은 상품을 다음에 다시 담은 시점 
 -- next_cart가 존재하는 경우 다음 담기 이후의 구매는 다음 담기의 구매로 상정 
 -- (예: 1일에 담은 후 3일에 담고 5일에 구매 -> 3일 담기는 2일 뒤 구매, 1일 담기는 미구매)
-"""
+/*
 -- 재담기 직전(이전 담기 ~ 재담기 사이)에 무슨 일이 있었는지
 -- 재담기 유형 확인 쿼리
 WITH c AS (
@@ -43,7 +43,7 @@ WHERE prev_cart_ts IS NOT NULL
   AND cart_ts <= prev_cart_ts + INTERVAL 30 DAY   -- 데드라인 분석에 영향을 주는 30일 안 재담기만
 GROUP BY 1
 ORDER BY 1;
-"""
+*/
 cart_events AS (
     SELECT
         client_id, 
@@ -134,9 +134,12 @@ SELECT
             / NULLIF(total_purchase_count, 0), 2) AS incremental_capture_rate,
     
     -- 하루당 증가분 (데드라인간 간격을 하루로 통일)
-    ROUND((deadline_purchase_count - prev_purchase_count) * 100.0
-            /NULLIF(total_purchase_count, 0)
-            / ((deadline_hours - prev_deadline_hours) /24.0), 3) AS incremental_capture_per_day,
+    CASE 
+        WHEN prev_deadline_hours = 0 THEN NULL -- 0~1인 경우 이전 누적 비율이 없으므로 NULL로 반환
+        ELSE ROUND((deadline_purchase_count - prev_purchase_count) * 100.0
+            / NULLIF(total_purchase_count, 0)
+            / ((deadline_hours - prev_deadline_hours) /24.0), 3) 
+    END AS incremental_capture_per_day,
     -- 전체 담기 건수 중 데드라인 내 구매한 비율 (전환율)
     ROUND(deadline_purchase_count * 100.0 / NULLIF(total_cart_count, 0), 2) AS cart_conversion_rate
 FROM result

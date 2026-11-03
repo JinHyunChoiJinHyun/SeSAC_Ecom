@@ -32,6 +32,7 @@ SELECT
     p.pair_cnt AS pair_count,
     a.sku_cnt AS sku_a_count,
     b.sku_cnt AS sku_b_count,
+    t.total_cnt AS total_basket_count, -- 역산 및 검증에 사용
     p.pair_cnt * 1.0 / t.total_cnt AS support, -- 전체 주문에서 같이 구매한 비율
     p.pair_cnt * 1.0 / a.sku_cnt AS confidence_a_to_b, -- A를 구매한 경우 B를 함께 구매한 비율
     p.pair_cnt * 1.0 / b.sku_cnt AS confidence_b_to_a, -- B를 구매한 경우 A를 함께 구매한 비율
