@@ -1,5 +1,9 @@
+// 관리자 화면의 기록 조회, 검색, 상세 표시와 자동 갱신을 담당합니다.
 'use strict';
 (() => {
+  // =========================================================
+  // 공통 DOM 접근과 화면 아이콘 정의
+  // =========================================================
   const $ = id => document.getElementById(id);
   const icons = {
     grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -16,6 +20,9 @@
   document.querySelectorAll('[data-icon]').forEach(el => {
     el.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[el.dataset.icon] || ''}</svg>`;
   });
+  // =========================================================
+  // 표시 문구, 조회 상태와 HTML 문자열 보호
+  // =========================================================
   const labels = { completed: '분석 완료', failed: '실패·오류', running: '처리 중', unverified: '검증 필요', unfinished: '종료 미확인', unknown: '확인 불가' };
   const deliveryLabels = { success: '전송 완료', partial_success: '일부 실패', failed: '전송 실패', unknown: '미기록' };
   const viewLabels = { overview: ['운영 현황', 'OVERVIEW', '분석 요청의 흐름과 처리 결과를 확인하세요.'], requests: ['요청 내역', 'REQUESTS', '질문부터 최종 결과까지, 요청별 처리 기록을 살펴보세요.'], errors: ['오류 모니터링', 'ERROR MONITOR', '분석 실패와 오류 신호가 남은 요청을 확인하세요.'], guide: ['연결 안내', 'GETTING STARTED', '기존 프로젝트와 안전하게 연결하는 방법을 확인하세요.'] };
@@ -27,17 +34,26 @@
   const deliveryText = status => deliveryLabels[status] || '미기록';
   const sourceText = source => ({ log: '기존 로그', telemetry: '운영 기록' }[source] || '미기록');
 
+  // =========================================================
+  // 현재 화면과 입력값을 API 검색 조건으로 변환
+  // =========================================================
   function params(includePage = true) {
     const p = new URLSearchParams({ q: $('search').value.trim(), status: state.view === 'errors' ? 'failed' : $('status-filter').value, start: $('start-date').value, end: $('end-date').value });
     if (includePage) { p.set('page', state.page); p.set('page_size', state.pageSize); }
     return p;
   }
 
+  // =========================================================
+  // 짧은 작업 안내 표시
+  // =========================================================
   function toast(message) {
     $('toast').textContent = message; $('toast').hidden = false;
     clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2500);
   }
 
+  // =========================================================
+  // JSON 조회와 HTTP 오류 안내
+  // =========================================================
   async function fetchJSON(url, signal) {
     const response = await fetch(url, { signal, cache: 'no-store', headers: { Accept: 'application/json' } });
     if (!response.ok) {
@@ -47,6 +63,9 @@
     return response.json();
   }
 
+  // =========================================================
+  // 이전 조회 취소, 최신 응답 확인과 목록 갱신
+  // =========================================================
   async function load(quiet = false) {
     if ($('start-date').value && $('end-date').value && $('start-date').value > $('end-date').value) {
       $('connection-error').hidden = false; $('connection-message').textContent = '시작 날짜가 종료 날짜보다 늦습니다.'; return;
@@ -76,6 +95,9 @@
     }
   }
 
+  // =========================================================
+  // 요약 지표, 요청 목록, 페이지와 CSV 링크 렌더링
+  // =========================================================
   function render(data) {
     const s = data.summary, counts = s.counts;
     $('mode-chip').textContent = 'PROJECT LOGS';
@@ -104,6 +126,9 @@
     $('export').href = `/api/export.csv?${params(false)}`;
   }
 
+  // =========================================================
+  // 일별 요청·실패 건수를 SVG 차트로 표현
+  // =========================================================
   function drawTrend(days) {
     const container = $('trend-chart');
     if (!days.length) { container.innerHTML = '<div class="chart-empty">선택한 기간에 요청 기록이 없습니다.</div>'; return; }
@@ -118,8 +143,14 @@
     container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="일별 요청 수. ${esc(days.map(d => `${d.date} 전체 ${d.total}건 오류 ${d.failed}건`).join(', '))}">${ticks.map(v => `<line x1="${left}" y1="${y(v)}" x2="${w - right}" y2="${y(v)}" stroke="#edf0f6"/><text x="${left - 10}" y="${y(v) + 3}" text-anchor="end" fill="#adb6c7" font-size="9">${v}</text>`).join('')}<text x="${left - 10}" y="8" text-anchor="end" fill="#adb6c7" font-size="9">건</text><path d="${line('total')} L${x(days.length - 1)},${h - bottom} L${x(0)},${h - bottom}Z" fill="#7b83ed" opacity=".06"/><path d="${line('total')}" fill="none" stroke="#7b83ed" stroke-width="2"/><path d="${line('failed')}" fill="none" stroke="#e3a0ad" stroke-width="1.5"/>${marks}${days.map((d, i) => i % step === 0 || i === days.length - 1 ? `<text x="${x(i)}" y="${h - 6}" text-anchor="${i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'}" font-size="9" fill="#a3aec2">${esc(d.date.slice(5).replace('-', '.'))}</text>` : '').join('')}</svg>`;
   }
 
+  // =========================================================
+  // 첨부 파일 크기를 KB 또는 MB로 표시
+  // =========================================================
   function bytes(n) { return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`; }
 
+  // =========================================================
+  // 요청 상세와 첨부 미리보기·로그 표시
+  // =========================================================
   async function showDetail(id, quiet = false) {
     const seq = ++state.detailSequence;
     if (!quiet) {
@@ -146,6 +177,9 @@
     }
   }
 
+  // =========================================================
+  // 메뉴에 따른 제목·필터·표시 영역 전환
+  // =========================================================
   function setView(view) {
     state.view = view; state.page = 1;
     const [title, eyebrow, subtitle] = viewLabels[view];
@@ -159,7 +193,13 @@
     if (view !== 'guide') load();
   }
 
+  // =========================================================
+  // 검색 조건 초기화와 첫 페이지 재조회
+  // =========================================================
   function resetFilters() { $('search').value = ''; $('status-filter').value = 'all'; $('start-date').value = ''; $('end-date').value = ''; state.page = 1; load(); }
+  // =========================================================
+  // 검색 지연 처리와 필터·페이지·상세 창 이벤트 연결
+  // =========================================================
   let searchTimer;
   $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.page = 1; load(); }, 250); });
   ['status-filter', 'start-date', 'end-date'].forEach(id => $(id).addEventListener('change', () => { state.page = 1; load(); }));
@@ -174,6 +214,12 @@
   $('detail-dialog').addEventListener('click', event => { if (event.target === $('detail-dialog')) { const r = event.target.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) event.target.close(); } });
   $('detail-dialog').addEventListener('close', () => { state.selected = null; state.detailSequence++; state.previousFocus?.focus(); });
   $('auto-refresh').addEventListener('change', () => { clearInterval(state.timer); if ($('auto-refresh').checked) { state.timer = setInterval(() => { if (!document.hidden && state.view !== 'guide' && !state.loading) load(true); }, 10000); toast('화면이 열려 있는 동안 10초마다 갱신합니다.'); } });
+  // =========================================================
+  // 화면 크기 변경에 따른 차트 갱신
+  // =========================================================
   if (typeof ResizeObserver !== 'undefined') { let resizeTimer; new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.data && state.view === 'overview') drawTrend(state.data.summary.timeline); }, 100); }).observe($('trend-chart')); }
+  // =========================================================
+  // 화면 진입 시 최초 요청 목록 조회
+  // =========================================================
   load();
 })();

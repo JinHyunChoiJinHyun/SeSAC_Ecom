@@ -1,3 +1,5 @@
+"""표준 라이브러리 HTTP 서버로 관리자 인증, 정적 화면과 기록 조회 API를 제공합니다."""
+
 from __future__ import annotations
 
 import base64
@@ -11,10 +13,17 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .service import Dashboard, Settings, export_csv, select_runs, summary
 
+# 브라우저에 제공할 정적 파일의 기준 폴더입니다.
 STATIC = Path(__file__).parent / "static"
 
 
+# =========================================================
+# 인증 설정 및 HTTP 서버 생성
+# =========================================================
+
 def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", password=""):
+    """인증 설정을 검증하고 요청별 핸들러를 사용하는 HTTP 서버를 생성합니다."""
+    # 계정 일부만 설정하거나 외부 접속에 인증이 없으면 시작하지 않습니다.
     if bool(username) != bool(password):
         raise ValueError("관리자 아이디와 비밀번호를 모두 설정해 주세요.")
     if host not in {"127.0.0.1", "localhost", "::1"} and not username:
@@ -22,12 +31,15 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
     dashboard = Dashboard(settings)
 
     class Handler(BaseHTTPRequestHandler):
+        """GET 요청에 화면, 기록 조회 API와 허용된 결과 파일을 제공합니다."""
         server_version = "EcomAdmin/1.0"
 
         def log_message(self, format, *args):
+            """URL에 포함될 수 있는 질문·검색어의 기본 접근 로그 출력을 생략합니다."""
             pass  # 질문·검색어가 웹 서버 콘솔에 노출되지 않습니다.
 
         def send_data(self, data, content_type="application/json; charset=utf-8", status=200, disposition=None):
+            """본문을 전송하고 캐시 방지, 콘텐츠 형식과 보안 헤더를 설정합니다."""
             if isinstance(data, str):
                 data = data.encode("utf-8")
             self.send_response(status)
@@ -46,20 +58,25 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
             self.wfile.write(data)
 
         def error(self, status, message):
+            """오류 응답을 detail 필드가 있는 JSON 형식으로 통일합니다."""
             self.send_data(json.dumps({"detail": message}, ensure_ascii=False), status=status)
 
         def authorized(self):
+            """관리자 계정을 확인하거나 계정 미설정 시 루프백 접속만 허용합니다."""
+            # 계정을 생략한 구성에서는 루프백 주소의 요청만 허용합니다.
             if not username:
                 return self.client_address[0] in {"127.0.0.1", "::1"}
             raw = self.headers.get("Authorization", "")
             try:
                 scheme, token = raw.split(" ", 1)
                 user, key = base64.b64decode(token, validate=True).decode("utf-8").split(":", 1)
+                # 인증 문자열 비교에는 compare_digest를 사용합니다.
                 return scheme.lower() == "basic" and secrets.compare_digest(user.encode(), username.encode()) and secrets.compare_digest(key.encode(), password.encode())
             except (ValueError, UnicodeError):
                 return False
 
         def do_GET(self):
+            """인증 후 라우팅하고 입력·파일·서버 오류를 HTTP 응답으로 변환합니다."""
             if not self.authorized():
                 self.error(401, "관리자 인증이 필요합니다.")
                 return
@@ -75,6 +92,7 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 self.error(500, "기록 조회 중 오류가 발생했습니다.")
 
         def route(self):
+            """URL과 필터를 해석해 화면, 목록·상세 API, CSV와 파일 다운로드로 분기합니다."""
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
@@ -87,6 +105,7 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                     return self.error(404, "파일을 찾지 못했습니다.")
                 mime = {"app.js": "application/javascript; charset=utf-8", "styles.css": "text/css; charset=utf-8", "favicon.svg": "image/svg+xml"}[name]
                 return self.send_data((STATIC / name).read_bytes(), mime)
+            # 목록 조회와 CSV 내보내기는 같은 검색·상태·날짜 조건을 사용합니다.
             if path in {"/api/requests", "/api/export.csv"}:
                 q, status, start, end = get("q"), get("status", "all"), get("start"), get("end")
                 if len(q) > 300 or status not in {"all", "completed", "failed", "running", "unverified", "unfinished", "unknown"}:
@@ -100,6 +119,7 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 runs = select_runs(snap["runs"], q, status, start, end)
                 if path.endswith(".csv"):
                     return self.send_data(export_csv(runs), "text/csv; charset=utf-8", disposition='attachment; filename="ecom-requests.csv"')
+                # 요약 통계는 전체 필터 결과로 계산하고 목록에만 페이지 범위를 적용합니다.
                 page, size = int(get("page", "1")), int(get("page_size", "12"))
                 if page < 1 or not 1 <= size <= 100:
                     raise ValueError()
@@ -115,14 +135,17 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 if len(parts) != 2:
                     return self.error(404, "파일을 찾지 못했습니다.")
                 run = next((r for r in dashboard.snapshot()["runs"] if r["id"] == parts[0]), None)
+                # 해당 요청에 기록되고 경로 검증을 통과한 파일만 선택합니다.
                 refs = [ref for raw in run.get("files", []) if (ref := dashboard.file_ref(raw))] if run else []
                 ref = next((ref for ref in refs if ref["id"] == parts[1]), None)
                 if not ref:
                     return self.error(404, "파일을 찾지 못했습니다.")
                 file = (settings.project.resolve() / ref["relative"]).resolve()
+                # 파일을 열기 직전에도 허용된 위치와 확장자를 확인합니다.
                 if not dashboard.file_ref(str(file)):
                     return self.error(404, "파일을 찾지 못했습니다.")
                 from urllib.parse import quote
+                # 이미지는 기본 미리보기로 제공하고 다운로드 요청은 첨부 응답으로 보냅니다.
                 inline = ref["kind"] in {"png", "jpg", "jpeg"} and get("download") != "true"
                 disposition = ("inline" if inline else "attachment") + "; filename*=UTF-8''" + quote(ref["name"])
                 mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
@@ -134,6 +157,7 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 with file.open("rb") as source:
+                    # 파일 전체를 메모리에 올리지 않고 64KB씩 전송합니다.
                     while chunk := source.read(65536):
                         self.wfile.write(chunk)
                 return
