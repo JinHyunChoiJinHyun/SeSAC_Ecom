@@ -1,3 +1,4 @@
+from env.model_settings import model_request
 import pandas as pd
 
 from langchain_core.messages import (
@@ -80,7 +81,7 @@ def main():
 
             with request_log(
                 user_input
-            ) as run_id:
+            ) as run_id, model_request() as llm_config:
 
                 # =========================================
                 # Graph 실행
@@ -95,6 +96,7 @@ def main():
                             )
                         ],
 
+                        "llm_config": llm_config.public(),
                         "completed_steps":
                             [],
                     },
@@ -132,14 +134,14 @@ def main():
 
 
                     # -------------------------------------
-                    # 여기 출력되는 final_answer 안에
+                    # 여기 출력되는 final_answer에는 수행한 작업에 따라
                     #
                     # - 분석 결과
                     # - 전처리 결과
                     # - 시각화 결과
                     # - 기반 데이터 검증 SQL
                     #
-                    # 이 모두 포함됩니다.
+                    # 해당 결과가 포함되며, 생성된 SQL이 있으면 검증용으로 덧붙입니다.
                     # -------------------------------------
 
                     print(

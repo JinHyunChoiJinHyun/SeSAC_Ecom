@@ -1,3 +1,4 @@
+from langchain.agents.structured_output import ToolStrategy
 """
 Visualization Agent
 
@@ -142,19 +143,21 @@ class VisualizationPlan(BaseModel):
 
 
 # =========================================================
-# LLM
+# 요청별 LLM 생성 정책
+# 전역 LLM을 두지 않고 get_visualization_agent()에서 요청에 고정된 설정을 사용합니다.
 # =========================================================
 
-llm = get_openai_chat_client()
 
 
 # =========================================================
 # Visualization Agent
 # =========================================================
 
-if llm is not None:
+def get_visualization_agent(model_config=None):
+    """현재 요청의 고정된 모델로 Agent를 생성합니다."""
+    llm = get_openai_chat_client(model_config=model_config)
 
-    visualization_agent = create_agent(
+    return create_agent(
 
         model=llm,
 
@@ -162,7 +165,7 @@ if llm is not None:
         # 실제 matplotlib 실행은 nodes.py가 담당
         tools=[],
 
-        response_format=VisualizationPlan,
+        response_format=ToolStrategy(VisualizationPlan),
 
         system_prompt="""
 당신은 Synerise 고객 행동 분석 결과를
@@ -956,8 +959,3 @@ heatmap_columns에 포함하지 마십시오.
 VisualizationPlan 형식으로 반환하십시오.
 """
     )
-
-
-else:
-
-    visualization_agent = None

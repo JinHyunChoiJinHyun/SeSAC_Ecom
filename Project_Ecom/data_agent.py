@@ -1,3 +1,4 @@
+from langchain.agents.structured_output import ToolStrategy
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -88,19 +89,21 @@ class DataQueryPlan(BaseModel):
 
 
 # =========================================================
-# LLM
+# 요청별 LLM 생성 정책
+# 전역 LLM을 두지 않고 get_data_agent()에서 요청에 고정된 설정을 사용합니다.
 # =========================================================
 
-llm = get_openai_chat_client()
 
 
 # =========================================================
 # Data Agent
 # =========================================================
 
-if llm is not None:
+def get_data_agent(model_config=None):
+    """현재 요청의 고정된 모델로 Agent를 생성합니다."""
+    llm = get_openai_chat_client(model_config=model_config)
 
-    data_agent = create_agent(
+    return create_agent(
 
         model=llm,
 
@@ -112,7 +115,7 @@ if llm is not None:
         # -------------------------------------------------
         tools=[],
 
-        response_format=DataQueryPlan,
+        response_format=ToolStrategy(DataQueryPlan),
 
         system_prompt="""
 당신은 Synerise 고객 행동 데이터를 담당하는
@@ -1942,16 +1945,13 @@ DataQueryPlan의 데이터 범위 메타데이터는
     )
 
 
-else:
-
-    data_agent = None
-
-
 # =========================================================
 # 단독 테스트
 # =========================================================
 
 if __name__ == "__main__":
+
+    data_agent = get_data_agent()
 
     if data_agent is None:
 
