@@ -27,17 +27,17 @@ from supervisor_agent import (
 
 
 from data_agent import (
-    data_agent,
+    get_data_agent,
 )
 
 
 from prep_agent import (
-    prep_agent,
+    get_prep_agent,
 )
 
 
 from visualization_agent import (
-    visualization_agent,
+    get_visualization_agent,
 )
 
 
@@ -596,6 +596,12 @@ def supervisor_node(
     ]
 ]:
 
+    # Slack/터미널 외부에서 그래프를 직접 호출해도 요청 내 모델은 고정합니다.
+    from env.model_settings import get_request_config
+    state = dict(state)
+    if not state.get("llm_config"):
+        state["llm_config"] = get_request_config().public()
+
     print(
         "[Supervisor Agent]"
     )
@@ -631,6 +637,7 @@ def supervisor_node(
 
 
     decision = route_request(
+        model_config=state.get("llm_config"),
 
         user_query=
             question,
@@ -676,6 +683,7 @@ def supervisor_node(
         return Command(
 
             update={
+                "llm_config": state["llm_config"],
                 "question":
                     question,
 
@@ -703,6 +711,7 @@ def supervisor_node(
     return Command(
 
         update={
+            "llm_config": state["llm_config"],
             "question":
                 question,
 
@@ -736,21 +745,6 @@ def data_node(
     )
 
 
-    if data_agent is None:
-
-        return Command(
-
-            update={
-                "data_error":
-                    "Data Agent 연결 실패",
-
-                "error":
-                    "Data Agent 연결 실패",
-            },
-
-            goto=
-                "final_response",
-        )
 
 
     question = (
@@ -767,6 +761,7 @@ def data_node(
         )
 
 
+        data_agent = get_data_agent(state.get("llm_config"))
         result = data_agent.invoke(
             {
                 "messages": [
@@ -1309,21 +1304,6 @@ def prep_node(
     )
 
 
-    if prep_agent is None:
-
-        return Command(
-
-            update={
-                "prep_error":
-                    "Prep Agent 연결 실패",
-
-                "error":
-                    "Prep Agent 연결 실패",
-            },
-
-            goto=
-                "final_response",
-        )
 
 
     df = get_analysis_dataframe(
@@ -1431,6 +1411,7 @@ dtype:
 
     try:
 
+        prep_agent = get_prep_agent(state.get("llm_config"))
         result = prep_agent.invoke(
             {
                 "messages": [
@@ -1939,21 +1920,6 @@ def visualization_node(
     )
 
 
-    if visualization_agent is None:
-
-        return Command(
-
-            update={
-                "visualization_error":
-                    "Visualization Agent 연결 실패",
-
-                "error":
-                    "Visualization Agent 연결 실패",
-            },
-
-            goto=
-                "final_response",
-        )
 
 
     df = get_analysis_dataframe(
@@ -2179,6 +2145,7 @@ datetime 컬럼:
 
     try:
 
+        visualization_agent = get_visualization_agent(state.get("llm_config"))
         result = visualization_agent.invoke(
             {
                 "messages": [

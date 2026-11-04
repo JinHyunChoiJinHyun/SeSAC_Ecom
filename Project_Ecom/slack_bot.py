@@ -30,6 +30,7 @@ python slack_bot.py
 
 
 import logging
+import json
 import os
 import time
 
@@ -153,6 +154,10 @@ def get_mention_question(
     채널에서 Bot을 멘션한 메시지에서
     Bot 호출 표시를 제거하고
     실제 질문만 반환합니다.
+
+    무시할 이벤트는 None을 반환합니다.
+    유효한 멘션에서 질문이 비어 있으면 빈 문자열을 반환합니다.
+    호출 흐름의 _enqueue()에서 이를 확인하고 입력 안내를 보냅니다.
     """
 
     if (
@@ -231,6 +236,7 @@ def run_project_agent(
     from langchain_core.messages import (
         HumanMessage,
     )
+    from env.model_settings import get_request_config
 
 
     result = (
@@ -243,6 +249,7 @@ def run_project_agent(
                     )
                 ],
 
+                "llm_config": get_request_config().public(),
                 "completed_steps":
                     [],
             },
@@ -294,7 +301,7 @@ class SlackBridge:
 
     동시에 여러 요청이 들어오더라도
     ThreadPoolExecutor(max_workers=1)을 사용해
-    한 번에 하나씩 분석합니다.
+    답변 생성부터 Slack 결과 전송까지 한 번에 하나의 요청을 처리합니다.
     """
 
     def __init__(
@@ -322,7 +329,7 @@ class SlackBridge:
 
 
         # -------------------------------------------------
-        # 동시에 여러 분석이 실행되지 않도록
+        # 답변 생성과 Slack 결과 전송을 포함한 요청을 순차 처리하도록
         # Worker 1개만 사용합니다.
         # -------------------------------------------------
 
@@ -510,7 +517,8 @@ class SlackBridge:
 
             # -------------------------------------------------
             # 접수 시점의 실행 중 + 대기 중 요청 수를 안내합니다.
-            # 상태 메시지를 먼저 게시해 작업 시작 전에 ts를 확보합니다.
+            # 작업 시작 전에 상태 메시지 게시를 시도하고, 성공 시 반환된 ts로 수정합니다.
+            # 게시에 실패하거나 ts가 없어도 요청 처리는 계속합니다.
             # -------------------------------------------------
             ahead = sum(not future.done() for future in self.pending)
             status_ts = self._post_status(
@@ -610,6 +618,7 @@ class SlackBridge:
                     ),
             )
 
+            return True
 
         except Exception as exc:
 
@@ -617,6 +626,7 @@ class SlackBridge:
                 "Slack 안내 전송 실패 (%s)",
                 type(exc).__name__,
             )
+            return False
 
 
     # =====================================================
@@ -630,6 +640,39 @@ class SlackBridge:
         client,
         status_ts=None,
     ):
+        # 결과 검증과 Slack 전송까지 같은 요청 ID로 기록합니다.
+        from env.logger import request_log
+
+        from env.model_settings import model_request, ModelSettingsError
+
+        with request_log(question):
+            try:
+                with model_request():
+                    return self._process_request(event, question, client, status_ts)
+            except ModelSettingsError:
+                LOGGER.error("요청 모델 설정을 확인하지 못했습니다.")
+                if not self._set_status(client, event, status_ts, STATUS_FAILED):
+                    self._notify(client, event, STATUS_FAILED)
+                self._record_result(event, "failed", "not_attempted", error_type="ModelSettingsError")
+
+    def _record_result(self, event, analysis_status, delivery_status="unknown", **details):
+        """안내 문구 대신 명시적인 처리 결과를 공통 로그에 기록합니다."""
+        from env.logger import get_logger
+
+        get_logger().info(
+            "ADMIN_RESULT %s",
+            json.dumps(
+                {
+                    "analysis_status": analysis_status,
+                    "delivery_status": delivery_status,
+                    "channel": event.get("channel", ""),
+                    **details,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def _process_request(self, event, question, client, status_ts=None):
         # =================================================
         # 처리 시작 상태와 경과 시간 기록
         # =================================================
@@ -654,14 +697,22 @@ class SlackBridge:
                 "프로젝트 실행 실패 (%s)", type(exc).__name__,
             )
             # 기존 상태 수정에 실패한 경우에만 새 실패 안내를 보냅니다.
-            if not self._set_status(client, event, status_ts, STATUS_FAILED):
-                self._notify(client, event, STATUS_FAILED)
+            notified = self._set_status(client, event, status_ts, STATUS_FAILED)
+            if not notified:
+                notified = self._notify(client, event, STATUS_FAILED)
+            # 실패 안내 전송 여부와 답변 생성 실패를 별도로 기록합니다.
+            self._record_result(
+                event, "failed", "not_attempted",
+                failure_notice_status="success" if notified else "failed",
+                error_type=type(exc).__name__,
+            )
             return
 
         # =================================================
-        # 처리 완료 상태 안내
-        # 결과 생성 시간만 표시하고 기존 Delivery로 결과를 전송합니다.
+        # 답변 생성·검증 완료 안내 및 결과 전송 시작
+        # 표시 시간은 결과 생성·검증까지이며 Slack 전송 완료를 뜻하지 않습니다.
         # =================================================
+        self._record_result(event, "completed")
         elapsed = time.perf_counter() - started
         self._set_status(
             client, event, status_ts,
@@ -671,16 +722,11 @@ class SlackBridge:
         # =================================================
         # Delivery Agent 실행
         # =================================================
-        #
-        # 여기에서
-        #
-        # final_answer
-        # CSV
-        # PNG
-        # Model 결과
-        # Experiment 결과
-        #
-        # 를 Slack으로 전달합니다.
+        # 최종 답변을 전송하고, 첨부 가능한 시각화 파일과
+        # Model / Experiment의 별도 결과 파일이 있으면 함께 전송합니다.
+        # CSV용 결과 DataFrame 선택은 별도 결과 파일 수집과 독립적이며,
+        # Experiment → Model → Prep → Data 순서로 선택합니다.
+        # 행 수 제한 등 전송 정책에 따라 CSV 생성·첨부 여부를 결정합니다.
         # =================================================
 
         try:
@@ -712,6 +758,9 @@ class SlackBridge:
 
         except Exception as exc:
 
+            self._record_result(
+                event, "completed", "failed", error_type=type(exc).__name__,
+            )
             LOGGER.exception(
                 "Delivery Agent 실행 실패 (%s)",
                 type(exc).__name__,
@@ -734,6 +783,12 @@ class SlackBridge:
 
             return
 
+
+        # 답변 생성과 Slack 전송 결과를 구분합니다.
+        delivery_status = delivery_result.get("status", "unknown")
+        if delivery_status not in {"success", "failed", "partial_success"}:
+            delivery_status = "unknown"
+        self._record_result(event, "completed", delivery_status)
 
         # =================================================
         # Delivery 실패
@@ -961,7 +1016,6 @@ def main():
 
     from env.logger import (
         configure_logging,
-        request_log,
     )
 
 
@@ -997,19 +1051,16 @@ def main():
         question,
     ):
 
-        with request_log(
-            question
-        ):
+        # 요청 로그는 SlackBridge에서 결과 검증과 전송까지 함께 관리합니다.
+        return (
+            run_project_agent(
+                graph=
+                    graph,
 
-            return (
-                run_project_agent(
-                    graph=
-                        graph,
-
-                    question=
-                        question,
-                )
+                question=
+                    question,
             )
+        )
 
 
     # =====================================================

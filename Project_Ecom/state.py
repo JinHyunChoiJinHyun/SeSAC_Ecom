@@ -19,6 +19,9 @@ class AgentState(MessagesState):
     # =====================================================
 
     # 사용자의 원래 질문
+    # 요청 시작 때 고정한 채팅 모델. API 키는 포함하지 않습니다.
+    llm_config: dict[str, str]
+
     question: str
 
     # Supervisor가 선택한 다음 Agent

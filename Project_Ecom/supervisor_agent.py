@@ -49,10 +49,12 @@ class RouteDecision(BaseModel):
 
 
 # =========================================================
-# LLM 연결
+# 요청별 LLM 생성 정책
+# route_request()에서 전달받은 요청별 모델 설정으로 LLM을 생성합니다.
+# 전역 LLM을 두지 않아 모델 변경이 이후 새 요청에 반영됩니다.
 # =========================================================
 
-llm = get_openai_chat_client()
+
 
 
 # =========================================================
@@ -270,7 +272,10 @@ def route_request(
     has_model_result: bool,
     has_experiment_result: bool,
     has_visualization_result: bool,
+    model_config=None,
 ):
+
+    llm = get_openai_chat_client(model_config=model_config)
 
     if llm is None:
         return None
@@ -354,7 +359,7 @@ def route_request(
 
         router = (
             llm.with_structured_output(
-                RouteDecision
+                RouteDecision, method="function_calling"
             )
         )
 
