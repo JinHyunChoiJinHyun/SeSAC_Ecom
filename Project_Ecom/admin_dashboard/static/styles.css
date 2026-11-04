@@ -64,3 +64,21 @@ dialog{border:1px solid var(--border);padding:0;border-radius:14px;width:min(780
 /* 동작 줄이기 설정에 맞춰 전환 효과 해제 */
 /* ========================================================= */
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+
+/* 날짜 빠른 선택은 기존 강조 색상을 사용하고 작은 화면에서는 줄바꿈합니다. */
+.date-filter { display:flex; flex-wrap:wrap; align-items:center; gap:9px 14px; min-width:0; }
+.date-presets { display:flex; flex-wrap:wrap; gap:5px; }
+.date-presets button { padding:7px 10px; border:1px solid var(--border); border-radius:6px; background:#fff; color:var(--sub); font-size:11px; white-space:nowrap; }
+.date-presets button:hover { background:var(--brand-soft); color:var(--brand); }
+.date-presets button.active { background:var(--brand); border-color:var(--brand); color:#fff; }
+.date-note { flex-basis:100%; color:var(--sub); font-size:10px; line-height:1.6; }
+a[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
+
+/* 모델 설정 영역: 기존 화면 구성과 별도로 간단하게 표시합니다. */
+.llm-settings { display:flex; flex-wrap:wrap; align-items:center; gap:12px 24px; padding:18px 22px; margin:0 0 18px; background:#fff; border:1px solid #e4e8f0; border-radius:12px; }
+.llm-settings h2 { font-size:15px; margin:0 0 7px; }
+.llm-settings p { margin:0; font-size:12px; overflow-wrap:anywhere; }
+.llm-controls { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-left:auto; }
+.llm-controls select { max-width:100%; padding:8px; border:1px solid #d8deea; border-radius:6px; }
+#llm-feedback, .llm-note { flex-basis:100%; color:#59657a; }
+@media (max-width:640px) { .llm-controls { margin-left:0; width:100%; } .llm-controls select { width:100%; } }

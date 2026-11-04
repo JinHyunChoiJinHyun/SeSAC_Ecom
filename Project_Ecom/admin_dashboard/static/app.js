@@ -1,4 +1,4 @@
-// 관리자 화면의 기록 조회, 검색, 상세 표시와 자동 갱신을 담당합니다.
+// 관리자 화면의 기록 조회·검색·상세 표시·자동 갱신과 모델 설정 조회·변경을 담당합니다.
 'use strict';
 (() => {
   // =========================================================
@@ -26,7 +26,7 @@
   const labels = { completed: '분석 완료', failed: '실패·오류', running: '처리 중', unverified: '검증 필요', unfinished: '종료 미확인', unknown: '확인 불가' };
   const deliveryLabels = { success: '전송 완료', partial_success: '일부 실패', failed: '전송 실패', unknown: '미기록' };
   const viewLabels = { overview: ['운영 현황', 'OVERVIEW', '분석 요청의 흐름과 처리 결과를 확인하세요.'], requests: ['요청 내역', 'REQUESTS', '질문부터 최종 결과까지, 요청별 처리 기록을 살펴보세요.'], errors: ['오류 모니터링', 'ERROR MONITOR', '분석 실패와 오류 신호가 남은 요청을 확인하세요.'], guide: ['연결 안내', 'GETTING STARTED', '기존 프로젝트와 안전하게 연결하는 방법을 확인하세요.'] };
-  const state = { view: 'overview', page: 1, pageSize: 12, data: null, loading: false, sequence: 0, selected: null, detailSequence: 0, controller: null, timer: null, previousFocus: null };
+  const state = { view: 'overview', page: 1, pageSize: 12, data: null, loading: false, sequence: 0, selected: null, detailSequence: 0, controller: null, timer: null, previousFocus: null, period: '30', dateContext: null, periodTimer: null };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const number = n => new Intl.NumberFormat('ko-KR').format(n);
   const seconds = n => typeof n === 'number' && Number.isFinite(n) ? n.toFixed(1) : '—';
@@ -41,6 +41,50 @@
     const p = new URLSearchParams({ q: $('search').value.trim(), status: state.view === 'errors' ? 'failed' : $('status-filter').value, start: $('start-date').value, end: $('end-date').value });
     if (includePage) { p.set('page', state.page); p.set('page_size', state.pageSize); }
     return p;
+  }
+
+  // 상대 기간은 서버의 달력 날짜로 계산해 브라우저 시간대 차이를 배제합니다.
+  // 직접 입력(custom)은 날짜가 바뀌거나 화면을 이동해도 그대로 유지합니다.
+  function updatePeriodButtons() {
+    document.querySelectorAll('[data-period]').forEach(button => {
+      const selected = button.dataset.period === state.period;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+  }
+
+  function applyPeriodDates() {
+    if (state.period === 'custom') return;
+    if (state.period === 'all') {
+      $('start-date').value = ''; $('end-date').value = ''; return;
+    }
+    if (!state.dateContext) return;
+    const today = state.dateContext.today;
+    const start = new Date(`${today}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - ({ today: 0, '7': 6, '30': 29 }[state.period]));
+    $('start-date').value = start.toISOString().slice(0, 10);
+    $('end-date').value = today;
+  }
+
+  function disableExport() {
+    $('export').setAttribute('aria-disabled', 'true');
+    $('export').removeAttribute('href');
+  }
+
+  function validDateRange() {
+    const valid = !$('start-date').value || !$('end-date').value || $('start-date').value <= $('end-date').value;
+    $('start-date').setCustomValidity(valid ? '' : '시작일이 종료일보다 늦습니다.');
+    if (!valid) {
+      $('connection-error').hidden = false;
+      $('connection-message').textContent = '시작일이 종료일보다 늦습니다. 조회 기간을 확인해 주세요.';
+    }
+    return valid;
+  }
+
+  function selectPeriod(period) {
+    state.period = period; state.page = 1;
+    updatePeriodButtons(); applyPeriodDates();
+    return load();
   }
 
   // =========================================================
@@ -64,32 +108,95 @@
   }
 
   // =========================================================
+  // 인증된 모델 설정 조회와 적용. 키는 서버에만 보관합니다.
+  // =========================================================
+  let modelOptions = [], modelBusy = false;
+  function renderModelSettings(data) {
+    modelOptions = data.options;
+    const currentOption = modelOptions.find(item => item.provider === data.current.provider && item.model === data.current.model);
+    $('llm-current').textContent = `${currentOption?.label || data.current.provider} · ${data.current.model}`;
+    $('llm-choice').replaceChildren(...modelOptions.map(item => {
+      const option = document.createElement('option');
+      option.value = item.provider;
+      option.textContent = `${item.label} · ${item.model}${item.available ? '' : ' (API 키 미설정)'}`;
+      option.selected = item.provider === data.current.provider;
+      return option;
+    }));
+    $('llm-choice').disabled = false;
+    $('llm-apply').disabled = false;
+  }
+  async function loadModelSettings() {
+    try {
+      const data = await fetchJSON('/api/model-settings');
+      renderModelSettings(data);
+      $('llm-feedback').textContent = data.warning || '';
+    } catch (error) {
+      $('llm-current').textContent = '설정 확인 필요';
+      $('llm-feedback').textContent = error.message;
+    }
+  }
+  $('llm-apply').addEventListener('click', async () => {
+    if (modelBusy) return;
+    const option = modelOptions.find(item => item.provider === $('llm-choice').value);
+    if (!option) return;
+    modelBusy = true;
+    $('llm-apply').disabled = true;
+    $('llm-feedback').textContent = '모델 설정을 적용하고 있습니다…';
+    try {
+      const response = await fetch('/api/model-settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: option.provider, model: option.model }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || '모델 설정을 적용하지 못했습니다.');
+      renderModelSettings(data);
+      $('llm-feedback').textContent = '저장했습니다. 이후 새로 처리를 시작하는 요청부터 적용됩니다.';
+    } catch (error) {
+      $('llm-feedback').textContent = `적용 실패: ${error.message}`;
+    } finally {
+      modelBusy = false;
+      $('llm-apply').disabled = false;
+    }
+  });
+
+  // =========================================================
   // 이전 조회 취소, 최신 응답 확인과 목록 갱신
   // =========================================================
   async function load(quiet = false) {
-    if ($('start-date').value && $('end-date').value && $('start-date').value > $('end-date').value) {
-      $('connection-error').hidden = false; $('connection-message').textContent = '시작 날짜가 종료 날짜보다 늦습니다.'; return;
-    }
     const seq = ++state.sequence;
     if (state.controller) state.controller.abort();
+    disableExport();
+    if (state.period === 'custom' && !validDateRange()) { state.loading = false; $('refresh').disabled = false; return false; }
     state.controller = new AbortController();
     state.loading = true;
     $('refresh').disabled = true;
     if (!state.data && !quiet) $('request-body').innerHTML = '<tr class="loading"><td colspan="6">운영 기록을 불러오는 중입니다…</td></tr>';
     try {
-      const data = await fetchJSON(`/api/requests?${params()}`, state.controller.signal);
-      if (seq !== state.sequence) return;
+      // 로그를 기록하는 서버 기준의 오늘을 사용하며, 상대 기간은 매 조회 시 재계산합니다.
+      const context = await fetchJSON('/api/date-context', state.controller.signal);
+      if (seq !== state.sequence) return false;
+      state.dateContext = context;
+      applyPeriodDates();
+      validDateRange();
+      $('date-context').textContent = `운영 로그의 요청 접수일 기준 · ${context.timezone} · 종료일 포함`;
+      clearTimeout(state.periodTimer);
+      if (!['custom', 'all'].includes(state.period)) state.periodTimer = setTimeout(() => load(true), context.rollover_ms);
+      const query = params();
+      const data = await fetchJSON(`/api/requests?${query}`, state.controller.signal);
+      if (seq !== state.sequence) return false;
       if (state.page > 1 && data.items.length === 0) { state.page = Math.max(1, Math.ceil(data.total / state.pageSize)); return load(); }
       state.data = data;
-      render(data);
+      render(data, query);
       $('connection-error').hidden = true;
       $('updated-at').textContent = `최근 갱신 ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       if (quiet && state.selected && $('detail-dialog').open) showDetail(state.selected, true);
+      return true;
     } catch (error) {
-      if (error.name === 'AbortError' || seq !== state.sequence) return;
+      if (error.name === 'AbortError' || seq !== state.sequence) return false;
       $('connection-error').hidden = false;
       $('connection-message').textContent = `${error.message}${state.data ? ' · 아래에는 마지막 조회 결과가 남아 있습니다.' : ''}`;
       if (!state.data) { $('request-body').innerHTML = ''; $('empty-state').hidden = false; $('empty-state').querySelector('h3').textContent = '연결을 확인해 주세요'; $('page-info').textContent = '조회 실패'; }
+      return false;
     } finally {
       if (seq === state.sequence) { state.loading = false; $('refresh').disabled = false; }
     }
@@ -98,7 +205,7 @@
   // =========================================================
   // 요약 지표, 요청 목록, 페이지와 CSV 링크 렌더링
   // =========================================================
-  function render(data) {
+  function render(data, query) {
     const s = data.summary, counts = s.counts;
     $('mode-chip').textContent = 'PROJECT LOGS';
     $('side-mode').textContent = `프로젝트 기록 · 로그 ${data.log_files}개`;
@@ -123,7 +230,11 @@
     $('prev-page').disabled = state.page <= 1;
     $('next-page').disabled = state.page * state.pageSize >= data.total;
     $('notices').replaceChildren(...data.notices.map(message => { const p = document.createElement('p'); p.textContent = message; return p; }));
-    $('export').href = `/api/export.csv?${params(false)}`;
+    // 응답을 받은 조회 조건을 그대로 사용해 통계·목록과 CSV의 기간을 맞춥니다.
+    const exportQuery = new URLSearchParams(query);
+    exportQuery.delete('page'); exportQuery.delete('page_size');
+    $('export').href = `/api/export.csv?${exportQuery}`;
+    $('export').removeAttribute('aria-disabled');
   }
 
   // =========================================================
@@ -170,7 +281,7 @@
       }).join('');
       const originMessage = r.origin === 'log' ? '기존 로그에 최종 답변 본문이 없습니다. 현재 로그만으로는 확인할 수 없습니다.' : r.status === 'running' ? '요청을 처리하고 있습니다. 자동 갱신을 켜면 상태를 다시 확인합니다.' : '저장된 최종 답변이 없습니다.';
       const oldOpen = quiet ? Array.from($('detail-content').querySelectorAll('details')).map(x => x.open) : [];
-      $('detail-content').innerHTML = `<div class="detail-inner"><div class="detail-statuses">${badge(r.status)}<span class="badge">Slack · ${deliveryText(r.delivery_status)}</span><span class="badge">${sourceText(r.origin)}</span></div><p class="detail-question">${esc(r.question)}</p><div class="detail-meta"><span>접수 ${esc(r.started_at || '미기록')}</span><span>종료 ${esc(r.ended_at || '미기록')}</span><span>소요 ${seconds(r.duration)}${r.duration == null ? '' : '초'}</span><span>채널 ${esc(r.channel)}</span><span>처리 로그 ${esc(r.handler_status)}</span></div>${(r.warnings || []).map(w => `<p class="detail-warning">${esc(w)}</p>`).join('')}<section class="detail-section"><h3>최종 답변</h3><div class="answer-block ${r.answer ? '' : 'absent'}">${esc(r.answer || originMessage)}</div></section><section class="detail-section"><h3>실행 흐름</h3><div class="stage-list">${r.stages.length ? r.stages.map((s, i) => `${i ? '<span class="stage-arrow">→</span>' : ''}<span class="stage">${esc(s.name)}</span>`).join('') : '<p class="detail-empty">실행 단계 기록 없음</p>'}</div></section><section class="detail-section"><h3>생성 파일</h3>${files || `<p class="detail-empty">${'요청에 연결된 파일 기록이 없거나 파일이 존재하지 않습니다.'}</p>`}</section>${r.errors?.length ? `<section class="detail-section"><h3>오류 신호</h3>${r.errors.map(e => `<p class="error-line">${esc(e)}</p>`).join('')}</section>` : ''}<details><summary>Supervisor 판단 이유</summary><pre class="code-block">${esc(r.decisions?.join('\n\n') || '판단 이유 기록 없음')}</pre></details><details><summary>생성 SQL</summary><pre class="code-block">${esc(r.sql || 'SQL 기록 없음')}</pre></details><details><summary>상세 로그 · 최근 최대 2,000줄</summary><pre class="code-block">${esc(r.logs?.map(l => `${l.time} | ${l.level} | ${l.message}`).join('\n') || '로그 기록 없음')}</pre></details></div>`;
+      $('detail-content').innerHTML = `<div class="detail-inner"><div class="detail-statuses">${badge(r.status)}<span class="badge">Slack · ${deliveryText(r.delivery_status)}</span><span class="badge">${sourceText(r.origin)}</span></div><p class="detail-question">${esc(r.question)}</p><div class="detail-meta"><span>접수 ${esc(r.started_at || '미기록')}</span><span>종료 ${esc(r.ended_at || '미기록')}</span><span>소요 ${seconds(r.duration)}${r.duration == null ? '' : '초'}</span><span>채널 ${esc(r.channel)}</span><span>사용 모델 ${esc(r.llm_provider || '미기록')} · ${esc(r.llm_model || '미기록')}</span><span>처리 로그 ${esc(r.handler_status)}</span></div>${(r.warnings || []).map(w => `<p class="detail-warning">${esc(w)}</p>`).join('')}<section class="detail-section"><h3>최종 답변</h3><div class="answer-block ${r.answer ? '' : 'absent'}">${esc(r.answer || originMessage)}</div></section><section class="detail-section"><h3>실행 흐름</h3><div class="stage-list">${r.stages.length ? r.stages.map((s, i) => `${i ? '<span class="stage-arrow">→</span>' : ''}<span class="stage">${esc(s.name)}</span>`).join('') : '<p class="detail-empty">실행 단계 기록 없음</p>'}</div></section><section class="detail-section"><h3>생성 파일</h3>${files || `<p class="detail-empty">${'요청에 연결된 파일 기록이 없거나 파일이 존재하지 않습니다.'}</p>`}</section>${r.errors?.length ? `<section class="detail-section"><h3>오류 신호</h3>${r.errors.map(e => `<p class="error-line">${esc(e)}</p>`).join('')}</section>` : ''}<details><summary>Supervisor 판단 이유</summary><pre class="code-block">${esc(r.decisions?.join('\n\n') || '판단 이유 기록 없음')}</pre></details><details><summary>생성 SQL</summary><pre class="code-block">${esc(r.sql || 'SQL 기록 없음')}</pre></details><details><summary>상세 로그 · 최근 최대 2,000줄</summary><pre class="code-block">${esc(r.logs?.map(l => `${l.time} | ${l.level} | ${l.message}`).join('\n') || '로그 기록 없음')}</pre></details></div>`;
       if (quiet) $('detail-content').querySelectorAll('details').forEach((x, i) => { x.open = oldOpen[i]; });
     } catch (error) {
       if (seq === state.detailSequence && $('detail-dialog').open) $('detail-content').innerHTML = `<div class="loading-block">${esc(error.message)}<p>창을 닫고 요청을 다시 선택해 주세요.</p></div>`;
@@ -196,14 +307,30 @@
   // =========================================================
   // 검색 조건 초기화와 첫 페이지 재조회
   // =========================================================
-  function resetFilters() { $('search').value = ''; $('status-filter').value = 'all'; $('start-date').value = ''; $('end-date').value = ''; state.page = 1; load(); }
+  function resetFilters() { $('search').value = ''; $('status-filter').value = 'all'; selectPeriod('30'); }
   // =========================================================
   // 검색 지연 처리와 필터·페이지·상세 창 이벤트 연결
   // =========================================================
   let searchTimer;
   $('search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.page = 1; load(); }, 250); });
-  ['status-filter', 'start-date', 'end-date'].forEach(id => $(id).addEventListener('change', () => { state.page = 1; load(); }));
-  $('date-reset').addEventListener('click', () => { $('start-date').value = ''; $('end-date').value = ''; state.page = 1; load(); });
+  $('status-filter').addEventListener('change', () => { state.page = 1; load(); });
+  document.querySelectorAll('[data-period]').forEach(button => button.addEventListener('click', () => selectPeriod(button.dataset.period)));
+  ['start-date', 'end-date'].forEach(id => {
+    const edited = () => {
+      state.period = 'custom'; state.page = 1;
+      clearTimeout(state.periodTimer); updatePeriodButtons(); disableExport();
+      // 입력 중에도 이전 조회 응답이 새 날짜의 결과처럼 표시되지 않게 합니다.
+      state.sequence++; state.controller?.abort(); state.loading = false; $('refresh').disabled = false;
+      validDateRange();
+    };
+    $(id).addEventListener('input', edited);
+    $(id).addEventListener('change', () => { edited(); load(); });
+  });
+  $('export').addEventListener('click', async event => {
+    event.preventDefault();
+    // 자정을 지난 상대 기간도 다시 확인하고, 화면과 같은 조건으로 내려받습니다.
+    if (await load(true)) window.location.assign($('export').href);
+  });
   $('clear-filters').addEventListener('click', resetFilters);
   $('refresh').addEventListener('click', () => load()); $('retry').addEventListener('click', () => load());
   $('prev-page').addEventListener('click', () => { if (state.page > 1) { state.page--; load(); } });
@@ -219,7 +346,8 @@
   // =========================================================
   if (typeof ResizeObserver !== 'undefined') { let resizeTimer; new ResizeObserver(() => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.data && state.view === 'overview') drawTrend(state.data.summary.timeline); }, 100); }).observe($('trend-chart')); }
   // =========================================================
-  // 화면 진입 시 최초 요청 목록 조회
+  // 화면 진입 시 모델 설정과 최초 요청 목록 조회
   // =========================================================
+  loadModelSettings();
   load();
 })();

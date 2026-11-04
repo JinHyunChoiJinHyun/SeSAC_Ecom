@@ -1,3 +1,4 @@
+from langchain.agents.structured_output import ToolStrategy
 from typing import Literal
 
 from pydantic import (
@@ -83,26 +84,28 @@ class PrepPlan(BaseModel):
 
 
 # =========================================================
-# LLM 연결
+# 요청별 LLM 생성 정책
+# 전역 LLM을 두지 않고 get_prep_agent()에서 요청에 고정된 설정을 사용합니다.
 # =========================================================
 
-llm = get_openai_chat_client()
 
 
 # =========================================================
 # Prep Agent 생성
 # =========================================================
 
-if llm is not None:
+def get_prep_agent(model_config=None):
+    """현재 요청의 고정된 모델로 Agent를 생성합니다."""
+    llm = get_openai_chat_client(model_config=model_config)
 
-    prep_agent = create_agent(
+    return create_agent(
 
         model=llm,
 
         # Prep Agent는 실제 DataFrame을 직접 수정하지 않음
         tools=[],
 
-        response_format=PrepPlan,
+        response_format=ToolStrategy(PrepPlan),
 
         system_prompt="""
 당신은 Synerise 고객 행동 데이터의
@@ -377,8 +380,3 @@ category_fill_columns
 최소한의 작업만 선택하십시오.
 """
     )
-
-
-else:
-
-    prep_agent = None

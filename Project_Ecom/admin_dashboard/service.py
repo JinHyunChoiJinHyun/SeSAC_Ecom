@@ -50,7 +50,7 @@ def empty_run(run_id: str, source: str = "log") -> dict:
             "duration": None, "status": "unknown", "handler_status": "unknown",
             "delivery_status": "unknown", "analysis_status": "unknown",
             "outcome_recorded_at": None, "failure_notice_status": "unknown",
-            "channel": "미기록", "answer": None,
+            "channel": "미기록", "answer": None, "llm_provider": None, "llm_model": None,
             "stages": [], "decisions": [], "sql": "", "errors": [], "logs": [],
             "files": [], "origin": source, "warnings": []}
 
@@ -111,6 +111,15 @@ def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict
                     run["_sql"] = False
                 else:
                     run["sql"] += message + "\n"
+            # 요청 시작 시 고정한 실제 제공 업체와 모델을 읽습니다. 키는 기록하지 않습니다.
+            if raw_message.startswith("LLM_MODEL "):
+                try:
+                    data = json.loads(raw_message.removeprefix("LLM_MODEL "))
+                    if isinstance(data.get("provider"), str) and isinstance(data.get("model"), str):
+                        run["llm_provider"] = redact(data["provider"])
+                        run["llm_model"] = redact(data["model"])
+                except (ValueError, TypeError, AttributeError):
+                    pass
             # 최종 처리 결과는 ADMIN_RESULT의 구조화된 JSON을 기준으로 읽습니다.
             if raw_message.startswith("ADMIN_RESULT "):
                 try:
@@ -221,6 +230,9 @@ class Dashboard:
                         if old.get("outcome_recorded_at") and old["outcome_recorded_at"] >= (record.get("ended_at") or ""):
                             for field in ("status", "analysis_status", "delivery_status", "failure_notice_status", "outcome_recorded_at", "warnings", "errors"):
                                 record[field] = old.get(field)
+                        for field in ("llm_provider", "llm_model"):
+                            if old.get(field):
+                                record[field] = old[field]
                         indexed[record["id"]] = record
                     runs = list(indexed.values())
                 except (sqlite3.Error, ValueError, KeyError):
@@ -251,7 +263,7 @@ class Dashboard:
 
     def public_run(self, run: dict, detail: bool = False) -> dict:
         """목록 또는 상세 화면에 필요한 필드를 선택하고 인증정보를 가립니다."""
-        fields = ("id", "question", "started_at", "ended_at", "duration", "status", "handler_status", "delivery_status", "analysis_status", "failure_notice_status", "outcome_recorded_at", "channel", "origin")
+        fields = ("id", "question", "started_at", "ended_at", "duration", "status", "handler_status", "delivery_status", "analysis_status", "failure_notice_status", "outcome_recorded_at", "channel", "origin", "llm_provider", "llm_model")
         out = {key: redact(run[key]) if isinstance(run.get(key), str) else run.get(key) for key in fields}
         out["error_count"] = len(run.get("errors", []))
         out["stages"] = run.get("stages", [])

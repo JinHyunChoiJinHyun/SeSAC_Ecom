@@ -1,4 +1,4 @@
-"""표준 라이브러리 HTTP 서버로 관리자 인증, 정적 화면과 기록 조회 API를 제공합니다."""
+"""표준 라이브러리 HTTP 서버로 관리자 인증, 정적 화면, 기록 조회와 모델 설정 API를 제공합니다."""
 
 from __future__ import annotations
 
@@ -6,15 +6,26 @@ import base64
 import json
 import mimetypes
 import secrets
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .service import Dashboard, Settings, export_csv, select_runs, summary
+from env.model_settings import get_store, ModelSettingsError
 
 # 브라우저에 제공할 정적 파일의 기준 폴더입니다.
 STATIC = Path(__file__).parent / "static"
+
+
+def date_context():
+    """로그의 로컬 접수 시각과 같은 서버 달력 날짜를 화면에 제공합니다."""
+    now = datetime.now().astimezone()
+    # naive datetime.timestamp()가 서버의 로컬 시간대와 다음 날의 DST도 적용합니다.
+    midnight = datetime.combine(now.date() + timedelta(days=1), time.min)
+    offset = now.strftime("%z")
+    return {"today": now.date().isoformat(), "timezone": f"UTC{offset[:3]}:{offset[3:]}",
+            "rollover_ms": max(1000, int((midnight.timestamp() - now.timestamp()) * 1000) + 250)}
 
 
 # =========================================================
@@ -29,9 +40,10 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
     if host not in {"127.0.0.1", "localhost", "::1"} and not username:
         raise ValueError("외부 접속에는 관리자 인증 설정이 필요합니다.")
     dashboard = Dashboard(settings)
+    model_store = get_store(settings.project)
 
     class Handler(BaseHTTPRequestHandler):
-        """GET 요청에 화면, 기록 조회 API와 허용된 결과 파일을 제공합니다."""
+        """GET으로 화면·기록·결과 파일·모델 설정을 조회하고 POST로 모델 설정을 변경합니다."""
         server_version = "EcomAdmin/1.0"
 
         def log_message(self, format, *args):
@@ -91,12 +103,50 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
             except Exception:
                 self.error(500, "기록 조회 중 오류가 발생했습니다.")
 
+        def do_POST(self):
+            """관리자 접근 권한과 출처 헤더를 확인한 JSON 요청으로 모델 설정을 적용합니다."""
+            if not self.authorized():
+                return self.error(401, "관리자 인증이 필요합니다.")
+            if urlsplit(self.path).path != "/api/model-settings":
+                return self.error(404, "페이지를 찾지 못했습니다.")
+            # Sec-Fetch-Site가 cross-site이거나 Origin의 스킴·호스트가 허용되지 않으면 차단합니다.
+            # 두 출처 헤더가 없는 요청도 관리자 접근 권한 검사 후 허용합니다.
+            origin = self.headers.get("Origin")
+            if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                origin and (urlsplit(origin).scheme not in {"http", "https"}
+                            or urlsplit(origin).netloc != self.headers.get("Host"))
+            ):
+                return self.error(403, "다른 출처에서는 모델 설정을 변경할 수 없습니다.")
+            if self.headers.get_content_type() != "application/json":
+                return self.error(415, "JSON 형식으로 모델 설정을 보내 주세요.")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 2048:
+                    raise ValueError()
+                selection = json.loads(self.rfile.read(length).decode("utf-8"))
+                model_store.apply(selection)
+                # 공개 응답에는 API 키를 포함하지 않습니다.
+                return self.send_data(json.dumps(model_store.public_status(), ensure_ascii=False))
+            except ModelSettingsError as exc:
+                return self.error(422, str(exc))
+            except (ValueError, UnicodeError):
+                return self.error(400, "모델 설정 요청을 확인해 주세요.")
+            except OSError:
+                return self.error(503, "모델 설정을 저장하지 못했습니다.")
+
         def route(self):
-            """URL과 필터를 해석해 화면, 목록·상세 API, CSV와 파일 다운로드로 분기합니다."""
+            """GET URL을 해석해 날짜 기준, 화면, 기록·모델 설정, CSV와 파일 조회로 분기합니다."""
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
             get = lambda key, default="": query.get(key, [default])[0]
+            if path == "/api/date-context":
+                return self.send_data(json.dumps(date_context(), ensure_ascii=False))
+            if path == "/api/model-settings":
+                try:
+                    return self.send_data(json.dumps(model_store.public_status(), ensure_ascii=False))
+                except ModelSettingsError as exc:
+                    return self.error(503, str(exc))
             if path == "/":
                 return self.send_data((STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
             if path.startswith("/assets/"):
