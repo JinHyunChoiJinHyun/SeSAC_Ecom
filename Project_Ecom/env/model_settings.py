@@ -23,7 +23,7 @@ MODEL_OPTIONS = {
     },
     "gemini": {
         "model": "gemini-3.1-flash-lite",
-        "label": "Gemini 3.1 Flash-Lite", "key_env": "GEMINI_API_KEY",
+        "label": "Gemini", "key_env": "GEMINI_API_KEY",
     },
 }
 
