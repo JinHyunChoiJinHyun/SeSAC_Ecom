@@ -21,21 +21,21 @@ logger = logging.getLogger(__name__)
 
 # SQL 실행 순서 (단계명, SQL 파일명)
 SQL_EXECUTION_STEPS = [
-    ("장바구니 이벤트 및 예측 기준 시점 테이블 생성", "build_prediction_points.sql"),
+    ("장바구니 이벤트 및 예측 기준 시점 테이블 생성", "build_cart_base.sql"),
     ("라벨 테이블 생성", "build_label.sql"),
     ("특징 테이블 생성", "build_features.sql"),
-    ("학습용 테이블 생성", "build_mart.sql"),
+    ("학습용 테이블 생성", "build_training_data.sql"),
 ]
 
 # MART 테이블 검증용 쿼리
 VALIDATION_QUERY = """
     SELECT
         COUNT(*) AS total_rows,
-        COUNT(DISTINCT (cart_event_id, hours_after_cart)) AS unique_events,
+        COUNT(DISTINCT (cart_event_id, minutes_after_cart)) AS unique_events,
         COUNT(*) FILTER (WHERE label = 1) AS purchase_count,
         COUNT(*) FILTER (WHERE label = 0) AS non_purchase_count,
         COUNT(*) FILTER (WHERE label IS NULL) AS null_label_count
-    FROM mart.purchase_training_data
+    FROM modeling.purchase_training_data
 """
 
 # 원본 테이블 목록
@@ -142,7 +142,7 @@ def build_dataset() -> dict:
         conn.close() # db 연결 종료
 
     logger.info(
-        "MART 생성 완료: 전체 %d행, 구매 %d, 비구매 %d, 라벨 없음 %d",
+        "학습 데이터 생성 완료: 전체 %d행, 구매 %d, 비구매 %d, 라벨 없음 %d",
         mart_summary["total_rows"],
         mart_summary["purchase_count"],
         mart_summary["non_purchase_count"],

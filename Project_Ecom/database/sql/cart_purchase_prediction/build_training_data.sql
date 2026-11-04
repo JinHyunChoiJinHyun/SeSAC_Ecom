@@ -8,5 +8,4 @@ SELECT
 FROM modeling.features f
 INNER JOIN modeling.labels l
 ON f.cart_event_id = l.cart_event_id
-AND f.hours_after_cart = l.hours_after_cart
-WHERE l.label IS NOT NULL; -- 구매 여부가 확정된 행만 학습에 사용
+AND f.minutes_after_cart = l.minutes_after_cart;

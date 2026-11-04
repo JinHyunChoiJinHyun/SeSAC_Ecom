@@ -4,7 +4,7 @@ CREATE SCHEMA IF NOT EXISTS modeling;
 CREATE OR REPLACE TABLE modeling.labels AS
 SELECT
     p.cart_event_id,
-    p.hours_after_cart,
+    p.minutes_after_cart,
 
     CASE
         WHEN NOT p.is_label_ready THEN NULL -- 구매 여부 확정 불가 시 NULL로 표기
