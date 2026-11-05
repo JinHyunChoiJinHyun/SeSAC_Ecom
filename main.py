@@ -5,7 +5,7 @@ from langchain_core.messages import (
     HumanMessage,
 )
 
-from make_graph import (
+from agent_system.shared_analysis.graph import (
     graph,
 )
 
@@ -40,7 +40,7 @@ def main():
 
 
     print(
-        "Synerise Multi Agent 시작"
+        "CART SIGNAL Shared Analysis 시작"
     )
 
 

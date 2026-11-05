@@ -11,7 +11,7 @@ Visualization Agent
 3. 차트 제목과 축 이름 결정
 
 실제 matplotlib 실행은
-env/tools/visualization_tools.py가 담당합니다.
+agent_system/tools/visualization_tools.py가 담당합니다.
 """
 
 from typing import Literal

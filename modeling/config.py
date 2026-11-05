@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # 경로
-PROJECT_ROOT = Path(__file__).resolve().parents[1] # 프로젝트 기준 경로: Project_Ecom
+PROJECT_ROOT = Path(__file__).resolve().parents[1] # 프로젝트 기준 경로: Ecom
 DB_PATH = PROJECT_ROOT / "database" / "synerise.duckdb"
 MODEL_DIR = PROJECT_ROOT / "modeling" / "models"
 REPORT_DIR = PROJECT_ROOT / "modeling" / "reports"

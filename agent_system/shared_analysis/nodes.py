@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 
 from typing import Literal
 
@@ -16,38 +17,43 @@ from langchain_core.messages import (
 )
 
 
-from state import (
+from .state import (
     AgentState,
 )
 
 
-from supervisor_agent import (
+from .analysis_router import (
     route_request,
 )
 
 
-from data_agent import (
+from .data_agent import (
     get_data_agent,
 )
 
 
-from prep_agent import (
+from .prep_agent import (
     get_prep_agent,
 )
 
 
-from visualization_agent import (
+from .visualization_agent import (
     get_visualization_agent,
 )
 
 
-from env.tools.data_tools import (
+from .model_agent import (
+    get_model_agent,
+)
+
+
+from agent_system.tools.data_tools import (
     validate_select_sql,
     execute_sql_to_dataframe,
 )
 
 
-from env.tools.prep_tools import (
+from agent_system.tools.prep_tools import (
     check_dataframe_info,
     check_missing_values,
     check_duplicates,
@@ -60,7 +66,7 @@ from env.tools.prep_tools import (
 )
 
 
-from env.tools.visualization_tools import (
+from agent_system.tools.visualization_tools import (
     create_bar_chart,
     create_line_chart,
     create_histogram,
@@ -69,6 +75,151 @@ from env.tools.visualization_tools import (
     create_correlation_heatmap,
 )
 
+
+from agent_system.tools.model_tools import (
+    predict_purchase,
+    get_model_comparison,
+    load_model_registry,
+)
+
+
+
+# =========================================================
+# 고객 Top-N 구매확률 요청 처리
+# =========================================================
+
+def extract_customer_top_n_request(
+    question: str,
+):
+    """구매확률 기준 고객 N명 요청에서 명시된 N을 추출합니다."""
+    query = (question or "").lower()
+
+    if "고객" not in query:
+        return None
+
+    probability_keywords = [
+        "구매확률", "구매 확률", "구매 가능성", "구매가능성",
+    ]
+    ranking_keywords = [
+        "높은", "높게", "상위", "top",
+        "낮은", "낮게", "하위", "bottom",
+    ]
+
+    if not any(keyword in query for keyword in probability_keywords):
+        return None
+    if not any(keyword in query for keyword in ranking_keywords):
+        return None
+
+    patterns = [
+        r"고객\s*(\d+)\s*명",
+        r"상위\s*(\d+)\s*명",
+        r"하위\s*(\d+)\s*명",
+        r"top\s*(\d+)",
+        r"bottom\s*(\d+)",
+        r"(\d+)\s*명의?\s*고객",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, query)
+        if match:
+            top_n = int(match.group(1))
+            if top_n > 0:
+                return top_n
+
+    return None
+
+def aggregate_customer_top_n_predictions(
+    prediction_df: pd.DataFrame,
+    top_n: int | None = None,
+    ascending: bool = False,
+):
+    """이벤트 예측을 고객별 대표 예측으로 변환합니다."""
+    if not isinstance(prediction_df, pd.DataFrame) or prediction_df.empty:
+        return prediction_df
+
+    required_columns = {"client_id", "purchase_probability"}
+    if not required_columns.issubset(prediction_df.columns):
+        return prediction_df
+
+    ranked_df = prediction_df.copy()
+    ranked_df["purchase_probability"] = pd.to_numeric(
+        ranked_df["purchase_probability"], errors="coerce"
+    )
+
+    ranked_df = (
+        ranked_df
+        .sort_values(
+            "purchase_probability",
+            ascending=bool(ascending),
+            na_position="last",
+        )
+        .drop_duplicates(subset=["client_id"], keep="first")
+        .reset_index(drop=True)
+    )
+
+    if top_n is not None:
+        ranked_df = ranked_df.head(max(1, int(top_n))).reset_index(drop=True)
+
+    return ranked_df
+
+
+def apply_prediction_segment(
+    prediction_df: pd.DataFrame,
+    segment: str = "all",
+    sort_order: str = "desc",
+    top_n: int | None = None,
+):
+    """ModelPlan의 segment / sort_order / top_n을 실제 결과에 적용합니다."""
+    if not isinstance(prediction_df, pd.DataFrame) or prediction_df.empty:
+        return prediction_df
+    if "purchase_probability" not in prediction_df.columns:
+        return prediction_df
+
+    segment = str(segment or "all").strip().lower()
+    sort_order = str(sort_order or "desc").strip().lower()
+
+    if segment not in {"all", "high", "low", "target"}:
+        raise ValueError(f"지원하지 않는 구매확률 segment입니다: {segment}")
+    if sort_order not in {"asc", "desc"}:
+        raise ValueError(f"지원하지 않는 sort_order입니다: {sort_order}")
+
+    result_df = prediction_df.copy()
+    result_df["purchase_probability"] = pd.to_numeric(
+        result_df["purchase_probability"], errors="coerce"
+    )
+
+    # promotion_target용 70~95 percentile 후보 구간
+    if segment == "target":
+        valid_probability = result_df["purchase_probability"].dropna()
+        if valid_probability.empty:
+            return result_df.iloc[0:0].copy()
+
+        lower_bound = float(valid_probability.quantile(0.70))
+        upper_bound = float(valid_probability.quantile(0.95))
+        result_df = result_df.loc[
+            (result_df["purchase_probability"] >= lower_bound)
+            & (result_df["purchase_probability"] <= upper_bound)
+        ].copy()
+
+    result_df = (
+        result_df
+        .sort_values(
+            "purchase_probability",
+            ascending=(sort_order == "asc"),
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    if top_n is not None:
+        result_df = result_df.head(max(1, int(top_n))).reset_index(drop=True)
+
+    return result_df
+
+
+# =========================================================
+# 완료 Step 추가
+# =========================================================
 
 # =========================================================
 # 완료 Step 추가
@@ -596,8 +747,9 @@ def supervisor_node(
     ]
 ]:
 
-    # Slack/터미널 외부에서 그래프를 직접 호출해도 요청 내 모델은 고정합니다.
+    # Slack/터미널 외부에서 그래프를 직접 호출해도 요청 내 모델을 고정합니다.
     from env.model_settings import get_request_config
+
     state = dict(state)
     if not state.get("llm_config"):
         state["llm_config"] = get_request_config().public()
@@ -637,7 +789,9 @@ def supervisor_node(
 
 
     decision = route_request(
-        model_config=state.get("llm_config"),
+
+        model_config=
+            state.get("llm_config"),
 
         user_query=
             question,
@@ -683,7 +837,9 @@ def supervisor_node(
         return Command(
 
             update={
-                "llm_config": state["llm_config"],
+                "llm_config":
+                    state["llm_config"],
+
                 "question":
                     question,
 
@@ -711,7 +867,9 @@ def supervisor_node(
     return Command(
 
         update={
-            "llm_config": state["llm_config"],
+            "llm_config":
+                state["llm_config"],
+
             "question":
                 question,
 
@@ -746,7 +904,6 @@ def data_node(
 
 
 
-
     question = (
         state[
             "question"
@@ -761,7 +918,10 @@ def data_node(
         )
 
 
-        data_agent = get_data_agent(state.get("llm_config"))
+        data_agent = get_data_agent(
+            state.get("llm_config")
+        )
+
         result = data_agent.invoke(
             {
                 "messages": [
@@ -1305,7 +1465,6 @@ def prep_node(
 
 
 
-
     df = get_analysis_dataframe(
         state
     )
@@ -1411,7 +1570,10 @@ dtype:
 
     try:
 
-        prep_agent = get_prep_agent(state.get("llm_config"))
+        prep_agent = get_prep_agent(
+            state.get("llm_config")
+        )
+
         result = prep_agent.invoke(
             {
                 "messages": [
@@ -1921,7 +2083,6 @@ def visualization_node(
 
 
 
-
     df = get_analysis_dataframe(
         state
     )
@@ -2145,7 +2306,10 @@ datetime 컬럼:
 
     try:
 
-        visualization_agent = get_visualization_agent(state.get("llm_config"))
+        visualization_agent = get_visualization_agent(
+            state.get("llm_config")
+        )
+
         result = visualization_agent.invoke(
             {
                 "messages": [
@@ -2705,7 +2869,6 @@ datetime 컬럼:
 
 # =========================================================
 # Model Agent Node
-# 아직 미구현
 # =========================================================
 
 def model_node(
@@ -2722,17 +2885,433 @@ def model_node(
     )
 
 
-    return Command(
 
-        update={
-            "model_error":
-                "Model Agent는 아직 구현되지 않았습니다."
-        },
+    try:
 
-        goto=
-            "final_response",
-    )
+        model_agent = get_model_agent(
+            state.get("llm_config")
+        )
 
+        # -------------------------------------------------
+        # 사용자 질문
+        # -------------------------------------------------
+
+        question = state.get(
+            "question",
+            ""
+        )
+
+
+        # -------------------------------------------------
+        # 현재 분석용 DataFrame
+        #
+        # processed_dataframe이 있으면 우선 사용하고,
+        # 없으면 원본 dataframe을 사용합니다.
+        #
+        # 모델 비교 요청은 DataFrame이 없어도 실행 가능하므로
+        # 여기서는 바로 오류를 발생시키지 않습니다.
+        # -------------------------------------------------
+
+        df = get_analysis_dataframe(
+            state
+        )
+
+
+        if isinstance(
+            df,
+            pd.DataFrame
+        ):
+
+            dataframe_context = f"""
+현재 DataFrame:
+- 행 수: {len(df)}
+- 컬럼: {list(df.columns)}
+"""
+
+        else:
+
+            dataframe_context = """
+현재 DataFrame:
+- 없음
+"""
+
+
+        # -------------------------------------------------
+        # Model Agent에게 실행 계획 요청
+        # -------------------------------------------------
+
+        model_context = f"""
+사용자 요청:
+{question}
+
+{dataframe_context}
+
+기본 운영 정책:
+- 일반 구매확률 예측은 Champion 모델을 사용합니다.
+- 모델 비교 요청은 저장된 검증 성능을 사용합니다.
+- 새로운 모델 학습은 수행하지 않습니다.
+"""
+
+
+        agent_result = model_agent.invoke(
+
+            {
+                "messages": [
+                    HumanMessage(
+                        content=
+                            model_context
+                    )
+                ]
+            },
+
+            config={
+                "recursion_limit":
+                    30
+            }
+        )
+
+
+        # -------------------------------------------------
+        # 구조화된 ModelPlan 가져오기
+        # -------------------------------------------------
+
+        plan = agent_result.get(
+            "structured_response"
+        )
+
+
+        if plan is None:
+
+            raise ValueError(
+                "Model Agent가 실행 계획을 반환하지 않았습니다."
+            )
+
+
+        # -------------------------------------------------
+        # ModelPlan 실제 필드 읽기
+        # -------------------------------------------------
+        plan_task = getattr(plan, "task", None)
+        if not plan_task:
+            raise ValueError("Model Agent가 task를 반환하지 않았습니다.")
+
+        plan_prediction_hour = getattr(plan, "prediction_hour", None)
+        plan_segment = getattr(plan, "segment", "all") or "all"
+        plan_top_n = max(1, min(int(getattr(plan, "top_n", 20) or 20), 100))
+        plan_sort_order = getattr(plan, "sort_order", "desc") or "desc"
+        plan_metric = getattr(plan, "metric", "all") or "all"
+        plan_is_supported = bool(getattr(plan, "is_supported", True))
+        plan_unsupported_reason = getattr(plan, "unsupported_reason", "") or ""
+        plan_reason = getattr(plan, "reason", "") or ""
+
+        # 현재 ModelPlan에는 model_name / threshold가 없으므로 서비스 기본값 사용
+        plan_model_name = "champion"
+        plan_threshold = None
+
+        print("[Model Plan]")
+        print(f"- task: {plan_task}")
+        print(f"- prediction_hour: {plan_prediction_hour}")
+        print(f"- segment: {plan_segment}")
+        print(f"- top_n: {plan_top_n}")
+        print(f"- sort_order: {plan_sort_order}")
+        print(f"- metric: {plan_metric}")
+        print(f"- is_supported: {plan_is_supported}")
+        print(f"- reason: {plan_reason}")
+
+        if not plan_is_supported:
+            unsupported_reason = (
+                plan_unsupported_reason
+                or "현재 지원하지 않는 Model 요청입니다."
+            )
+            completed_steps = add_completed_step(state, "model")
+            return Command(
+                update={
+                    "current_agent": "model_agent",
+                    "model_result": {
+                        "task": plan_task,
+                        "success": False,
+                        "is_supported": False,
+                        "unsupported_reason": unsupported_reason,
+                        "plan_reason": plan_reason,
+                        "prediction_hour": plan_prediction_hour,
+                        "segment": plan_segment,
+                        "sort_order": plan_sort_order,
+                        "top_n": plan_top_n,
+                    },
+                    "model_result_dataframe": None,
+                    "model_comparison_dataframe": None,
+                    "model_error": "",
+                    "error": "",
+                    "completed_steps": completed_steps,
+                },
+                goto="final_response",
+            )
+
+        # -------------------------------------------------
+        # 결과 저장 변수
+        # -------------------------------------------------
+
+        prediction_df = None
+        comparison_df = None
+
+
+        model_result = {
+
+            "task":
+                plan_task,
+
+            "plan_reason":
+                plan_reason,
+        }
+
+
+        # =================================================
+        # 1. 모델 비교
+        # =================================================
+        if plan_task == "model_comparison":
+            comparison_df = get_model_comparison()
+
+            if (
+                plan_prediction_hour is not None
+                and isinstance(comparison_df, pd.DataFrame)
+                and "prediction_hour" in comparison_df.columns
+            ):
+                comparison_df = (
+                    comparison_df.loc[
+                        pd.to_numeric(
+                            comparison_df["prediction_hour"], errors="coerce"
+                        ) == int(plan_prediction_hour)
+                    ]
+                    .copy()
+                    .reset_index(drop=True)
+                )
+
+            if (
+                plan_metric != "all"
+                and isinstance(comparison_df, pd.DataFrame)
+                and plan_metric in comparison_df.columns
+            ):
+                comparison_df = (
+                    comparison_df
+                    .sort_values(
+                        plan_metric,
+                        ascending=(plan_metric == "brier_score"),
+                        na_position="last",
+                    )
+                    .reset_index(drop=True)
+                )
+
+            model_result.update({
+                "success": True,
+                "prediction_hour": plan_prediction_hour,
+                "metric": plan_metric,
+                "model_comparison": comparison_df.to_dict(orient="records"),
+            })
+
+        # =================================================
+        # 2. 모델 정보
+        # =================================================
+        elif plan_task == "model_info":
+            registry = load_model_registry()
+            models = registry.get("models", {}) or {}
+
+            model_result.update({
+                "success": True,
+                "configured_model": registry.get("configured_model", ""),
+                "champion_model": registry.get("champion", ""),
+                "default_prediction_hour": registry.get("default_prediction_hour"),
+                "available_prediction_hours": sorted({
+                    int(spec.get("prediction_hour"))
+                    for spec in models.values()
+                    if spec.get("prediction_hour") is not None
+                }),
+                "feature_columns": next(
+                    (list(spec.get("feature_columns", [])) for spec in models.values()),
+                    [],
+                ),
+                "models": models,
+            })
+
+        # =================================================
+        # 3. 구매확률 예측 / 프로모션 후보
+        # =================================================
+        elif plan_task in {"purchase_prediction", "promotion_target"}:
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError("모델 예측에 사용할 DataFrame이 없습니다.")
+            if df.empty:
+                raise ValueError("모델 예측에 사용할 DataFrame이 비어 있습니다.")
+
+            effective_segment = (
+                "target" if plan_task == "promotion_target" else plan_segment
+            )
+
+            question_top_n = extract_customer_top_n_request(question)
+            effective_top_n = (
+                int(question_top_n)
+                if question_top_n is not None
+                else int(plan_top_n)
+            )
+            ascending = plan_sort_order == "asc"
+
+            prediction_result = predict_purchase(
+                df=df,
+                model_name=plan_model_name,
+                threshold=plan_threshold,
+                prediction_hour=plan_prediction_hour,
+            )
+
+            if not prediction_result.get("success"):
+                raise ValueError(
+                    prediction_result.get("error", "모델 예측 실패")
+                )
+
+            prediction_df = prediction_result["prediction_dataframe"]
+            raw_prediction_row_count = len(prediction_df)
+
+            customer_ranking_applied = bool(
+                "client_id" in prediction_df.columns
+                and (
+                    question_top_n is not None
+                    or effective_segment in {"high", "low", "target"}
+                    or plan_task == "promotion_target"
+                )
+            )
+
+            if customer_ranking_applied:
+                prediction_df = aggregate_customer_top_n_predictions(
+                    prediction_df=prediction_df,
+                    top_n=None,
+                    ascending=ascending,
+                )
+
+            prediction_df = apply_prediction_segment(
+                prediction_df=prediction_df,
+                segment=effective_segment,
+                sort_order=plan_sort_order,
+                top_n=effective_top_n,
+            )
+
+            model_result.update(prediction_result)
+            model_result.pop("prediction_dataframe", None)
+            model_result.update({
+                "task": plan_task,
+                "prediction_hour": plan_prediction_hour,
+                "segment": effective_segment,
+                "sort_order": plan_sort_order,
+                "top_n": effective_top_n,
+                "customer_ranking_applied": customer_ranking_applied,
+                "raw_prediction_row_count": int(raw_prediction_row_count),
+                "result_count": int(len(prediction_df)),
+            })
+
+            if customer_ranking_applied:
+                model_result["customer_top_n"] = int(effective_top_n)
+                model_result["customer_result_count"] = int(len(prediction_df))
+                model_result["customer_ranking_method"] = (
+                    "client_id별 가장 낮은 purchase_probability"
+                    if ascending
+                    else "client_id별 가장 높은 purchase_probability"
+                )
+
+            comparison_df = get_model_comparison()
+            model_result["model_comparison"] = comparison_df.to_dict(
+                orient="records"
+            )
+
+        # =================================================
+        # 4. 지원하지 않는 task
+        # =================================================
+        else:
+            raise ValueError(f"지원하지 않는 Model 작업입니다: {plan_task}")
+
+        # -------------------------------------------------
+        # 완료 Step 기록
+        # -------------------------------------------------
+
+        completed_steps = (
+            add_completed_step(
+                state,
+                "model"
+            )
+        )
+
+
+        # -------------------------------------------------
+        # State 업데이트 후 Supervisor로 복귀
+        # -------------------------------------------------
+
+        return Command(
+
+            update={
+
+                "current_agent":
+                    "model_agent",
+
+                "model_result":
+                    model_result,
+
+                "model_result_dataframe":
+                    prediction_df,
+
+                "model_comparison_dataframe":
+                    comparison_df,
+
+                "model_name":
+                    model_result.get(
+                        "model_name",
+                        ""
+                    ),
+
+                "model_version":
+                    model_result.get(
+                        "model_version",
+                        ""
+                    ),
+
+                "model_error":
+                    "",
+
+                "error":
+                    "",
+
+                "completed_steps":
+                    completed_steps,
+            },
+
+            goto=
+                "supervisor",
+        )
+
+
+    # -----------------------------------------------------
+    # Model Agent 오류 처리
+    # -----------------------------------------------------
+
+    except Exception as e:
+
+        error = repr(
+            e
+        )
+
+
+        print(
+            f"[Model Agent 오류] {error}"
+        )
+
+
+        return Command(
+
+            update={
+
+                "model_error":
+                    error,
+
+                "error":
+                    error,
+            },
+
+            goto=
+                "final_response",
+        )
 
 # =========================================================
 # Experiment Agent Node
@@ -2763,6 +3342,671 @@ def experiment_node(
         goto=
             "final_response",
     )
+
+
+# =========================================================
+# Model 결과 최종 응답 Helper
+# =========================================================
+
+def build_model_response_section(
+    state: AgentState
+) -> str:
+    """
+    Model Agent 실행 결과를
+    사용자가 읽기 쉬운 최종 응답 문자열로 변환합니다.
+
+    지원:
+    - model_comparison
+    - purchase_prediction
+    """
+
+    model_result = (
+        state.get(
+            "model_result",
+            {}
+        )
+        or {}
+    )
+
+
+    prediction_df = (
+        state.get(
+            "model_result_dataframe"
+        )
+    )
+
+
+    comparison_df = (
+        state.get(
+            "model_comparison_dataframe"
+        )
+    )
+
+
+    task = (
+        model_result.get(
+            "task",
+            ""
+        )
+        or ""
+    )
+
+
+    if model_result.get("is_supported", True) is False:
+        unsupported_reason = (
+            model_result.get("unsupported_reason", "")
+            or "현재 지원하지 않는 Model 요청입니다."
+        )
+        return (
+            "현재 요청은 Model Agent에서 지원하지 않습니다.\n"
+            f"- 이유: {unsupported_reason}"
+        )
+
+
+    plan_reason = (
+        model_result.get(
+            "plan_reason",
+            ""
+        )
+        or ""
+    )
+
+
+    # =====================================================
+    # 1. 모델 성능 비교
+    # =====================================================
+
+    if task == "model_comparison":
+
+        final_text = (
+            "모델 성능 비교가 완료되었습니다.\n"
+        )
+
+
+        if plan_reason:
+
+            final_text += (
+                f"\n[선택 이유]\n"
+                f"- {plan_reason}\n"
+            )
+
+
+        if (
+            isinstance(
+                comparison_df,
+                pd.DataFrame
+            )
+            and not comparison_df.empty
+        ):
+
+            comparison_preview = (
+                comparison_df
+                .to_string(
+                    index=False
+                )
+            )
+
+
+            final_text += (
+                "\n[모델 성능 비교]\n"
+                f"{comparison_preview}\n"
+            )
+
+
+        else:
+
+            comparison_records = (
+                model_result.get(
+                    "model_comparison",
+                    []
+                )
+                or []
+            )
+
+
+            if comparison_records:
+
+                comparison_preview = (
+                    pd.DataFrame(
+                        comparison_records
+                    )
+                    .to_string(
+                        index=False
+                    )
+                )
+
+
+                final_text += (
+                    "\n[모델 성능 비교]\n"
+                    f"{comparison_preview}\n"
+                )
+
+
+        champion_model = (
+            model_result.get(
+                "champion_model",
+                ""
+            )
+            or model_result.get(
+                "model_name",
+                ""
+            )
+            or state.get(
+                "model_name",
+                ""
+            )
+        )
+
+
+        if champion_model:
+
+            final_text += (
+                "\n[현재 선택 모델]\n"
+                f"- {champion_model}\n"
+            )
+
+
+        final_text += (
+            "\n[해석 주의]\n"
+            "- 저장된 검증 성능을 비교한 결과이며 "
+            "이 단계에서 모델을 새로 학습한 것은 아닙니다."
+        )
+
+
+        return final_text
+
+
+    # =====================================================
+    # 2. 구매확률 예측
+    # =====================================================
+
+    if task in {"purchase_prediction", "promotion_target"}:
+
+        final_text = (
+            "프로모션 후보 고객 분석이 완료되었습니다.\n"
+            if task == "promotion_target"
+            else "구매확률 예측이 완료되었습니다.\n"
+        )
+
+
+        model_name = (
+            model_result.get(
+                "model_name",
+                ""
+            )
+            or state.get(
+                "model_name",
+                ""
+            )
+        )
+
+
+        model_version = (
+            model_result.get(
+                "model_version",
+                ""
+            )
+            or state.get(
+                "model_version",
+                ""
+            )
+        )
+
+
+        threshold = (
+            model_result.get(
+                "threshold"
+            )
+        )
+
+
+        segment = model_result.get("segment", "all") or "all"
+        sort_order = model_result.get("sort_order", "desc") or "desc"
+        response_top_n = int(model_result.get("top_n", 20) or 20)
+        prediction_hour = model_result.get("prediction_hour")
+
+
+        if plan_reason:
+
+            final_text += (
+                f"\n[모델 실행 이유]\n"
+                f"- {plan_reason}\n"
+            )
+
+
+        final_text += (
+            "\n[예측 설정]\n"
+        )
+
+
+        if prediction_hour is not None:
+            final_text += f"- 예측 시점: {int(prediction_hour)}시간\n"
+
+        final_text += (
+            f"- segment: {segment}\n"
+            f"- 정렬: {'낮은 확률 순' if sort_order == 'asc' else '높은 확률 순'}\n"
+        )
+
+
+        if model_name:
+
+            final_text += (
+                f"- 모델: {model_name}\n"
+            )
+
+
+        if model_version:
+
+            final_text += (
+                f"- 버전: {model_version}\n"
+            )
+
+
+        if threshold is not None:
+
+            try:
+
+                final_text += (
+                    f"- 분류 기준값(threshold): "
+                    f"{float(threshold):.4f}\n"
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
+                final_text += (
+                    f"- 분류 기준값(threshold): "
+                    f"{threshold}\n"
+                )
+
+
+        if (
+            isinstance(
+                prediction_df,
+                pd.DataFrame
+            )
+            and not prediction_df.empty
+        ):
+
+            row_count = len(
+                prediction_df
+            )
+
+
+            customer_ranking_applied = bool(
+                model_result.get(
+                    "customer_ranking_applied",
+                    False,
+                )
+            )
+
+
+            if customer_ranking_applied:
+
+                raw_prediction_row_count = (
+                    model_result.get(
+                        "raw_prediction_row_count"
+                    )
+                )
+
+                customer_top_n = (
+                    model_result.get(
+                        "customer_top_n"
+                    )
+                )
+
+
+                if raw_prediction_row_count is not None:
+
+                    final_text += (
+                        f"- 모델 예측 이벤트: "
+                        f"{int(raw_prediction_row_count):,}행\n"
+                    )
+
+
+                ranking_method = (
+                    model_result.get("customer_ranking_method", "")
+                    or (
+                        "client_id별 가장 낮은 구매확률 1건"
+                        if sort_order == "asc"
+                        else "client_id별 가장 높은 구매확률 1건"
+                    )
+                )
+
+                final_text += (
+                    f"- 최종 고객 결과: {row_count:,}명\n"
+                    f"- 고객 집계 기준: {ranking_method}\n"
+                )
+
+
+                if customer_top_n is not None:
+
+                    final_text += (
+                        f"- 요청한 고객 수: "
+                        f"{int(customer_top_n):,}명\n"
+                    )
+
+
+            else:
+
+                final_text += (
+                    f"- 예측 대상: {row_count:,}행\n"
+                )
+
+
+            probability_candidates = [
+                "purchase_probability",
+                "purchase_prob",
+                "prediction_probability",
+                "probability",
+                "pred_proba",
+                "score",
+            ]
+
+
+            probability_column = next(
+                (
+                    column
+                    for column
+                    in probability_candidates
+                    if column
+                    in prediction_df.columns
+                ),
+                None,
+            )
+
+
+            prediction_candidates = [
+                "purchase_prediction",
+                "prediction",
+                "predicted_class",
+                "predicted_label",
+                "is_high_probability",
+                "target_prediction",
+            ]
+
+
+            prediction_column = next(
+                (
+                    column
+                    for column
+                    in prediction_candidates
+                    if column
+                    in prediction_df.columns
+                ),
+                None,
+            )
+
+
+            if (
+                probability_column is not None
+                and threshold is not None
+            ):
+
+                try:
+
+                    probability_series = (
+                        pd.to_numeric(
+                            prediction_df[
+                                probability_column
+                            ],
+                            errors="coerce",
+                        )
+                    )
+
+
+                    positive_count = int(
+                        (
+                            probability_series
+                            >= float(
+                                threshold
+                            )
+                        )
+                        .fillna(
+                            False
+                        )
+                        .sum()
+                    )
+
+
+                    final_text += (
+                        f"- threshold 이상: "
+                        f"{positive_count:,}행\n"
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+
+                    pass
+
+
+            elif prediction_column is not None:
+
+                prediction_series = (
+                    prediction_df[
+                        prediction_column
+                    ]
+                )
+
+
+                if pd.api.types.is_bool_dtype(
+                    prediction_series
+                ):
+
+                    positive_count = int(
+                        prediction_series.sum()
+                    )
+
+
+                    final_text += (
+                        f"- 구매 가능성이 높다고 분류된 행: "
+                        f"{positive_count:,}행\n"
+                    )
+
+
+                elif pd.api.types.is_numeric_dtype(
+                    prediction_series
+                ):
+
+                    positive_count = int(
+                        (
+                            prediction_series
+                            == 1
+                        )
+                        .sum()
+                    )
+
+
+                    final_text += (
+                        f"- 구매 가능성이 높다고 분류된 행: "
+                        f"{positive_count:,}행\n"
+                    )
+
+
+            display_df = (
+                prediction_df.copy()
+            )
+
+
+            if probability_column is not None:
+
+                display_df[
+                    probability_column
+                ] = (
+                    pd.to_numeric(
+                        display_df[
+                            probability_column
+                        ],
+                        errors="coerce",
+                    )
+                )
+
+
+                display_df = (
+                    display_df
+                    .sort_values(
+                        probability_column,
+                        ascending=(sort_order == "asc"),
+                        na_position="last",
+                    )
+                )
+
+
+            display_rows = min(
+                len(display_df),
+                max(1, int(response_top_n)),
+                20,
+            )
+
+
+            preview = (
+                display_df
+                .head(
+                    display_rows
+                )
+                .to_string(
+                    index=False
+                )
+            )
+
+
+            if customer_ranking_applied:
+
+                ranking_label = "하위" if sort_order == "asc" else "상위"
+                if segment == "target":
+                    ranking_label = "프로모션 후보"
+
+                final_text += (
+                    f"\n[구매확률 {ranking_label} 고객 {display_rows}명]\n"
+                    f"{preview}"
+                )
+
+            else:
+
+                ranking_label = "하위" if sort_order == "asc" else "상위"
+                final_text += (
+                    f"\n[예측 결과 {ranking_label} {display_rows}행]\n"
+                    f"{preview}"
+                )
+
+
+            if row_count > display_rows:
+
+                final_text += (
+                    f"\n\n전체 {row_count:,}행 중 "
+                    f"상위 {display_rows}행만 표시했습니다."
+                )
+
+
+        else:
+
+            final_text += (
+                "\n[예측 결과]\n"
+                "- 예측 결과 DataFrame이 없습니다."
+            )
+
+
+        if (
+            isinstance(
+                comparison_df,
+                pd.DataFrame
+            )
+            and not comparison_df.empty
+        ):
+
+            comparison_preview = (
+                comparison_df
+                .to_string(
+                    index=False
+                )
+            )
+
+
+            final_text += (
+                "\n\n[모델 선택 근거]\n"
+                f"{comparison_preview}"
+            )
+
+
+        final_text += (
+            "\n\n[해석 주의]\n"
+            "- 예측확률은 고객의 구매 성향을 예측한 값입니다.\n"
+            "- 프로모션이 구매를 증가시키는 효과(uplift)를 "
+            "직접 예측한 값은 아닙니다."
+        )
+
+
+        return final_text
+
+
+    # =====================================================
+    # 3. 모델 정보
+    # =====================================================
+    if task == "model_info":
+        configured_model = model_result.get("configured_model", "") or ""
+        champion_model = model_result.get("champion_model", "") or ""
+        available_hours = model_result.get("available_prediction_hours", []) or []
+        feature_columns = model_result.get("feature_columns", []) or []
+
+        final_text = "현재 Model 설정 정보입니다.\n"
+        if configured_model:
+            final_text += f"- 기본 모델: {configured_model}\n"
+        if champion_model:
+            final_text += f"- 기본 Champion: {champion_model}\n"
+        if available_hours:
+            final_text += (
+                "- 지원 예측 시점: "
+                + ", ".join(f"{int(hour)}시간" for hour in available_hours)
+                + "\n"
+            )
+        if feature_columns:
+            final_text += "- Feature: " + ", ".join(map(str, feature_columns))
+        return final_text
+
+
+    # =====================================================
+    # 4. 기타 Model 결과
+    # =====================================================
+
+    final_text = (
+        "Model Agent 작업이 완료되었습니다."
+    )
+
+
+    if plan_reason:
+
+        final_text += (
+            f"\n\n[실행 이유]\n"
+            f"- {plan_reason}"
+        )
+
+
+    if model_result:
+
+        readable_result = {
+            key:
+                value
+
+            for key, value
+            in model_result.items()
+
+            if key not in {
+                "model_comparison",
+            }
+        }
+
+
+        final_text += (
+            "\n\n[결과 요약]\n"
+            f"{readable_result}"
+        )
+
+
+    return final_text
 
 
 # =========================================================
@@ -2838,9 +4082,6 @@ def final_response_node(
             )
 
 
-
-
-            # 히스토그램 Log Scale 적용 여부
             if (
                 visualization_result.get(
                     "chart_type"
@@ -2864,6 +4105,7 @@ def final_response_node(
                         "빈도 축에 log scale을 적용했습니다.\n"
                     )
 
+
             data_scope_note = (
                 visualization_result.get(
                     "data_scope_note",
@@ -2872,12 +4114,14 @@ def final_response_node(
                 or ""
             )
 
+
             data_is_sampled = bool(
                 visualization_result.get(
                     "data_is_sampled",
                     False,
                 )
             )
+
 
             tool_sampled = bool(
                 visualization_result.get(
@@ -2886,37 +4130,47 @@ def final_response_node(
                 )
             )
 
+
             if (
                 visualization_result.get(
                     "data_result_type"
                 )
                 == "correlation_matrix"
             ):
+
                 final_answer += (
                     "\n[데이터 범위]\n"
                     "- 상관계수는 DuckDB에서 전체 데이터 기준으로 계산했습니다.\n"
                     "- pandas에는 작은 상관계수 행렬만 전달했습니다.\n"
                 )
 
+
             elif data_is_sampled:
+
                 final_answer += (
                     "\n[데이터 범위]\n"
                     "- 정확한 원천 집계는 DuckDB에서 수행하고, "
                     "행 단위 시각화를 위해 표본을 사용했습니다.\n"
                 )
 
+
                 if data_scope_note:
+
                     final_answer += (
                         f"- {data_scope_note}\n"
                     )
 
+
             elif data_scope_note:
+
                 final_answer += (
                     "\n[데이터 범위]\n"
                     f"- {data_scope_note}\n"
                 )
 
+
             if tool_sampled:
+
                 sampling_note = (
                     visualization_result.get(
                         "sampling_note",
@@ -2925,7 +4179,9 @@ def final_response_node(
                     or ""
                 )
 
+
                 if sampling_note:
+
                     final_answer += (
                         f"- {sampling_note}\n"
                     )
@@ -2956,6 +4212,65 @@ def final_response_node(
                         else "- 추가 전처리 없음"
                     )
                 )
+
+
+            # Model + Visualization 복합 요청인 경우
+            # Model 결과도 함께 출력합니다.
+            if (
+                "model"
+                in completed_steps
+            ):
+
+                final_answer += (
+                    "\n\n"
+                    "========================================\n"
+                    "[Model 결과]\n"
+                    "========================================\n"
+                    + build_model_response_section(
+                        state
+                    )
+                )
+
+
+        # =================================================
+        # Model 결과
+        # =================================================
+
+        elif (
+            "model"
+            in completed_steps
+        ):
+
+            final_answer = (
+                build_model_response_section(
+                    state
+                )
+            )
+
+
+            if (
+                "prep"
+                in completed_steps
+            ):
+
+                prep_actions = (
+                    state.get(
+                        "prep_actions",
+                        []
+                    )
+                )
+
+
+                if prep_actions:
+
+                    final_answer += (
+                        "\n\n[선행 전처리]\n"
+                        + "\n".join(
+                            f"- {action}"
+                            for action
+                            in prep_actions
+                        )
+                    )
 
 
         # =================================================

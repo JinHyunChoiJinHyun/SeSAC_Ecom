@@ -18,10 +18,10 @@ class AgentState(MessagesState):
     # 공통 상태
     # =====================================================
 
-    # 사용자의 원래 질문
     # 요청 시작 때 고정한 채팅 모델. API 키는 포함하지 않습니다.
     llm_config: dict[str, str]
 
+    # 사용자의 원래 질문
     question: str
 
     # Supervisor가 선택한 다음 Agent
@@ -111,16 +111,22 @@ class AgentState(MessagesState):
     # Model Agent
     # =====================================================
 
-    # 모델 실행 결과
+    # Model Agent가 생성한 실행 계획/결과 요약
     model_result: Any
 
-    # 사용한 모델 이름
+    # 실제 구매확률 예측 결과 DataFrame
+    model_result_dataframe: Any
+
+    # 모델 성능 비교 결과 DataFrame
+    model_comparison_dataframe: Any
+
+    # 실제 사용한 모델 이름
     model_name: str
 
     # 모델 버전
     model_version: str
 
-    # Model 오류
+    # Model Agent 실행 중 발생한 오류
     model_error: str
 
 
