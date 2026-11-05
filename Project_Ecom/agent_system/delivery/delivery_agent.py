@@ -12,14 +12,14 @@ import pandas as pd
 # 기본 설정
 # =========================================================
 
-BASE_DIR = (
+PROJECT_ROOT = (
     Path(__file__)
     .resolve()
-    .parent
+    .parents[2]
 )
 
 DELIVERY_OUTPUT_DIR = (
-    BASE_DIR
+    PROJECT_ROOT
     / "delivery_output"
 )
 
@@ -78,10 +78,8 @@ def select_delivery_dataframe(
     3. Prep Agent 처리 결과
     4. Data Agent 조회 결과
 
-    Model / Experiment Agent는
-    아직 구현되지 않았으므로
-    현재는 대부분 processed_dataframe 또는
-    dataframe이 선택됩니다.
+    Model Agent 결과가 있으면 model_result_dataframe을 우선 사용하고,
+    그 외에는 processed_dataframe 또는 dataframe을 선택합니다.
     """
 
     experiment_df = result.get(
@@ -929,7 +927,7 @@ def deliver_to_slack(
     client,
     channel_id: str,
     thread_ts: str | None = None,
-    base_dir=BASE_DIR,
+    base_dir=PROJECT_ROOT,
 ):
     """
     Multi Agent 실행 결과를
