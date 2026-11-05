@@ -21,6 +21,7 @@ from env.gpt_client import (
 IMPLEMENTED_AGENTS = {
     "data_agent",
     "prep_agent",
+    "model_agent",
     "visualization_agent",
     "final_response",
 }
@@ -51,10 +52,7 @@ class RouteDecision(BaseModel):
 # =========================================================
 # 요청별 LLM 생성 정책
 # route_request()에서 전달받은 요청별 모델 설정으로 LLM을 생성합니다.
-# 전역 LLM을 두지 않아 모델 변경이 이후 새 요청에 반영됩니다.
 # =========================================================
-
-
 
 
 # =========================================================
@@ -123,8 +121,33 @@ def detect_requested_agents(
         "학습",
         "분류",
         "회귀",
+
+        # 구매확률 / 구매예측
         "구매 예측",
+        "구매예측",
+        "구매 확률",
+        "구매확률",
+        "구매 가능성",
+        "구매가능성",
+
+        # 모델 비교 / 성능
+        "모델 비교",
+        "모델비교",
+        "성능 비교",
+        "성능비교",
+        "모델 성능",
+        "모델성능",
+        "어떤 모델",
+        "최고 모델",
+        "best model",
+        "champion",
+        "pr-auc",
+        "roc-auc",
+        "brier",
+
+        # 기타 예측
         "이탈 예측",
+        "이탈예측",
         "churn",
         "prediction",
     ]
@@ -261,6 +284,55 @@ def detect_requested_agents(
 
 
 # =========================================================
+# Model Agent 요청 중 DataFrame이 필요 없는 요청 판별
+# =========================================================
+
+def is_model_comparison_request(
+    user_query: str
+) -> bool:
+    """
+    저장된 모델 Registry / 검증 성능을 비교하는 요청인지 확인합니다.
+
+    이 요청은 고객별 예측용 DataFrame이 없어도
+    Model Agent가 바로 처리할 수 있습니다.
+
+    중요:
+    "Champion 모델로 예측해줘"처럼 Champion 모델을
+    사용할 모델로 지정한 요청은 성능 비교 요청이 아닙니다.
+    따라서 "champion" 단어 하나만으로 True를 반환하지 않습니다.
+    """
+
+    query = (
+        user_query
+        .lower()
+    )
+
+
+    comparison_keywords = [
+        "모델 비교",
+        "모델비교",
+        "성능 비교",
+        "성능비교",
+        "모델 성능",
+        "모델성능",
+        "어떤 모델",
+        "최고 모델",
+        "best model",
+        "pr-auc",
+        "roc-auc",
+        "brier",
+    ]
+
+
+    return any(
+        keyword in query
+        for keyword
+        in comparison_keywords
+    )
+
+
+
+# =========================================================
 # Supervisor Routing
 # =========================================================
 
@@ -283,6 +355,15 @@ def route_request(
 
     requested_agents = (
         detect_requested_agents(
+            user_query
+        )
+    )
+
+
+    # 모델 성능 비교 요청은
+    # 예측 대상 DataFrame 없이도 실행할 수 있습니다.
+    model_comparison_request = (
+        is_model_comparison_request(
             user_query
         )
     )
@@ -486,7 +567,36 @@ DataFrame 또는 processed_dataframe을
 
 model_agent
 
-예측, 모델링, 분류, 회귀 등을 담당합니다.
+이미 학습되어 저장된 구매확률 모델을 사용하여
+다음 작업을 담당합니다.
+
+- 고객별 구매확률 예측
+- 구매 가능성이 높은 고객 탐색
+- 저장된 모델 성능 비교
+- Champion 모델 선택 근거 제공
+
+중요:
+
+"Champion 모델을 사용해 예측해줘"는
+모델 성능 비교 요청이 아니라
+구매확률 예측 요청입니다.
+
+Champion이라는 단어가 포함되어 있다는 이유만으로
+모델 성능 비교 요청으로 판단하면 안 됩니다.
+
+새로운 모델을 학습하는 Agent가 아닙니다.
+
+"고객별 구매확률을 예측해줘"처럼
+실제 예측을 수행하려면
+예측용 DataFrame이 필요합니다.
+
+반면
+
+"어떤 모델 성능이 가장 좋아?"
+"모델 성능을 비교해줘"
+
+처럼 저장된 모델의 검증 성능만 비교하는 요청은
+DataFrame 없이도 model_agent를 실행할 수 있습니다.
 
 
 experiment_agent
@@ -532,6 +642,29 @@ prep_agent를 선택하십시오.
 
 
 4.
+
+사용자가 모델 예측 또는 모델 성능 비교를 요청했다면
+model_agent를 사용하십시오.
+
+단,
+
+"고객별 구매확률을 예측해줘"
+"구매 가능성이 높은 고객을 찾아줘"
+
+처럼 실제 고객 예측이 필요한 요청은
+DataFrame이 먼저 준비되어야 합니다.
+
+반면
+
+"모델 성능을 비교해줘"
+"어떤 모델이 가장 좋아?"
+
+처럼 저장된 모델 검증 성능만 비교하는 요청은
+DataFrame이 없어도 model_agent를
+바로 선택할 수 있습니다.
+
+
+5.
 
 사용자가 시각화 또는 관계 분석을 요청했고
 
@@ -579,7 +712,7 @@ Data 완료 후
 Visualization Agent를 실행해야 합니다.
 
 
-5.
+6.
 
 사용자가
 
@@ -603,7 +736,7 @@ Data 완료
 Visualization을 선택할 수 있습니다.
 
 
-6.
+7.
 
 Data → Prep → Model → Visualization 순서를
 기계적으로 실행하지 마십시오.
@@ -744,6 +877,38 @@ Data
 
 
 ========================================
+[예시 8]
+========================================
+
+사용자:
+
+"고객별 7일 이내 구매확률을 예측해줘"
+
+
+실행:
+
+Data
+→ Model
+→ Final
+
+
+========================================
+[예시 9]
+========================================
+
+사용자:
+
+"저장된 모델 성능을 비교해서
+어떤 모델이 가장 좋은지 알려줘"
+
+
+실행:
+
+Model
+→ Final
+
+
+========================================
 [최종 규칙]
 ========================================
 
@@ -768,6 +933,11 @@ Data
 사용자가 요청한 전문 Agent:
 
 {requested_agents}
+
+
+모델 성능 비교 요청:
+
+{model_comparison_request}
 
 
 다시 선택하면 안 되는 Agent:
@@ -818,6 +988,9 @@ visualization_result 존재:
                 "requested_agents":
                     requested_agents,
 
+                "model_comparison_request":
+                    model_comparison_request,
+
                 "blocked_agents":
                     blocked_agents,
 
@@ -846,13 +1019,21 @@ visualization_result 존재:
         if (
             not has_dataframe
 
-            and decision.next_agent
-            in {
-                "prep_agent",
-                "model_agent",
-                "experiment_agent",
-                "visualization_agent",
-            }
+            and (
+                decision.next_agent
+                in {
+                    "prep_agent",
+                    "experiment_agent",
+                    "visualization_agent",
+                }
+
+                or (
+                    decision.next_agent
+                    == "model_agent"
+
+                    and not model_comparison_request
+                )
+            )
         ):
 
             decision = RouteDecision(
@@ -861,8 +1042,38 @@ visualization_result 존재:
                     "data_agent",
 
                 reason=(
-                    "전문 Agent 작업에 필요한 DataFrame이 "
+                    "요청한 전문 작업에 필요한 DataFrame이 "
                     "아직 없으므로 먼저 data_agent를 실행합니다."
+                )
+            )
+
+
+        # =================================================
+        # 모델 성능 비교는 DataFrame 없이 바로 Model Agent 실행
+        # =================================================
+
+        if (
+            model_comparison_request
+
+            and requested_agents[
+                "model_agent"
+            ]
+
+            and "model"
+            not in completed_steps
+
+            and "prep"
+            not in completed_steps
+        ):
+
+            decision = RouteDecision(
+
+                next_agent=
+                    "model_agent",
+
+                reason=(
+                    "저장된 모델 성능 비교 요청이므로 "
+                    "별도 DataFrame 조회 없이 Model Agent를 실행합니다."
                 )
             )
 
@@ -896,6 +1107,37 @@ visualization_result 존재:
 
         # =================================================
         # Prep 요청이 없거나 완료된 뒤
+        # Model 요청 보장
+        # =================================================
+
+        elif (
+            requested_agents[
+                "model_agent"
+            ]
+
+            and "model"
+            not in completed_steps
+
+            and (
+                model_comparison_request
+                or has_dataframe
+            )
+        ):
+
+            decision = RouteDecision(
+
+                next_agent=
+                    "model_agent",
+
+                reason=(
+                    "사용자가 모델 예측 또는 모델 성능 비교를 요청했고 "
+                    "현재 실행 조건이 준비되어 있습니다."
+                )
+            )
+
+
+        # =================================================
+        # Model 요청이 없거나 완료된 뒤
         # Visualization 요청 보장
         # =================================================
 

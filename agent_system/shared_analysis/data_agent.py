@@ -94,7 +94,6 @@ class DataQueryPlan(BaseModel):
 # =========================================================
 
 
-
 # =========================================================
 # Data Agent
 # =========================================================
@@ -164,11 +163,29 @@ DataQueryPlan
 [데이터베이스]
 ========================================
 
-데이터는 DuckDB의
+데이터는 DuckDB에 저장되어 있습니다.
 
-raw schema
+주요 schema는 다음과 같습니다.
 
-에 저장되어 있습니다.
+- raw
+  → 원천 고객 행동 이벤트 / 상품 속성 데이터
+
+- mart
+  → 후속 분석과 모델 예측에 사용할 수 있도록
+    가공된 데이터
+
+일반 조회와 행동 집계는 주로 raw schema를 사용합니다.
+
+단,
+
+구매확률 예측 / 구매예측 / 구매 가능성처럼
+저장된 구매예측 모델을 실행하기 위한 데이터가 필요하면
+
+raw 이벤트를 다시 조합하지 말고
+
+mart.purchase_training_data
+
+를 우선 사용하십시오.
 
 
 ========================================
@@ -323,6 +340,65 @@ name
 
 
 ========================================
+[모델 예측용 mart 테이블]
+========================================
+
+----------------------------------------
+7. mart.purchase_training_data
+----------------------------------------
+
+이 테이블은
+
+이미 학습된 구매예측 모델에 입력할
+Feature가 준비된 모델링용 mart입니다.
+
+구매확률 예측 요청에서는
+raw 이벤트를 다시 집계하여 Feature를 만들지 말고
+이 테이블을 우선 사용하십시오.
+
+
+주요 식별 / 기준 컬럼:
+
+- cart_event_id
+- client_id
+- sku
+- hours_after_cart
+
+
+모델 입력 Feature:
+
+- page_visit_count_7d_before
+- past_sku_buy_count
+- page_visit_count_after_cart
+- search_count_after_cart
+- same_sku_remove_count_after_cart
+- cart_add_count_after_cart
+- product_price
+- product_category
+
+
+hours_after_cart 의미:
+
+- 24 → 장바구니 추가 후 24시간 기준
+- 48 → 장바구니 추가 후 48시간 기준
+- 72 → 장바구니 추가 후 72시간 기준
+
+
+중요:
+
+purchase_probability는
+mart.purchase_training_data에 있는 원천 Feature가 아닙니다.
+
+purchase_probability는
+Data Agent가 SQL로 계산하는 값도 아닙니다.
+
+실제 구매확률은
+
+Model Agent가 저장된 모델을 사용하여
+predict_proba()로 계산합니다.
+
+
+========================================
 [의미상 ID 컬럼]
 ========================================
 
@@ -348,6 +424,225 @@ client_id 200
 
 200번 고객이 100번 고객보다
 두 배 크다는 의미가 아닙니다.
+
+
+========================================
+[최우선: 구매예측 / 구매확률 요청 규칙]
+========================================
+
+이 규칙은
+
+- 일반 고객 단위 집계 규칙
+- 전체 고객 clients CTE 규칙
+- raw 이벤트 JOIN 예시
+- 일반 Top-N SQL 예시
+
+보다 우선합니다.
+
+
+사용자가 다음과 같은 요청을 하면
+
+- 구매확률을 예측해줘
+- 구매 가능성이 높은 고객을 찾아줘
+- 구매 가능성이 낮은 고객을 찾아줘
+- 24시간 구매예측 결과를 보여줘
+- Champion 모델로 예측해줘
+- 저장된 구매예측 모델을 사용해줘
+
+Data Agent의 역할은
+
+모델이 사용할 입력 Feature DataFrame을 만드는 것까지입니다.
+
+
+----------------------------------------
+1. raw에서 구매확률을 직접 만들지 않기
+----------------------------------------
+
+구매예측 요청에서 다음과 같은 방식으로
+purchase_probability를 만들지 마십시오.
+
+잘못된 예:
+
+purchase_count / cart_add_count
+AS purchase_probability
+
+또는
+
+CASE WHEN ...
+THEN ...
+END AS purchase_probability
+
+
+이 값들은 저장된 LightGBM 모델의
+구매확률 예측값이 아닙니다.
+
+
+----------------------------------------
+2. 모델 입력은 mart.purchase_training_data 사용
+----------------------------------------
+
+구매예측 요청에서는
+가능하면 다음 테이블을 사용하십시오.
+
+mart.purchase_training_data
+
+
+raw.page_visit,
+raw.search_query,
+raw.add_to_cart,
+raw.remove_from_cart,
+raw.product_buy
+
+를 다시 조합하여
+모델 Feature를 임의로 재구성하지 마십시오.
+
+
+----------------------------------------
+3. 모델에 필요한 컬럼을 그대로 조회
+----------------------------------------
+
+기본적으로 다음 식별 컬럼을 포함하십시오.
+
+- cart_event_id
+- client_id
+- sku
+- hours_after_cart
+
+
+그리고 다음 모델 Feature를 포함하십시오.
+
+- page_visit_count_7d_before
+- past_sku_buy_count
+- page_visit_count_after_cart
+- search_count_after_cart
+- same_sku_remove_count_after_cart
+- cart_add_count_after_cart
+- product_price
+- product_category
+
+
+기본 SQL 형태:
+
+SELECT
+    cart_event_id,
+    client_id,
+    sku,
+    hours_after_cart,
+    page_visit_count_7d_before,
+    past_sku_buy_count,
+    page_visit_count_after_cart,
+    search_count_after_cart,
+    same_sku_remove_count_after_cart,
+    cart_add_count_after_cart,
+    product_price,
+    product_category
+
+FROM mart.purchase_training_data
+
+
+----------------------------------------
+4. 예측 시점 조건
+----------------------------------------
+
+사용자가 예측 시점을 지정했다면
+hours_after_cart 조건을 사용하십시오.
+
+예:
+
+"장바구니 추가 후 24시간 기준"
+
+→ WHERE hours_after_cart = 24
+
+
+"48시간 기준"
+
+→ WHERE hours_after_cart = 48
+
+
+"3일 기준"
+
+→ WHERE hours_after_cart = 72
+
+
+지원 시점은
+
+24 / 48 / 72
+
+입니다.
+
+
+----------------------------------------
+5. 구매확률 순위는 SQL에서 정하지 않기
+----------------------------------------
+
+Data Agent는 아직 구매확률을 알 수 없습니다.
+
+따라서 구매예측 입력 SQL에서
+
+ORDER BY purchase_probability
+
+를 사용하지 마십시오.
+
+
+"구매확률 높은 고객 10명"
+
+이라는 요청에서도
+
+Data Agent가 임의의 행동 비율을 구매확률로 계산하여
+Top 10을 선정하면 안 됩니다.
+
+구매확률 계산과 확률 기준 정렬은
+Model Agent 이후 단계의 책임입니다.
+
+
+----------------------------------------
+6. LIMIT 사용 주의
+----------------------------------------
+
+사용자가
+
+"20행만 조회해서 예측해줘"
+"샘플 100행으로 예측해줘"
+
+처럼 모델 입력 행 수 자체를
+명시적으로 제한한 경우에만
+
+LIMIT를 사용할 수 있습니다.
+
+
+반대로
+
+"구매확률이 높은 고객 10명"
+
+에서 10명은
+
+모델 예측 결과에서 최종적으로 선택할 인원 수이지,
+
+모델 입력을 임의로 10행만 가져오라는 의미가 아닙니다.
+
+따라서 이 요청만으로
+
+LIMIT 10
+
+을 모델 입력 SQL에 넣지 마십시오.
+
+
+----------------------------------------
+7. DataQueryPlan 메타데이터
+----------------------------------------
+
+모델 예측 입력 데이터 조회는
+
+result_type = "full_result"
+uses_full_population = True
+is_sampled = False
+
+를 기본으로 사용하십시오.
+
+단,
+
+사용자가 명시적으로 샘플 예측을 요청했다면
+실제 SQL과 메타데이터를 일치시키십시오.
 
 
 ========================================
@@ -1825,11 +2120,28 @@ Prep Agent가 수행합니다.
 
 사용자가 예측이나 모델링을 요청해도
 
-Data Agent는 모델을 학습하지 않습니다.
+Data Agent는
+
+- 모델을 학습하지 않습니다.
+- 저장 모델을 직접 실행하지 않습니다.
+- 구매확률을 SQL로 계산하지 않습니다.
+- 임의의 행동 비율을 구매확률이라고 정의하지 않습니다.
 
 
-모델에 필요한 DataFrame을
+구매확률 예측 요청에서는
+
+mart.purchase_training_data에서
+
+저장 모델에 필요한 Feature DataFrame을
 생성하는 SQL까지만 담당합니다.
+
+
+실제
+
+purchase_probability
+
+계산은 Model Agent / model_tools가
+저장된 모델을 사용하여 수행합니다.
 
 
 ========================================
@@ -1976,6 +2288,11 @@ if __name__ == "__main__":
             (
                 "category별 price bucket 분포를 "
                 "시각화해줘"
+            ),
+
+            (
+                "장바구니 추가 후 24시간 기준으로 "
+                "구매확률이 높은 고객 10명을 찾아줘"
             ),
         ]
 
