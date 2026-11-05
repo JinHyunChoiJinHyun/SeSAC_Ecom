@@ -4,7 +4,7 @@ Team_Project_Ecom Slack DM·채널 멘션 연결 파일입니다.
 역할
 ----
 1. Slack DM 또는 채널 멘션으로 질문을 받습니다.
-2. 기존 LangGraph Multi Agent를 실행합니다.
+2. 현재 구현된 Shared Analysis LangGraph를 실행합니다.
 3. Delivery Agent를 호출합니다.
 4. final_answer를 Slack으로 전송합니다.
 5. 결과 DataFrame을 CSV로 생성해 첨부합니다.
@@ -1029,7 +1029,7 @@ def main():
     # LangGraph
     # =====================================================
 
-    from make_graph import (
+    from agent_system.shared_analysis.graph import (
         graph,
     )
 
@@ -1038,7 +1038,7 @@ def main():
     # Delivery Agent
     # =====================================================
 
-    from delivery_agent import (
+    from agent_system.delivery.delivery_agent import (
         deliver_to_slack,
     )
 

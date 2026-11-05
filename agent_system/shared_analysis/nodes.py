@@ -22,7 +22,7 @@ from .state import (
 )
 
 
-from .supervisor import (
+from .analysis_router import (
     route_request,
 )
 
@@ -79,6 +79,7 @@ from agent_system.tools.visualization_tools import (
 from agent_system.tools.model_tools import (
     predict_purchase,
     get_model_comparison,
+    load_model_registry,
 )
 
 
@@ -90,175 +91,135 @@ from agent_system.tools.model_tools import (
 def extract_customer_top_n_request(
     question: str,
 ):
-    """
-    사용자가 구매확률/구매 가능성이 높은 '고객 N명'을
-    명시적으로 요청했는지 확인합니다.
-
-    예:
-    - 구매확률이 높은 고객 10명을 찾아줘
-    - 구매 가능성 상위 20명 고객을 보여줘
-
-    반환:
-    - int: 요청한 고객 수
-    - None: 고객 Top-N 요청이 아님
-    """
-
-    query = (
-        question
-        or ""
-    ).lower()
-
+    """구매확률 기준 고객 N명 요청에서 명시된 N을 추출합니다."""
+    query = (question or "").lower()
 
     if "고객" not in query:
         return None
 
-
     probability_keywords = [
-        "구매확률",
-        "구매 확률",
-        "구매 가능성",
-        "구매가능성",
+        "구매확률", "구매 확률", "구매 가능성", "구매가능성",
     ]
-
-
     ranking_keywords = [
-        "높은",
-        "높게",
-        "상위",
-        "top",
+        "높은", "높게", "상위", "top",
+        "낮은", "낮게", "하위", "bottom",
     ]
 
-
-    if not any(
-        keyword in query
-        for keyword in probability_keywords
-    ):
+    if not any(keyword in query for keyword in probability_keywords):
         return None
-
-
-    if not any(
-        keyword in query
-        for keyword in ranking_keywords
-    ):
+    if not any(keyword in query for keyword in ranking_keywords):
         return None
-
 
     patterns = [
         r"고객\s*(\d+)\s*명",
         r"상위\s*(\d+)\s*명",
+        r"하위\s*(\d+)\s*명",
         r"top\s*(\d+)",
+        r"bottom\s*(\d+)",
         r"(\d+)\s*명의?\s*고객",
     ]
 
-
     for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            query,
-        )
-
+        match = re.search(pattern, query)
         if match:
-
-            top_n = int(
-                match.group(
-                    1
-                )
-            )
-
-
+            top_n = int(match.group(1))
             if top_n > 0:
                 return top_n
 
-
     return None
-
 
 def aggregate_customer_top_n_predictions(
     prediction_df: pd.DataFrame,
-    top_n: int,
+    top_n: int | None = None,
+    ascending: bool = False,
 ):
-    """
-    이벤트 단위 구매확률 예측 결과를
-    고객 단위 Top-N 결과로 변환합니다.
-
-    고객별 여러 cart_event_id가 존재할 수 있으므로,
-    각 고객의 가장 높은 purchase_probability 행을
-    대표 예측으로 사용합니다.
-
-    이 방식은 모델 자체의 예측 단위를 바꾸지 않고,
-    사용자에게 보여주는 최종 고객 랭킹만 정리합니다.
-    """
-
-    if not isinstance(
-        prediction_df,
-        pd.DataFrame,
-    ):
-
+    """이벤트 예측을 고객별 대표 예측으로 변환합니다."""
+    if not isinstance(prediction_df, pd.DataFrame) or prediction_df.empty:
         return prediction_df
 
-
-    if prediction_df.empty:
-
+    required_columns = {"client_id", "purchase_probability"}
+    if not required_columns.issubset(prediction_df.columns):
         return prediction_df
 
-
-    required_columns = {
-        "client_id",
-        "purchase_probability",
-    }
-
-
-    if not required_columns.issubset(
-        prediction_df.columns
-    ):
-
-        return prediction_df
-
-
-    ranked_df = (
-        prediction_df
-        .copy()
+    ranked_df = prediction_df.copy()
+    ranked_df["purchase_probability"] = pd.to_numeric(
+        ranked_df["purchase_probability"], errors="coerce"
     )
-
-
-    ranked_df[
-        "purchase_probability"
-    ] = pd.to_numeric(
-        ranked_df[
-            "purchase_probability"
-        ],
-        errors="coerce",
-    )
-
 
     ranked_df = (
         ranked_df
         .sort_values(
             "purchase_probability",
-            ascending=False,
+            ascending=bool(ascending),
             na_position="last",
         )
-        # 고객별 가장 높은 확률의 예측 이벤트 1건만 유지
-        .drop_duplicates(
-            subset=[
-                "client_id"
-            ],
-            keep="first",
-        )
-        .head(
-            int(
-                top_n
-            )
-        )
-        .reset_index(
-            drop=True
-        )
+        .drop_duplicates(subset=["client_id"], keep="first")
+        .reset_index(drop=True)
     )
 
+    if top_n is not None:
+        ranked_df = ranked_df.head(max(1, int(top_n))).reset_index(drop=True)
 
     return ranked_df
 
+
+def apply_prediction_segment(
+    prediction_df: pd.DataFrame,
+    segment: str = "all",
+    sort_order: str = "desc",
+    top_n: int | None = None,
+):
+    """ModelPlan의 segment / sort_order / top_n을 실제 결과에 적용합니다."""
+    if not isinstance(prediction_df, pd.DataFrame) or prediction_df.empty:
+        return prediction_df
+    if "purchase_probability" not in prediction_df.columns:
+        return prediction_df
+
+    segment = str(segment or "all").strip().lower()
+    sort_order = str(sort_order or "desc").strip().lower()
+
+    if segment not in {"all", "high", "low", "target"}:
+        raise ValueError(f"지원하지 않는 구매확률 segment입니다: {segment}")
+    if sort_order not in {"asc", "desc"}:
+        raise ValueError(f"지원하지 않는 sort_order입니다: {sort_order}")
+
+    result_df = prediction_df.copy()
+    result_df["purchase_probability"] = pd.to_numeric(
+        result_df["purchase_probability"], errors="coerce"
+    )
+
+    # promotion_target용 70~95 percentile 후보 구간
+    if segment == "target":
+        valid_probability = result_df["purchase_probability"].dropna()
+        if valid_probability.empty:
+            return result_df.iloc[0:0].copy()
+
+        lower_bound = float(valid_probability.quantile(0.70))
+        upper_bound = float(valid_probability.quantile(0.95))
+        result_df = result_df.loc[
+            (result_df["purchase_probability"] >= lower_bound)
+            & (result_df["purchase_probability"] <= upper_bound)
+        ].copy()
+
+    result_df = (
+        result_df
+        .sort_values(
+            "purchase_probability",
+            ascending=(sort_order == "asc"),
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    if top_n is not None:
+        result_df = result_df.head(max(1, int(top_n))).reset_index(drop=True)
+
+    return result_df
+
+
+# =========================================================
+# 완료 Step 추가
+# =========================================================
 
 # =========================================================
 # 완료 Step 추가
@@ -3027,89 +2988,63 @@ def model_node(
 
 
         # -------------------------------------------------
-        # ModelPlan 버전 호환 처리
-        #
-        # 현재 프로젝트의 ModelPlan 버전에 따라
-        # model_name / threshold /
-        # include_comparison_summary 필드가 없을 수 있습니다.
-        #
-        # 없는 경우 아래 기본값을 사용합니다.
+        # ModelPlan 실제 필드 읽기
         # -------------------------------------------------
-
-        plan_task = getattr(
-            plan,
-            "task",
-            None,
-        )
-
-
+        plan_task = getattr(plan, "task", None)
         if not plan_task:
+            raise ValueError("Model Agent가 task를 반환하지 않았습니다.")
 
-            raise ValueError(
-                "Model Agent가 task를 반환하지 않았습니다."
+        plan_prediction_hour = getattr(plan, "prediction_hour", None)
+        plan_segment = getattr(plan, "segment", "all") or "all"
+        plan_top_n = max(1, min(int(getattr(plan, "top_n", 20) or 20), 100))
+        plan_sort_order = getattr(plan, "sort_order", "desc") or "desc"
+        plan_metric = getattr(plan, "metric", "all") or "all"
+        plan_is_supported = bool(getattr(plan, "is_supported", True))
+        plan_unsupported_reason = getattr(plan, "unsupported_reason", "") or ""
+        plan_reason = getattr(plan, "reason", "") or ""
+
+        # 현재 ModelPlan에는 model_name / threshold가 없으므로 서비스 기본값 사용
+        plan_model_name = "champion"
+        plan_threshold = None
+
+        print("[Model Plan]")
+        print(f"- task: {plan_task}")
+        print(f"- prediction_hour: {plan_prediction_hour}")
+        print(f"- segment: {plan_segment}")
+        print(f"- top_n: {plan_top_n}")
+        print(f"- sort_order: {plan_sort_order}")
+        print(f"- metric: {plan_metric}")
+        print(f"- is_supported: {plan_is_supported}")
+        print(f"- reason: {plan_reason}")
+
+        if not plan_is_supported:
+            unsupported_reason = (
+                plan_unsupported_reason
+                or "현재 지원하지 않는 Model 요청입니다."
             )
-
-
-        plan_model_name = getattr(
-            plan,
-            "model_name",
-            "champion",
-        )
-
-
-        if not plan_model_name:
-
-            plan_model_name = (
-                "champion"
+            completed_steps = add_completed_step(state, "model")
+            return Command(
+                update={
+                    "current_agent": "model_agent",
+                    "model_result": {
+                        "task": plan_task,
+                        "success": False,
+                        "is_supported": False,
+                        "unsupported_reason": unsupported_reason,
+                        "plan_reason": plan_reason,
+                        "prediction_hour": plan_prediction_hour,
+                        "segment": plan_segment,
+                        "sort_order": plan_sort_order,
+                        "top_n": plan_top_n,
+                    },
+                    "model_result_dataframe": None,
+                    "model_comparison_dataframe": None,
+                    "model_error": "",
+                    "error": "",
+                    "completed_steps": completed_steps,
+                },
+                goto="final_response",
             )
-
-
-        plan_threshold = getattr(
-            plan,
-            "threshold",
-            None,
-        )
-
-
-        plan_include_comparison = getattr(
-            plan,
-            "include_comparison_summary",
-            True,
-        )
-
-
-        plan_reason = getattr(
-            plan,
-            "reason",
-            "",
-        )
-
-
-        print(
-            "[Model Plan]"
-        )
-
-        print(
-            f"- task: {plan_task}"
-        )
-
-        print(
-            f"- model: {plan_model_name}"
-        )
-
-        print(
-            f"- threshold: {plan_threshold}"
-        )
-
-        print(
-            f"- include_comparison_summary: "
-            f"{plan_include_comparison}"
-        )
-
-        print(
-            f"- reason: {plan_reason}"
-        )
-
 
         # -------------------------------------------------
         # 결과 저장 변수
@@ -3131,227 +3066,162 @@ def model_node(
 
         # =================================================
         # 1. 모델 비교
-        #
-        # 저장된 Registry 성능을 조회하므로
-        # DataFrame이 없어도 실행 가능합니다.
         # =================================================
-
-        if (
-            plan_task
-            == "model_comparison"
-        ):
-
-            comparison_df = (
-                get_model_comparison()
-            )
-
-
-            model_result.update({
-
-                "success":
-                    True,
-
-                "model_comparison":
-                    comparison_df.to_dict(
-                        orient="records"
-                    ),
-            })
-
-
-        # =================================================
-        # 2. 구매확률 예측
-        # =================================================
-
-        elif (
-            plan_task
-            == "purchase_prediction"
-        ):
-
-            # ---------------------------------------------
-            # 구매확률 예측에는 DataFrame 필요
-            # ---------------------------------------------
-
-            if not isinstance(
-                df,
-                pd.DataFrame
-            ):
-
-                raise ValueError(
-                    "모델 예측에 사용할 DataFrame이 없습니다."
-                )
-
-
-            if df.empty:
-
-                raise ValueError(
-                    "모델 예측에 사용할 DataFrame이 비어 있습니다."
-                )
-
-
-            # ---------------------------------------------
-            # 실제 Model Tool 실행
-            # ---------------------------------------------
-
-            prediction_result = (
-                predict_purchase(
-
-                    df=
-                        df,
-
-                    model_name=
-                        plan_model_name,
-
-                    threshold=
-                        plan_threshold,
-                )
-            )
-
-
-            # ---------------------------------------------
-            # Tool 실행 성공 여부 확인
-            # ---------------------------------------------
-
-            if not prediction_result.get(
-                "success"
-            ):
-
-                raise ValueError(
-
-                    prediction_result.get(
-                        "error",
-                        "모델 예측 실패"
-                    )
-                )
-
-
-            # ---------------------------------------------
-            # 실제 예측 결과 DataFrame
-            # ---------------------------------------------
-
-            prediction_df = (
-                prediction_result[
-                    "prediction_dataframe"
-                ]
-            )
-
-
-            # ---------------------------------------------
-            # 고객 Top-N 요청 후처리
-            #
-            # 모델 예측 자체는 cart_event_id 단위로 수행합니다.
-            # 다만 사용자가
-            # "구매확률이 높은 고객 N명"을 요청했다면
-            # 고객별 최고 예측확률 1건을 대표값으로 사용하여
-            # 중복 client_id를 제거한 뒤 상위 N명만 반환합니다.
-            # ---------------------------------------------
-
-            raw_prediction_row_count = len(
-                prediction_df
-            )
-
-
-            customer_top_n = (
-                extract_customer_top_n_request(
-                    question
-                )
-            )
-
-
-            if customer_top_n is not None:
-
-                prediction_df = (
-                    aggregate_customer_top_n_predictions(
-                        prediction_df=
-                            prediction_df,
-
-                        top_n=
-                            customer_top_n,
-                    )
-                )
-
-
-            # ---------------------------------------------
-            # 요약 정보 저장
-            # ---------------------------------------------
-
-            model_result.update(
-                prediction_result
-            )
-
-
-            if customer_top_n is not None:
-
-                model_result[
-                    "customer_top_n"
-                ] = int(
-                    customer_top_n
-                )
-
-                model_result[
-                    "customer_ranking_applied"
-                ] = True
-
-                model_result[
-                    "customer_ranking_method"
-                ] = (
-                    "client_id별 최고 purchase_probability"
-                )
-
-                model_result[
-                    "raw_prediction_row_count"
-                ] = int(
-                    raw_prediction_row_count
-                )
-
-                model_result[
-                    "customer_result_count"
-                ] = int(
-                    len(
-                        prediction_df
-                    )
-                )
-
-
-            # DataFrame은 State 별도 필드에 저장하므로
-            # model_result에서는 제거
-            model_result.pop(
-                "prediction_dataframe",
-                None
-            )
-
-
-            # ---------------------------------------------
-            # 모델 선택 근거도 함께 반환
-            # ---------------------------------------------
+        if plan_task == "model_comparison":
+            comparison_df = get_model_comparison()
 
             if (
-                plan_include_comparison
+                plan_prediction_hour is not None
+                and isinstance(comparison_df, pd.DataFrame)
+                and "prediction_hour" in comparison_df.columns
             ):
-
                 comparison_df = (
-                    get_model_comparison()
+                    comparison_df.loc[
+                        pd.to_numeric(
+                            comparison_df["prediction_hour"], errors="coerce"
+                        ) == int(plan_prediction_hour)
+                    ]
+                    .copy()
+                    .reset_index(drop=True)
                 )
 
-
-                model_result[
-                    "model_comparison"
-                ] = (
-                    comparison_df.to_dict(
-                        orient="records"
+            if (
+                plan_metric != "all"
+                and isinstance(comparison_df, pd.DataFrame)
+                and plan_metric in comparison_df.columns
+            ):
+                comparison_df = (
+                    comparison_df
+                    .sort_values(
+                        plan_metric,
+                        ascending=(plan_metric == "brier_score"),
+                        na_position="last",
                     )
+                    .reset_index(drop=True)
                 )
 
+            model_result.update({
+                "success": True,
+                "prediction_hour": plan_prediction_hour,
+                "metric": plan_metric,
+                "model_comparison": comparison_df.to_dict(orient="records"),
+            })
 
         # =================================================
-        # 지원하지 않는 작업
+        # 2. 모델 정보
         # =================================================
+        elif plan_task == "model_info":
+            registry = load_model_registry()
+            models = registry.get("models", {}) or {}
 
-        else:
+            model_result.update({
+                "success": True,
+                "configured_model": registry.get("configured_model", ""),
+                "champion_model": registry.get("champion", ""),
+                "default_prediction_hour": registry.get("default_prediction_hour"),
+                "available_prediction_hours": sorted({
+                    int(spec.get("prediction_hour"))
+                    for spec in models.values()
+                    if spec.get("prediction_hour") is not None
+                }),
+                "feature_columns": next(
+                    (list(spec.get("feature_columns", [])) for spec in models.values()),
+                    [],
+                ),
+                "models": models,
+            })
 
-            raise ValueError(
-                f"지원하지 않는 Model 작업입니다: {plan_task}"
+        # =================================================
+        # 3. 구매확률 예측 / 프로모션 후보
+        # =================================================
+        elif plan_task in {"purchase_prediction", "promotion_target"}:
+            if not isinstance(df, pd.DataFrame):
+                raise ValueError("모델 예측에 사용할 DataFrame이 없습니다.")
+            if df.empty:
+                raise ValueError("모델 예측에 사용할 DataFrame이 비어 있습니다.")
+
+            effective_segment = (
+                "target" if plan_task == "promotion_target" else plan_segment
             )
 
+            question_top_n = extract_customer_top_n_request(question)
+            effective_top_n = (
+                int(question_top_n)
+                if question_top_n is not None
+                else int(plan_top_n)
+            )
+            ascending = plan_sort_order == "asc"
+
+            prediction_result = predict_purchase(
+                df=df,
+                model_name=plan_model_name,
+                threshold=plan_threshold,
+                prediction_hour=plan_prediction_hour,
+            )
+
+            if not prediction_result.get("success"):
+                raise ValueError(
+                    prediction_result.get("error", "모델 예측 실패")
+                )
+
+            prediction_df = prediction_result["prediction_dataframe"]
+            raw_prediction_row_count = len(prediction_df)
+
+            customer_ranking_applied = bool(
+                "client_id" in prediction_df.columns
+                and (
+                    question_top_n is not None
+                    or effective_segment in {"high", "low", "target"}
+                    or plan_task == "promotion_target"
+                )
+            )
+
+            if customer_ranking_applied:
+                prediction_df = aggregate_customer_top_n_predictions(
+                    prediction_df=prediction_df,
+                    top_n=None,
+                    ascending=ascending,
+                )
+
+            prediction_df = apply_prediction_segment(
+                prediction_df=prediction_df,
+                segment=effective_segment,
+                sort_order=plan_sort_order,
+                top_n=effective_top_n,
+            )
+
+            model_result.update(prediction_result)
+            model_result.pop("prediction_dataframe", None)
+            model_result.update({
+                "task": plan_task,
+                "prediction_hour": plan_prediction_hour,
+                "segment": effective_segment,
+                "sort_order": plan_sort_order,
+                "top_n": effective_top_n,
+                "customer_ranking_applied": customer_ranking_applied,
+                "raw_prediction_row_count": int(raw_prediction_row_count),
+                "result_count": int(len(prediction_df)),
+            })
+
+            if customer_ranking_applied:
+                model_result["customer_top_n"] = int(effective_top_n)
+                model_result["customer_result_count"] = int(len(prediction_df))
+                model_result["customer_ranking_method"] = (
+                    "client_id별 가장 낮은 purchase_probability"
+                    if ascending
+                    else "client_id별 가장 높은 purchase_probability"
+                )
+
+            comparison_df = get_model_comparison()
+            model_result["model_comparison"] = comparison_df.to_dict(
+                orient="records"
+            )
+
+        # =================================================
+        # 4. 지원하지 않는 task
+        # =================================================
+        else:
+            raise ValueError(f"지원하지 않는 Model 작업입니다: {plan_task}")
 
         # -------------------------------------------------
         # 완료 Step 기록
@@ -3522,6 +3392,17 @@ def build_model_response_section(
     )
 
 
+    if model_result.get("is_supported", True) is False:
+        unsupported_reason = (
+            model_result.get("unsupported_reason", "")
+            or "현재 지원하지 않는 Model 요청입니다."
+        )
+        return (
+            "현재 요청은 Model Agent에서 지원하지 않습니다.\n"
+            f"- 이유: {unsupported_reason}"
+        )
+
+
     plan_reason = (
         model_result.get(
             "plan_reason",
@@ -3639,10 +3520,12 @@ def build_model_response_section(
     # 2. 구매확률 예측
     # =====================================================
 
-    if task == "purchase_prediction":
+    if task in {"purchase_prediction", "promotion_target"}:
 
         final_text = (
-            "구매확률 예측이 완료되었습니다.\n"
+            "프로모션 후보 고객 분석이 완료되었습니다.\n"
+            if task == "promotion_target"
+            else "구매확률 예측이 완료되었습니다.\n"
         )
 
 
@@ -3677,6 +3560,12 @@ def build_model_response_section(
         )
 
 
+        segment = model_result.get("segment", "all") or "all"
+        sort_order = model_result.get("sort_order", "desc") or "desc"
+        response_top_n = int(model_result.get("top_n", 20) or 20)
+        prediction_hour = model_result.get("prediction_hour")
+
+
         if plan_reason:
 
             final_text += (
@@ -3687,6 +3576,15 @@ def build_model_response_section(
 
         final_text += (
             "\n[예측 설정]\n"
+        )
+
+
+        if prediction_hour is not None:
+            final_text += f"- 예측 시점: {int(prediction_hour)}시간\n"
+
+        final_text += (
+            f"- segment: {segment}\n"
+            f"- 정렬: {'낮은 확률 순' if sort_order == 'asc' else '높은 확률 순'}\n"
         )
 
 
@@ -3768,10 +3666,18 @@ def build_model_response_section(
                     )
 
 
+                ranking_method = (
+                    model_result.get("customer_ranking_method", "")
+                    or (
+                        "client_id별 가장 낮은 구매확률 1건"
+                        if sort_order == "asc"
+                        else "client_id별 가장 높은 구매확률 1건"
+                    )
+                )
+
                 final_text += (
                     f"- 최종 고객 결과: {row_count:,}명\n"
-                    f"- 고객 집계 기준: "
-                    f"client_id별 가장 높은 구매확률 1건을 대표값으로 사용\n"
+                    f"- 고객 집계 기준: {ranking_method}\n"
                 )
 
 
@@ -3944,16 +3850,15 @@ def build_model_response_section(
                     display_df
                     .sort_values(
                         probability_column,
-                        ascending=False,
+                        ascending=(sort_order == "asc"),
                         na_position="last",
                     )
                 )
 
 
             display_rows = min(
-                len(
-                    display_df
-                ),
+                len(display_df),
+                max(1, int(response_top_n)),
                 20,
             )
 
@@ -3971,15 +3876,20 @@ def build_model_response_section(
 
             if customer_ranking_applied:
 
+                ranking_label = "하위" if sort_order == "asc" else "상위"
+                if segment == "target":
+                    ranking_label = "프로모션 후보"
+
                 final_text += (
-                    f"\n[구매확률 상위 고객 {display_rows}명]\n"
+                    f"\n[구매확률 {ranking_label} 고객 {display_rows}명]\n"
                     f"{preview}"
                 )
 
             else:
 
+                ranking_label = "하위" if sort_order == "asc" else "상위"
                 final_text += (
-                    f"\n[예측 결과 상위 {display_rows}행]\n"
+                    f"\n[예측 결과 {ranking_label} {display_rows}행]\n"
                     f"{preview}"
                 )
 
@@ -4034,7 +3944,32 @@ def build_model_response_section(
 
 
     # =====================================================
-    # 3. 기타 Model 결과
+    # 3. 모델 정보
+    # =====================================================
+    if task == "model_info":
+        configured_model = model_result.get("configured_model", "") or ""
+        champion_model = model_result.get("champion_model", "") or ""
+        available_hours = model_result.get("available_prediction_hours", []) or []
+        feature_columns = model_result.get("feature_columns", []) or []
+
+        final_text = "현재 Model 설정 정보입니다.\n"
+        if configured_model:
+            final_text += f"- 기본 모델: {configured_model}\n"
+        if champion_model:
+            final_text += f"- 기본 Champion: {champion_model}\n"
+        if available_hours:
+            final_text += (
+                "- 지원 예측 시점: "
+                + ", ".join(f"{int(hour)}시간" for hour in available_hours)
+                + "\n"
+            )
+        if feature_columns:
+            final_text += "- Feature: " + ", ".join(map(str, feature_columns))
+        return final_text
+
+
+    # =====================================================
+    # 4. 기타 Model 결과
     # =====================================================
 
     final_text = (

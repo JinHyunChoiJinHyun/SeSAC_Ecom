@@ -888,6 +888,7 @@ def predict_purchase(
     df: pd.DataFrame,
     model_name: str | None = "champion",
     threshold: float | None = None,
+    prediction_hour: int | None = None,
 ) -> dict:
     """
     기존 CART SIGNAL 저장 모델을 사용해 구매확률을 예측합니다.
@@ -971,15 +972,22 @@ def predict_purchase(
         )
 
 
-        prediction_hours = (
-            _resolve_prediction_hours(
-                df=
-                    df,
+        if prediction_hour is not None:
+            prediction_hours = [
+                _validate_prediction_hour(
+                    prediction_hour
+                )
+            ]
+        else:
+            prediction_hours = (
+                _resolve_prediction_hours(
+                    df=
+                        df,
 
-                model_name=
-                    model_name,
+                    model_name=
+                        model_name,
+                )
             )
-        )
 
 
         result_parts: list[
@@ -998,9 +1006,16 @@ def predict_purchase(
         ] = {}
 
 
-        report = (
-            _load_model_report()
-        )
+        try:
+            report = (
+                _load_model_report()
+            )
+        except (
+            FileNotFoundError,
+            ValueError,
+            pd.errors.EmptyDataError,
+        ):
+            report = None
 
 
         for hour in prediction_hours:
@@ -1175,6 +1190,8 @@ def predict_purchase(
                     prediction_hour=
                         hour,
                 )
+                if report is not None
+                else {}
             )
 
 
