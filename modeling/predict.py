@@ -12,11 +12,8 @@ from config import(
     PROJECT_ROOT,
     MODEL_DIR,
     SQL_DIR,
-    PREDICTION_HOURS,
-    PURCHASE_DEADLINE_DAYS,
     FEATURE_COLUMNS,
     ID_COLUMN,
-    PREDICTION_HOUR_COLUMN,
     TIME_COLUMN,
     PREDICTION_MODEL_NAME,
     PREDICTIONS_TABLE,
@@ -27,8 +24,8 @@ from config import(
 # 모듈 경로에 현재 루트 추가
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from modeling.data_loader import load_prediction_data
-from database.db_client import get_duckdb_connection
+from modeling.data_loader import load_prediction_data, load_build_params
+from common.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +38,7 @@ PREDICTION_RESULT_COLUMNS = [
     ID_COLUMN,
     "client_id",
     "sku",
-    PREDICTION_HOUR_COLUMN,
+    "minutes_after_cart",
     TIME_COLUMN,
     "purchase_probability",
     "promotion_segment",
@@ -70,38 +67,37 @@ def assign_promotion_segment(purchase_probabilities: pd.Series) -> pd.Series:
 
     return segment
 
-def predict_purchase_probability(prediction_hour: int, predicted_at: datetime) -> pd.DataFrame:
+def predict_purchase_probability(predicted_at: datetime, params: dict) -> pd.DataFrame:
     """예측 기준 시점에 대해 구매 확률 계산"""
-    df = load_prediction_data(prediction_hour)
+    df = load_prediction_data()
 
     # 예측 대상이 없는 경우 빈 df 반환 (모델을 불러오기 전에 확인하여 불필요한 로드 및 빈 입력 예측 방지)
     if df.empty: 
         # 예측 대상이 없는 경우 빈 df 반환 (장바구니 이벤트가 없거나 이미 구매한 정상 상황)
-        logger.info("%s시간 예측 대상 없음", prediction_hour)
+        logger.info("예측 대상 없음")
         return pd.DataFrame(columns=PREDICTION_RESULT_COLUMNS)
 
     # 저장된 모델 불러와 구매 확률 계산
-    model_name = get_model_name(PREDICTION_MODEL_NAME, prediction_hour)
+    model_name = get_model_name(PREDICTION_MODEL_NAME, params)
     model = joblib.load(MODEL_DIR / f"{model_name}.joblib")
 
     purchase_probability = model.predict_proba(df[FEATURE_COLUMNS])[:, 1] # 구매 확률(두번째 행)만 반환
 
     # 저장할 결과
-    result_df = df[[ID_COLUMN, "client_id", "sku", PREDICTION_HOUR_COLUMN, TIME_COLUMN]].copy() # 필요한 컬럼만 복사
+    result_df = df[[ID_COLUMN, "client_id", "sku", "minutes_after_cart", TIME_COLUMN]].copy() # 필요한 컬럼만 복사
     result_df["predicted_at"] = predicted_at
     result_df["purchase_probability"] = purchase_probability
     result_df["promotion_segment"] = assign_promotion_segment(result_df["purchase_probability"])
     result_df["model_name"] = model_name
 
-    logger.info("%s시간 예측 완료 (%s건)", prediction_hour, len(result_df))
+    logger.info("예측 완료 (%s건)", len(result_df))
     return result_df[PREDICTION_RESULT_COLUMNS]
 
-def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime) -> None:
+def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime, params: dict) -> None:
     """예측 결과 DB 저장"""
 
     # 예측에 사용된 모델들의 이름 저장
-    model_names = [get_model_name(PREDICTION_MODEL_NAME, hour) for hour in PREDICTION_HOURS]
-    model_name_placeholders = ", ".join("?" for _ in model_names) # 실행된 모델의 수만큼 ? 생성
+    model_name = get_model_name(PREDICTION_MODEL_NAME, params)
     
     conn = get_duckdb_connection(read_only=False)
     
@@ -115,8 +111,8 @@ def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime
         conn.execute(f"""
             DELETE FROM {PREDICTIONS_TABLE}
             WHERE CAST(predicted_at AS DATE) = CAST(? AS DATE)
-            AND model_name IN ({model_name_placeholders})
-        """,[predicted_at, *model_names]) # 첫번쨰 ?에 실행 시각, 나머지 ?에 모델 이름 입력
+            AND model_name = ?
+        """,[predicted_at, model_name]) # 첫번쨰 ?에 실행 시각, 나머지 ?에 모델 이름 입력
 
         # 새 df 결과 값이 존재할 떄만 값 추가
         if not prediction_results_df.empty:
@@ -150,7 +146,7 @@ def summarize_predictions(prediction_results_df: pd.DataFrame) -> pd.DataFrame:
     # 시점별 예측 확률 요약
     summary = (
         prediction_results_df
-        .groupby(PREDICTION_HOUR_COLUMN)["purchase_probability"]
+        .groupby("minutes_after_cart")["purchase_probability"]
         .describe(percentiles=[0.5,lower,upper]) # 중앙값과 프로모션 대상 구간 하위/상위 경계 지점 구매 확률 추가
     )
 
@@ -161,7 +157,7 @@ def summarize_predictions(prediction_results_df: pd.DataFrame) -> pd.DataFrame:
     # 시점별 프로모션 구분 건수
     segment_counts = (
         prediction_results_df
-        .groupby([PREDICTION_HOUR_COLUMN, "promotion_segment"]) # 시점, 구분 조합으로 구분
+        .groupby(["minutes_after_cart", "promotion_segment"]) # 시점, 구분 조합으로 구분
         .size() # 조합별 장바구니 건수
         .unstack(fill_value=0) # 구분 값(low/target/high)을 컬럼으로 펼침 (없으면 0으로 채움)
         .reindex(columns=[SEGMENT_LOW, SEGMENT_TARGET, SEGMENT_HIGH], fill_value=0) # 컬럼 순서 지정
@@ -173,19 +169,18 @@ def main():
     # 예측 시점 설정
     predicted_at = datetime.now()
 
-    # 예측 시점별 예측 후 빈 df 제외
-    predictions = [predict_purchase_probability(hour, predicted_at) for hour in PREDICTION_HOURS]
-    non_empty_predictions = [df for df in predictions if not df.empty]
+    # 관찰 시점 및 데드라인 조회
+    params = load_build_params()
+    logger.info(
+        "예측 기준: 관찰 %d분, 데드라인 %d시간",
+        params["minutes_after_cart"], params["deadline_hours"],
+    )
 
-    # 시점별 예측 결과 결합
-    prediction_results_df = (
-        pd.concat(non_empty_predictions, ignore_index=True) # if 조건 만족 시 예측 결과 결합
-        if non_empty_predictions
-        else pd.DataFrame(columns=PREDICTION_RESULT_COLUMNS) # 예측 결과가 모두 비었을 경우 컬럼만 있는 빈 df 생성
-    ) # 엑셀 IF와 같은 문법
+    # 예측 시점별 예측 후 빈 df 제외
+    prediction_results_df = predict_purchase_probability(predicted_at, params)
 
     # df 저장 (결과가 비어도 호출 필요)
-    save_predictions(prediction_results_df, predicted_at)
+    save_predictions(prediction_results_df, predicted_at, params)
 
     if prediction_results_df.empty:
         logger.info("저장할 예측 결과가 없어 오늘 날짜의 기존 결과만 삭제했습니다.")

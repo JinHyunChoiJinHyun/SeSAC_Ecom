@@ -2,7 +2,7 @@
 CREATE OR REPLACE TABLE modeling.features AS
 SELECT 
     p.cart_event_id,
-    p.hours_after_cart,
+    p.minutes_after_cart,
     p.client_id,
     p.sku,
     p.cart_timestamp,

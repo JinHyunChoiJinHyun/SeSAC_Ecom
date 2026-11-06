@@ -17,15 +17,13 @@ from config import(
     REPORT_DIR,
     FEATURE_COLUMNS,
     LABEL_COLUMN,
-    PREDICTION_HOURS,
-    PURCHASE_DEADLINE_DAYS,
     get_model_name
 )
 
 # 모듈 경로에 현재 루트 추가
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from modeling.data_loader import temporal_split, load_training_data
+from modeling.data_loader import temporal_split, load_training_data, load_build_params
 from modeling.model_definitions import build_models
 
 logger = logging.getLogger(__name__)
@@ -61,16 +59,19 @@ def evaluate_predictions(y_true, probabilities) -> dict:
         "brier_score": brier_score_loss(y_true, probabilities) 
     }
 
-def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> list[dict]:
+def train_models(df:pd.DataFrame, params: dict) -> list[dict]:
     """한 예측 기준 시점에 대해 모든 모델을 학습시키고 평가 및 저장한다"""
-    train_df, test_df = temporal_split(df)
+    minutes_after_cart = params["minutes_after_cart"]
+    deadline_hours = params["deadline_hours"]
+
+    train_df, test_df = temporal_split(df, deadline_hours)
 
     X_train, y_train = train_df[FEATURE_COLUMNS], train_df[LABEL_COLUMN]
     X_test, y_test = test_df[FEATURE_COLUMNS], test_df[LABEL_COLUMN]
 
     # train 데이터 라벨에 구매(1)와 미구매(0)가 모두 있는지 검증
     if y_train.nunique() < 2:
-        raise ValueError(f"{prediction_hour}시간 학습 데이터에 구매/미구매가 모두 있지 않습니다.")
+        raise ValueError(f"학습 데이터에 구매/미구매가 모두 있지 않습니다.")
     
     results = []
     for model_name, model in build_models().items():
@@ -81,7 +82,8 @@ def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> li
         probabilities = model.predict_proba(X_test)[:, 1]
 
         results.append({
-            "prediction_hour": prediction_hour,
+            "deadline_hours": deadline_hours,
+            "minutes_after_cart": minutes_after_cart,
             "model": model_name,
             "train_rows": len(train_df),
             "test_rows": len(test_df),
@@ -89,10 +91,10 @@ def train_models_for_prediction_hour(df:pd.DataFrame, prediction_hour:int) -> li
         })
 
         # 학습이 끝난 모델 저장        
-        model_name = get_model_name(model_name, prediction_hour)
+        model_name = get_model_name(model_name, params)
         model_path = MODEL_DIR / f"{model_name}.joblib"
         joblib.dump(model, model_path)
-        logger.info("%s시간 %s 완료", prediction_hour, model_name)
+        logger.info("%s 완료", model_name)
 
     return results
 
@@ -102,14 +104,17 @@ def main():
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     # 모델 학습 시작
-    all_result = []
-    for prediction_hour in PREDICTION_HOURS:
-        df = load_training_data(prediction_hour=prediction_hour)
-        all_result.extend(train_models_for_prediction_hour(df, prediction_hour))
+    params = load_build_params() # 관찰 기간 / 데드라인 반환
+    logger.info(
+        "학습 기준: 관찰 %d분, 데드라인 %d시간",
+        params["minutes_after_cart"], params["deadline_hours"],
+    )
+    df = load_training_data()
+    train_df = train_models(df, params)
 
     # 레포트 생성
-    report = pd.DataFrame(all_result)
-    report_path = REPORT_DIR / f"model_comparison_deadline_{PURCHASE_DEADLINE_DAYS}d.csv"
+    report = pd.DataFrame(train_df)
+    report_path = REPORT_DIR / f"model_comparison_deadline_{params['deadline_hours']}h.csv"
     report.to_csv(report_path, index=False)
     print(report.to_string(index=False))
 

@@ -5,6 +5,7 @@
 synerise_dataset/
 synerise.duckdb
 synerise.duckdb.wal
+synerise.duckdb.tmp
 delivery_output/
 visualization_output/
 
