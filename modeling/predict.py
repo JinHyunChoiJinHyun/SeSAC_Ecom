@@ -25,7 +25,7 @@ from config import(
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from modeling.data_loader import load_prediction_data, load_build_params
-from database.db_client import get_duckdb_connection
+from common.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ from config import (
     CATEGORICAL_FEATURE_COLUMNS
 )
 
-from database.db_client import get_duckdb_connection
+from common.db_client import get_duckdb_connection
 
 # 학습 데이터에서 조회할 컬럼 조합
 TRAINING_COLUMNS = (

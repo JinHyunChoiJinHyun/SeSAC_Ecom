@@ -15,7 +15,7 @@ from config import(
 # 모듈 경로에 현재 루트 추가
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from database.db_client import get_duckdb_connection
+from common.db_client import get_duckdb_connection
 
 logger = logging.getLogger(__name__)
 
