@@ -143,7 +143,7 @@ def temporal_split(df: pd.DataFrame, deadline_hours: int) -> tuple[pd.DataFrame,
     cutoff = df[TIME_COLUMN].quantile(1 - TEST_RATIO)
 
     # 학습/테스트 사이 간격 지정
-    gap = pd.Timedelta(days=deadline_hours)
+    gap = pd.Timedelta(hours=deadline_hours)
 
     # 학습/테스트 데이터 생성
     train_df = df[df[TIME_COLUMN] < cutoff - gap] # cutoff 이전 데드라인 기간의 이벤트는 라벨이 테스트 데이터와 겹치므로 제외 (예: cutoff가 22일인 경우 16일의 이벤트의 라벨 기간(16~23일)은 테스트 데이터에 포함됨)

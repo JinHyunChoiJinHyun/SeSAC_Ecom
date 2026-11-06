@@ -44,6 +44,10 @@ cart_events AS (
                     timestamp AS cart_ts
                 FROM
                     clean.add_to_cart
+                -- cart_base와 기준 통일
+                WHERE client_id IS NOT NULL
+                AND sku IS NOT NULL
+                AND timestamp IS NOT NULL 
             ) x
     ) a
     CROSS JOIN params p

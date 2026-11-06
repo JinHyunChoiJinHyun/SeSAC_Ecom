@@ -97,8 +97,7 @@ def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime
     """예측 결과 DB 저장"""
 
     # 예측에 사용된 모델들의 이름 저장
-    model_names = get_model_name(PREDICTION_MODEL_NAME, params)
-    model_name_placeholders = ", ".join("?" for _ in model_names) # 실행된 모델의 수만큼 ? 생성
+    model_name = get_model_name(PREDICTION_MODEL_NAME, params)
     
     conn = get_duckdb_connection(read_only=False)
     
@@ -112,8 +111,8 @@ def save_predictions(prediction_results_df: pd.DataFrame, predicted_at: datetime
         conn.execute(f"""
             DELETE FROM {PREDICTIONS_TABLE}
             WHERE CAST(predicted_at AS DATE) = CAST(? AS DATE)
-            AND model_name IN ({model_name_placeholders})
-        """,[predicted_at, *model_names]) # 첫번쨰 ?에 실행 시각, 나머지 ?에 모델 이름 입력
+            AND model_name = ?
+        """,[predicted_at, model_name]) # 첫번쨰 ?에 실행 시각, 나머지 ?에 모델 이름 입력
 
         # 새 df 결과 값이 존재할 떄만 값 추가
         if not prediction_results_df.empty:

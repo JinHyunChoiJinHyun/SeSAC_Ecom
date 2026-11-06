@@ -82,7 +82,7 @@ def train_models(df:pd.DataFrame, params: dict) -> list[dict]:
         probabilities = model.predict_proba(X_test)[:, 1]
 
         results.append({
-            "deadlines_hours": deadline_hours,
+            "deadline_hours": deadline_hours,
             "minutes_after_cart": minutes_after_cart,
             "model": model_name,
             "train_rows": len(train_df),
