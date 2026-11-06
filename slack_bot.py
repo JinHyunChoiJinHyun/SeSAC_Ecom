@@ -1044,12 +1044,58 @@ def main():
 
 
     # =====================================================
+    # Purchase Targeting 빠른 Cache 경로
+    # =====================================================
+
+    from agent_system.specialized_agents.purchase_targeting_agent import (
+        try_run_cached_purchase_targeting,
+    )
+
+
+    # =====================================================
     # Agent Runner
     # =====================================================
 
     def runner(
         question,
     ):
+
+        # -------------------------------------------------
+        # 1. 저장된 구매예측 결과로 바로 처리 가능한 질문은
+        #    Purchase Targeting Agent를 먼저 사용합니다.
+        #
+        #    팀 합의에 따라 저장 결과는
+        #    mart.purchase_predictions 하나만 사용합니다.
+        #
+        # 예:
+        # "장바구니 추가 후 24시간 기준으로
+        #  구매확률이 높은 고객 10명을 찾아줘."
+        #
+        # 이 경우 mart.purchase_training_data 전체 조회와
+        # 모델 재추론을 건너뜁니다.
+        # -------------------------------------------------
+        cached_targeting_result = (
+            try_run_cached_purchase_targeting(
+                question
+            )
+        )
+
+        if cached_targeting_result is not None:
+            print(
+                "[Slack Router] "
+                "Purchase Targeting Cache 경로 사용"
+            )
+
+            return cached_targeting_result
+
+        # -------------------------------------------------
+        # 2. Cache 경로에서 처리하지 못한 일반 요청은
+        #    기존 Shared Analysis Graph가 처리합니다.
+        # -------------------------------------------------
+        print(
+            "[Slack Router] "
+            "Shared Analysis Graph fallback"
+        )
 
         # 요청 로그는 SlackBridge에서 결과 검증과 전송까지 함께 관리합니다.
         return (
