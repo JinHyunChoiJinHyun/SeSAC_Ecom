@@ -76,7 +76,7 @@ class ModelSettingsStore:
 
     def __init__(self, project=PROJECT_ROOT):
         self.project = Path(project).resolve()
-        self.path = self.project / "runtime" / "llm_settings.json"
+        self.path = self.project / "admin_dashboard" / "runtime" / "llm_settings.json"
         self.lock = RLock()
         self._last_good = None
         self._seen_file = False
