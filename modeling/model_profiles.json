@@ -1,0 +1,35 @@
+{
+  "_comment": "현재 24/48/72 모델은 model_registry.py가 config.py에서 자동 등록합니다. 새 예측 시나리오는 profiles 배열에 추가하세요.",
+  "profiles": [
+    {
+      "key": "comparison_product_purchase",
+      "enabled": false,
+      "task": "purchase_prediction",
+      "target": "comparison_product_purchase",
+      "event": "product_interest",
+      "runner": "python:agent_system.tools.future_targeting_models:predict_comparison_product_purchase",
+      "model_path": "modeling/models/comparison_product_purchase.joblib",
+      "feature_source": "modeling.comparison_product_features",
+      "feature_columns": [],
+      "prediction_horizon": "configurable",
+      "observation_window_hours": null,
+      "model_version": "comparison-product-v1",
+      "description": "전략상품 A 관심 고객의 비교상품 B 구매 가능성 예측 예시. 모델과 Feature가 준비되면 enabled=true로 변경합니다."
+    },
+    {
+      "key": "repurchase_after_remove",
+      "enabled": false,
+      "task": "purchase_prediction",
+      "target": "same_product_repurchase_after_remove",
+      "event": "remove_from_cart",
+      "runner": "python:agent_system.tools.future_targeting_models:predict_repurchase_after_remove",
+      "model_path": "modeling/models/repurchase_after_remove.joblib",
+      "feature_source": "modeling.remove_repurchase_features",
+      "feature_columns": [],
+      "prediction_horizon": "48h",
+      "observation_window_hours": null,
+      "model_version": "repurchase-after-remove-v1",
+      "description": "장바구니 제거 이후 동일 상품 재구매 가능성 예측 예시."
+    }
+  ]
+}
