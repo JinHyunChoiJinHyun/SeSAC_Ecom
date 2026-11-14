@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16 # Docker 이미지 지정
+    container_name: cartsignal_postgres # 생성될 컨테이너 이름 지정
+    restart: unless-stopped # 사용자가 직접 중지하지 않은 경우 재시작
+    environment:
+      POSTGRES_USER: ${DB_USER:?DB_USER를 .env에 설정하세요}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD를 .env에 설정하세요}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME을 .env에 설정하세요}
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data 
+      # Docker Volume과 PostgreSQL의 실제 데이터 저장 경로에 연결
+    healthcheck: # DB 상태 체크
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s # 10초마다 상태 확인
+      timeout: 5s # 상태 확인 최대 대기 시간
+      retries: 5 # 상태 확인 실패 허용 횟수
+
+volumes: # 영구 데이터 저장 공간과 연결하는 Volume 선언
+  postgres_data: # 사용할 Docker Volume 정의
