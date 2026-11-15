@@ -7,8 +7,9 @@ from functools import lru_cache # 함수 결과를 메모리에 저장 (캐시) 
 
 from dotenv import load_dotenv
 
-from sqlalchemy import Engine # DB 연결 관리 객체
+from sqlalchemy import Engine, create_engine # DB 연결을 관리하는 엔진 클래스와 엔진 생성 도구
 from sqlalchemy.engine import URL # DB 접속 정보 담는 URL 객체
+from sqlalchemy.orm import Session, sessionmaker # DB 작업 및 트랜잭션을 관리하는 세션 클래스와 생성 도구
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -41,5 +42,35 @@ def _database_url() -> str | URL:
 
 @lru_cache
 def get_engine() -> Engine:
+    """엔진 생성 후 캐시에 저장하여 재사용"""
+    return create_engine(_database_url(), pool_pre_ping=True)
 
+@lru_cache
+def _session_factory() -> sessionmaker[Session]:
+    """공통 설정을 가진 세션 생성기 생성 후 캐시에 저장하여 재사용"""
+    return sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
 
+@contextmanager
+def session_scope():
+    """with문으로 DB 세션의 생성 / 트랜젝션 / 종료를 자동으로 관리"""
+    session = _session_factory()() # 세션 생성기로 세션 생성
+    try:
+        yield session # with 블록에 Session 전달
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+def get_operations_session():
+    """생성된 Session을 Operations DB 작업용으로 제공"""
+    with session_scope() as session:
+        yield session
+
+def reset_engine() -> None:
+    """테스트용 URL 교체 후 엔진 재생성"""
+    if get_engine.cache_info().currsize:
+        get_engine().dispose()
+    get_engine.cache_clear()
+    _session_factory.cache_clear()
