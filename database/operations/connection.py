@@ -37,6 +37,7 @@ def _database_url() -> str | URL:
         username=required_env["DB_USER"],
         password=required_env["DB_PASSWORD"],
         host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5433")),
         database=required_env["DB_NAME"]
     )
 
