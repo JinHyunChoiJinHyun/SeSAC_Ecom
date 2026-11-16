@@ -1,0 +1,60 @@
+import uuid
+from datetime import datetime
+from enum import Enum
+from typing import Any
+
+from sqlalchemy import (
+    CheckConstraint, # 데이터 유효성 검사 (저장 값 조건 제한)
+    DateTime, # 날짜 및 시간 자료형
+    Index, # 인덱스 설정
+    String, # 문자열 자료형
+    Text, # 긴 문자열 자료형
+    func # DB 함수 호출
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.operations.base import Base
+
+class RunStatus(str, Enum):
+    """Workflow의 실행 상태를 Enum으로 관리"""
+
+    PENDING = "pending" # 시작 전
+    RUNNING = "running" # 실행 중
+    WAITING_MARKETER_APPROVAL = "wating_marketer_approval" # 마케터 승인 대기 (Interrupt)
+    WAITING_TEAM_LEAD_APPROVAL = "wating_team_lead_approval" # 팀장 승인 대기 (Interrupt)
+    WAITING_PAGE_REGISTRATION = "wating_page_registration" # 마케터 페이지 등록 및 URL 입력 대기
+    SCHEDULED = "scheduled" # 기획전 시작 시각으로 발송 예약
+    COMPLETED = "completed" # 정상 종료
+    FAILED = "failed" # 오류로 종료
+    CANCELLED = "cancelled" # 사용자 중단
+
+# 사람 입력 대기 상태
+WAITING_STATUSES = {
+    RunStatus.WAITING_MARKETER_APPROVAL,
+    RunStatus.WAITING_TEAM_LEAD_APPROVAL,
+    RunStatus.WAITING_PAGE_REGISTRATION,
+}
+
+# 종료 상태
+TERMINAL_STATUSES = {
+    RunStatus.COMPLETED,
+    RunStatus.FAILED,
+    RunStatus.CANCELLED
+}
+
+class Run(Base):
+    """Agent Workflow 실행 정보를 저장하는 ORM 모델
+    - 사용자 요청 하나에 대한 Workflow 실행 사이클 관리
+    - 수정 요청이나 반려 후 재작업 시에도 기존 run에서 이어서 처리
+    """
+
+    __tablename__ = "runs"
+
+    # 실행 ID (= LangGraph의 thread_id)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), # 자료형을 UUID 타입으로 지정
+        primary_key=True,
+        default=uuid.uuid4 # 새로운 객체 생성 시 자동으로 생성
+    )
+
