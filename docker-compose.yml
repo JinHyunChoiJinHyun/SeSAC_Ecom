@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD를 .env에 설정하세요}
       POSTGRES_DB: ${DB_NAME:?DB_NAME을 .env에 설정하세요}
     ports:
-      - "127.0.0.1:${DB_PORT:-5432}:5432"
+      - "127.0.0.1:${DB_PORT:-5433}:5432" # localhost:내 컴퓨터가 db 접속 요청 포트:컨테이너 내부 db 포트
     volumes:
       - postgres_data:/var/lib/postgresql/data 
       # Docker Volume과 PostgreSQL의 실제 데이터 저장 경로에 연결

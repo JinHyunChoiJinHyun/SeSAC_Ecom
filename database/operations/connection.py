@@ -36,8 +36,8 @@ def _database_url() -> str | URL:
         "postgresql+psycopg",
         username=required_env["DB_USER"],
         password=required_env["DB_PASSWORD"],
-        host=os.getenv("DB_HOST", "localhost"),
-        port=int(os.getenv("DB_PORT", "5433")),
+        host=os.getenv("DB_HOST") or "127.0.0.1",
+        port=int(os.getenv("DB_PORT") or "5433"),
         database=required_env["DB_NAME"]
     )
 
