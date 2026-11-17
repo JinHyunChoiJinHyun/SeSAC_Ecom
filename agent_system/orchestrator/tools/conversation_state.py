@@ -1,6 +1,7 @@
 """Orchestrator Tool — update_conversation_state: 새로운 결정 사항을 대화 상태에 반영.
 
 대화 상태(OrchestratorState)의 `campaign` 칸에 기획전 확정값을 저장합니다.
+(State 클래스가 아니라 함수 모음입니다. 분석 그래프 전용 State는 common_tools/analysis_state.py의 AnalysisState)
 Checkpointer가 thread_id별로 함께 저장하므로 다음 턴·봇 재시작 후에도 그대로 참조됩니다.
 
 campaign 형식

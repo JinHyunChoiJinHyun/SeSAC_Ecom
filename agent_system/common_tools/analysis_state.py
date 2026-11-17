@@ -3,14 +3,21 @@ from typing import Any
 from langgraph.graph import MessagesState
 
 
-class AgentState(MessagesState):
+class AnalysisState(MessagesState):
     """
-    전체 Agent가 공유하는 State입니다.
+    공통 분석 그래프(common_tools/graph.py) 전용 State입니다.
 
-    각 전문 Agent는 자신의 작업 결과를
-    이 State에 저장하고,
-    Orchestrator(Router)는 State를 확인하여
-    다음 Agent를 결정합니다.
+    General Analysis Agent가 질문 하나를 처리하는 동안만 쓰입니다.
+        Step Router → Data → SQL Executor → (Prep) → (Visualization) → Final Response
+    각 단계가 결과(SQL·DataFrame·그래프 경로 등)를 여기에 저장하고,
+    분석 그래프의 Step Router(common_tools/router.py)가 이 값을 보고 다음 단계를 정합니다.
+
+    아래 State와는 다릅니다 (이름이 비슷해 헷갈리지 않도록 구분).
+    - 대화 상태: agent_system/orchestrator/graph.py 의 OrchestratorState
+      (대화 기록·직전 분석 요약·확정값·승인 대기, Checkpointer가 thread_id별로 저장)
+    - 확정값 저장 함수: agent_system/orchestrator/tools/conversation_state.py
+    이 State는 Checkpointer에 저장되지 않으며, 다른 전문 Agent와 공유하지 않습니다.
+    아래 next_agent·current_agent·supervisor_reason의 "Agent/Router"는 분석 그래프 안의 단계를 뜻합니다.
     """
 
 

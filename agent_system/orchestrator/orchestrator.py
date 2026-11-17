@@ -3,7 +3,7 @@
 Orchestrator Tool (멘토 조언 5개 기능)
     route_request              현재 질문의 의도 파악 및 담당 Agent 결정   tools/intent.py + tools/routing.py (LLM Router)
     manage_context             이전 대화와 확정된 상품·타깃·일정 참조     tools/context.py (State)
-    update_conversation_state  새로운 결정 사항을 대화 상태에 반영        tools/state.py (State 업데이트)
+    update_conversation_state  새로운 결정 사항을 대화 상태에 반영        tools/conversation_state.py (State 업데이트)
     check_approval             사용자 승인 여부 확인 후 다음 단계 진행    tools/approval.py (LangGraph interrupt)
     manage_workflow            대화 단계에 따라 실행 흐름 제어            tools/workflow.py (Conditional Edge)
     + tools/memory.py          Checkpointer · Slack thread_id 규칙
@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent_system.orchestrator import settings
 from agent_system.orchestrator.registry import AgentRequest, normalize_agent_result
 from agent_system.orchestrator.tools import approval, context, intent, routing
-from agent_system.orchestrator.tools.state import normalize_updates, update_conversation_state
+from agent_system.orchestrator.tools.conversation_state import normalize_updates, update_conversation_state
 
 # 이번 턴의 Agent 결과 전체(DataFrame 포함). 기억(checkpoint)에는 넣지 않고
 # run_turn()이 꺼내 Slack Delivery에 넘깁니다.

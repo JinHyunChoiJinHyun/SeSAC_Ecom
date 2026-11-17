@@ -3,7 +3,7 @@ from langgraph.graph import (
     START
 )
 
-from .state import AgentState
+from .analysis_state import AnalysisState
 
 from .nodes import (
     step_router_node,
@@ -20,7 +20,7 @@ from .nodes import (
 # =========================================================
 
 graph_builder = StateGraph(
-    AgentState
+    AnalysisState
 )
 
 

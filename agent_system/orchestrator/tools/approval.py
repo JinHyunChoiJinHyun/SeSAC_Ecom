@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import interrupt
 
-from agent_system.orchestrator.tools.state import describe_updates, update_conversation_state
+from agent_system.orchestrator.tools.conversation_state import describe_updates, update_conversation_state
 
 APPROVE = re.compile(r"^\s*(승인|확정|좋아|좋습니다|네|예|응|그래|오케이|ok|okay|yes|진행|저장)", re.I)
 REJECT = re.compile(r"^\s*(반려|거절|아니|아뇨|노|no|안\s*돼|하지\s*마|저장\s*안)", re.I)

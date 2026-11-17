@@ -17,8 +17,8 @@ from langchain_core.messages import (
 )
 
 
-from .state import (
-    AgentState,
+from .analysis_state import (
+    AnalysisState,
 )
 
 
@@ -94,7 +94,7 @@ from agent_system.common_tools.execution_tools.visualization_tools import (
 # =========================================================
 
 def add_completed_step(
-    state: AgentState,
+    state: AnalysisState,
     step: str
 ):
 
@@ -121,7 +121,7 @@ def add_completed_step(
 # =========================================================
 
 def get_analysis_dataframe(
-    state: AgentState
+    state: AnalysisState
 ):
 
     """
@@ -270,7 +270,7 @@ def detect_sql_sources(sql_query: str, declared_sources=None) -> list:
 
 def append_verification_sql(
     final_answer: str,
-    state: AgentState,
+    state: AnalysisState,
 ) -> str:
     """
     Data Agent가 생성한 SQL이 존재하면
@@ -614,7 +614,7 @@ def build_correlation_matrix_sql(
 # =========================================================
 
 def step_router_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "data_agent",
@@ -757,7 +757,7 @@ def step_router_node(
 # =========================================================
 
 def data_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "sql_executor",
@@ -1256,7 +1256,7 @@ def data_node(
 # =========================================================
 
 def sql_executor_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "data_agent",
@@ -1425,7 +1425,7 @@ def sql_executor_node(
 # =========================================================
 
 def prep_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "step_router",
@@ -2004,7 +2004,7 @@ dtype:
 # =========================================================
 
 def visualization_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "step_router",
@@ -2803,7 +2803,7 @@ datetime 컬럼:
 # =========================================================
 
 def final_response_node(
-    state: AgentState
+    state: AnalysisState
 ) -> Command[
     Literal[
         "__end__"

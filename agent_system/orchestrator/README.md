@@ -39,7 +39,7 @@ Slack 메시지
 |---|---|---|---|
 | `route_request` | LLM Router | `tools/intent.py`, `tools/routing.py` | 의도 판단(일상 대화 / 업무 요청 / 확정값 결정), 후속 질문 재작성, 담당 Agent 선택 |
 | `manage_context` | State | `tools/context.py` `manage_context()` | 이전 대화 · 직전 분석 · **확정된 상품·타깃·일정(campaign)** · 승인 대기를 대화 판단에 넣고, Agent에도 `request.campaign`으로 전달 |
-| `update_conversation_state` | State 업데이트 | `tools/state.py` | 확정값을 `campaign`에 반영(변경 기록 포함). 사용자 결정은 승인 후, Agent의 `decisions`는 바로 반영 |
+| `update_conversation_state` | State 업데이트 | `tools/conversation_state.py` | 확정값을 `campaign`에 반영(변경 기록 포함). 사용자 결정은 승인 후, Agent의 `decisions`는 바로 반영 |
 | `check_approval` | LangGraph `interrupt` | `tools/approval.py` | 승인 질문을 보내고 그래프를 멈춤 → 다음 메시지가 승인/반려/수정/취소면 `Command(resume=...)`로 이어서 실행 |
 | `manage_workflow` | Conditional Edge | `tools/workflow.py` | orchestrator·Agent 다음 노드 결정 (Agent / check_approval / END). 단계별 다음 Agent 규칙 자리 `STAGE_NEXT_AGENT` |
 | (기억) | Checkpointer | `tools/memory.py` | SQLite Checkpointer, Slack thread_id 규칙, 이전 저장본 정리 |

@@ -99,7 +99,7 @@ def manage_context(question: str, history_messages, last_analysis, campaign: dic
     """manage_context Tool: 이전 대화 · 직전 분석 · 확정된 기획전 정보(상품·타깃·일정)를 모아
     대화 판단 LLM 입력 텍스트를 만듭니다."""
 
-    from agent_system.orchestrator.tools.state import format_campaign
+    from agent_system.orchestrator.tools.conversation_state import format_campaign
 
     pending = ""
     if pending_approval:
