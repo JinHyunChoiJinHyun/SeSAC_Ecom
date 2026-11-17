@@ -324,7 +324,13 @@ def _has_visualization_intent(question: str) -> bool:
         r"|(?:앞서|이전|기존|방금)\s*(?:만든|그린|생성한)"
         r"\s*(?:그래프|차트)"
     )
-    if re.search(explanation, text, re.I):
+    create_command = (
+        r"(?:그려|만들어|생성해|시각화해|출력해|표시해|보여줘)"
+    )
+    if (
+        re.search(explanation, text, re.I)
+        and not re.search(create_command, text, re.I)
+    ):
         return False
 
     chart_terms = (

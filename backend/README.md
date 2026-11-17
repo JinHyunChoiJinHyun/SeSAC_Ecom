@@ -35,27 +35,33 @@ OpenAI·Slack 키와 모델 설정은 기존처럼 `env/.env`에 둡니다. DB �
 | GET | `/health` | API 응답 확인 (팀 기존) |
 | GET | `/health/db` | PostgreSQL 연결 확인 (팀 기존) |
 | GET | `/health/agent` | DuckDB 출처 파일, 켜진 특화 Agent, 대화 기억 파일 |
-| POST | `/chat` | 대화 한 턴 `{"message": "...", "user_id": "dongyeon", "thread_id": null}` |
+| POST | `/chat` | 대화 한 턴 `{"message": "...", "thread_id": null}` |
 | GET | `/conversations/{thread_id}` | 저장된 대화 기억 |
 | DELETE | `/conversations/{thread_id}` | 대화 기억 삭제 (새 대화로 시작) |
 | GET | `/files/{png\|csv}/{file_name}` | 결과 그래프·CSV 내려받기 |
 
 ### 멀티턴
-- `thread_id`를 비우면 `api:<user_id>` — 같은 `user_id`로 보내면 이전 대화를 이어 갑니다.
-- Slack 대화를 이어 보려면 `thread_id`에 Slack 규칙 그대로 (`dm:<Slack 사용자 ID>`, `ch:<채널>:<사용자>`).
+- `thread_id`를 비우면 인증 사용자별 API 전용 대화를 사용합니다.
+- Slack `dm:`/`ch:` 대화는 API에서 직접 접근할 수 없습니다.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" \
-  -d '{"message": "H&M 여성 상품 유형별 구매 건수 Top 10", "user_id": "dongyeon"}'
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" \
-  -d '{"message": "남성은?", "user_id": "dongyeon"}'          # 이전 대화 반영
+# API_KEY 환경변수에 발급받은 키를 설정하세요.
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"message": "H&M 여성 상품 유형별 구매 건수 Top 10"}'
+
+curl -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"message": "남성은?"}'
 ```
 
 응답: `answer`, `turn_type`(chitchat/analysis/approval_request/approval), `route`, `standalone_question`, `is_followup`, `sql`,
 `table`(최대 100행), `files`(png·csv 내려받기 URL), `error`, `awaiting_approval`(승인 대기 중), `campaign`(승인 처리 후 확정값)
 
 승인 흐름: "카테고리는 니트로 확정" → `turn_type=approval_request`, `awaiting_approval=true` →
-같은 user_id로 "승인" → `turn_type=approval`, `campaign.values.category="니트"`
+같은 인증 사용자로 "승인" → `turn_type=approval`, `campaign.values.category="니트"`
 
 ## 테스트
 

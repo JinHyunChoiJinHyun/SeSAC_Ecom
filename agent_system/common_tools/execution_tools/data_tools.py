@@ -148,7 +148,7 @@ BLOCKED_FUNCTIONS = [
 ]
 
 
-def _strip_comments_and_strings(sql: str) -> str:
+def _strip_comments_and_strings(sql: str, preserve_identifiers: bool = False) -> str:
     """SQL 문자열과 주석을 구별하여 검사용 SQL을 생성합니다.
 
     문자열 내부의 -- 또는 /* */를 주석으로 처리하지 않습니다.
@@ -188,6 +188,7 @@ def _strip_comments_and_strings(sql: str) -> str:
 
         # 큰따옴표로 감싼 식별자
         if char == '"':
+            start = i
             i += 1
             closed = False
 
@@ -207,14 +208,16 @@ def _strip_comments_and_strings(sql: str) -> str:
                 raise ValueError("닫히지 않은 SQL 식별자입니다.")
 
             # 식별자 내부도 키워드 검사에서 제외
-            result.append('""')
+            result.append(
+                sql[start:i] if preserve_identifiers else '""'
+            )
             continue
 
         # 한 줄 주석
         if char == "-" and next_char == "-":
             i += 2
 
-            while i < n and sql[i] not in "\\r\\n":
+            while i < n and sql[i] not in "\r\n":
                 i += 1
 
             result.append(" ")
@@ -293,7 +296,9 @@ def validate_select_sql(sql: str):
 
 def _uses_source(sql: str, key: str) -> bool:
     """SQL이 해당 출처 schema(예: musinsa.)를 쓰는지 확인합니다."""
-    return bool(re.search(rf"\b{re.escape(key)}\s*\.", _strip_comments_and_strings(sql), re.IGNORECASE))
+    cleaned = _strip_comments_and_strings(sql, preserve_identifiers=True)
+    pattern = rf'(?<![\w])(?:"{re.escape(key)}"|{re.escape(key)})\s*\.'
+    return bool(re.search(pattern, cleaned, re.IGNORECASE))
 
 
 # 이 문구로 시작하는 오류는 SQL 문제가 아니므로 Data Agent 재시도 대상이 아닙니다.

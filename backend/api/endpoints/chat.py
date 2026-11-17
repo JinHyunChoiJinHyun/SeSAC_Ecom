@@ -27,6 +27,8 @@ def chat(request: ChatRequest, service: ChatService = Depends(get_chat_service),
         return service.chat(request, user_id)
     except ServiceError as exc:
         _fail(exc)
+    except HTTPException:
+        raise
     except Exception as exc:
         if type(exc).__name__ == "ModelSettingsError":   # OPENAI_API_KEY 없음 등 (env/.env 확인)
             raise HTTPException(status_code=503, detail=str(exc)) from exc

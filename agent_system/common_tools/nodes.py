@@ -1995,10 +1995,19 @@ dtype:
             )
 
     if failed_actions:
-        raise ValueError(
+        error_message = (
             "전처리 작업에 실패했습니다. "
             "완료 상태로 기록하지 않습니다. "
             + " | ".join(failed_actions)
+        )
+        return Command(
+            update={
+                "prep_error": error_message,
+                "error": error_message,
+                "prep_actions": actions,
+                "data_quality_report": data_quality_report,
+            },
+            goto="final_response",
         )
 
     completed_steps = (
