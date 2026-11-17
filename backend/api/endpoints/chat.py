@@ -2,10 +2,11 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from backend.api.dependencies import get_chat_service
+from backend.api.security import authenticated_user, verify_file
 from backend.schemas.chat import ChatRequest, ChatResponse, ConversationDetail
 from backend.services.chat_service import ChatService, ServiceError
 
@@ -19,11 +20,11 @@ def _fail(exc: ServiceError):
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest, service: ChatService = Depends(get_chat_service)):
+def chat(request: ChatRequest, service: ChatService = Depends(get_chat_service), user_id: str = Depends(authenticated_user)):
     """대화 한 턴. 같은 thread_id(또는 user_id)로 보내면 이전 대화를 이어서 처리합니다.
     (sync 함수 → FastAPI가 스레드 풀에서 실행하므로 LLM·DB 호출이 이벤트 루프를 막지 않음)"""
     try:
-        return service.chat(request)
+        return service.chat(request, user_id)
     except ServiceError as exc:
         _fail(exc)
     except Exception as exc:
@@ -34,27 +35,28 @@ def chat(request: ChatRequest, service: ChatService = Depends(get_chat_service))
 
 
 @router.get("/conversations/{thread_id}", response_model=ConversationDetail)
-def conversation(thread_id: str, service: ChatService = Depends(get_chat_service)):
+def conversation(thread_id: str, service: ChatService = Depends(get_chat_service), user_id: str = Depends(authenticated_user)):
     """저장된 대화 기억 (메시지·직전 분석 요약)."""
     try:
-        return service.conversation(thread_id)
+        return service.conversation(thread_id, user_id)
     except ServiceError as exc:
         _fail(exc)
 
 
 @router.delete("/conversations/{thread_id}")
-def delete_conversation(thread_id: str, service: ChatService = Depends(get_chat_service)):
+def delete_conversation(thread_id: str, service: ChatService = Depends(get_chat_service), user_id: str = Depends(authenticated_user)):
     """대화 기억 삭제 → 다음 메시지부터 새 대화."""
     try:
-        service.delete_conversation(thread_id)
+        service.delete_conversation(thread_id, user_id)
     except ServiceError as exc:
         _fail(exc)
     return {"deleted": thread_id}
 
 
 @router.get("/files/{kind}/{file_name}")
-def download(kind: str, file_name: str, service: ChatService = Depends(get_chat_service)):
+def download(kind: str, file_name: str, expires: int = Query(...), signature: str = Query(...), service: ChatService = Depends(get_chat_service), user_id: str = Depends(authenticated_user)):
     """결과 그래프(png)·표(csv) 내려받기."""
+    verify_file(user_id, kind, file_name, expires, signature)
     try:
         path = service.resolve_file(kind, file_name)
     except ServiceError as exc:

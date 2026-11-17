@@ -661,16 +661,14 @@ def create_bar_chart(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     return make_result(
@@ -922,16 +920,14 @@ def create_line_chart(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     return make_result(
@@ -1239,16 +1235,14 @@ def create_histogram(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     sampling_note = ""
@@ -1700,16 +1694,14 @@ def create_boxplot(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     sampling_note = ""
@@ -1974,16 +1966,14 @@ def create_scatterplot(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     sampling_note = ""
@@ -2522,16 +2512,14 @@ def create_correlation_heatmap(
     )
 
 
-    fig.savefig(
-        file_path,
-        dpi=150,
-        bbox_inches="tight",
-    )
-
-
-    plt.close(
-        fig
-    )
+    try:
+        fig.savefig(
+            file_path,
+            dpi=150,
+            bbox_inches="tight",
+        )
+    finally:
+        plt.close(fig)
 
 
     return make_result(

@@ -96,8 +96,10 @@ def open_duckdb_connection():
                 continue
 
             try:
+                # SQL 문자열에 포함된 작은따옴표를 이스케이프
+                escaped_path = source.path.as_posix().replace("'", "''")
                 client.execute(
-                    f"ATTACH '{source.path.as_posix()}' AS {source.catalog} (READ_ONLY)"
+                    f"ATTACH '{escaped_path}' AS {source.catalog} (READ_ONLY)"
                 )
             except Exception as exc:
                 if source.required:
@@ -120,6 +122,13 @@ def open_duckdb_connection():
 
         # 주의: USE 문을 실행하면 search_path가 바뀌므로 사용하지 않습니다.
         client.execute(f"SET search_path = '{','.join(search_path)}'")
+
+        # Agent가 사용할 신뢰된 DB를 모두 연결한 뒤 외부 파일 접근 차단
+        # SQL을 통한 추가 ATTACH, 파일 읽기 및 외부 접근을 제한
+        client.execute("SET enable_external_access = false")
+
+        # Agent SQL이 보안 설정을 변경하지 못하도록 잠금
+        client.execute("SET lock_configuration = true")
 
     except Exception:
         # 원인을 로그로 남기고 에러는 상위로 전파

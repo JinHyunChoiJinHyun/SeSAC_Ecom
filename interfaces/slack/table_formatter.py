@@ -124,7 +124,17 @@ def _choose_columns(header, rows):
 
 def _table_payload(header, rows):
     chosen, show_rank = _choose_columns(header, rows)
-    indices = [header.index(name) for name in chosen]
+    # 중복 헤더도 각각의 원래 열 위치에 대응하도록 순차 매핑
+    selected_positions = {}
+    indices = []
+    for name in chosen:
+        positions = selected_positions.setdefault(
+            name,
+            [i for i, column in enumerate(header) if column == name]
+        )
+        if not positions:
+            raise ValueError(f"선택한 열을 찾지 못했습니다: {name}")
+        indices.append(positions.pop(0))
     display_header = (["순위"] if show_rank else []) + [_LABELS.get(c, c) for c in chosen]
     body = []
     for i, row in enumerate(rows, start=1):

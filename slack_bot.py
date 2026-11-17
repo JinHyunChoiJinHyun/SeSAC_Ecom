@@ -304,8 +304,57 @@ def run_project_agent(
 # =========================================================
 
 def _has_visualization_intent(question: str) -> bool:
-    """차트·그래프 생성 요청인지 판단합니다."""
-    return bool(re.search(r"그래프|시각화|차트|막대그래프|bar\s*chart", question, re.I))
+    """실제 차트 생성 요청과 단순 언급·설명·제외 요청을 구분합니다."""
+    text = str(question or "").strip()
+
+    # 그래프 제외 또는 표 전용 요청을 우선 처리
+    excluded = (
+        r"(?:그래프|차트|시각화)\s*없이"
+        r"|(?:그래프|차트|시각화)\s*(?:말고|빼고|제외)"
+        r"|(?:표|테이블)\s*로\s*만"
+        r"|(?:표|테이블)\s*만"
+    )
+    if re.search(excluded, text, re.I):
+        return False
+
+    # 기존 차트의 설명·해석만 요청하는 경우 제외
+    explanation = (
+        r"(?:그래프|차트|시각화).{0,20}"
+        r"(?:의미|해석|설명|읽는\s*법|무슨\s*뜻)"
+        r"|(?:앞서|이전|기존|방금)\s*(?:만든|그린|생성한)"
+        r"\s*(?:그래프|차트)"
+    )
+    if re.search(explanation, text, re.I):
+        return False
+
+    chart_terms = (
+        r"(?:막대그래프|선그래프|히스토그램|산점도|히트맵|"
+        r"그래프|차트|시각화|bar\s*chart|scatter\s*plot)"
+    )
+
+    # 새로운 차트를 그리거나 생성하라는 명시적 명령
+    create_after_chart = (
+        chart_terms
+        + r".{0,25}?"
+        + r"(?:그려|그려줘|만들어|만들어줘|생성해|생성해줘|"
+        r"보여줘|표시해|출력해|시각화해)"
+    )
+
+    create_before_chart = (
+        r"(?:그려줘|그려|만들어줘|만들어|생성해줘|생성해|"
+        r"보여줘|표시해|출력해)"
+        + r".{0,25}?"
+        + chart_terms
+    )
+
+    return bool(
+        re.search(
+            create_after_chart + "|" + create_before_chart,
+            text,
+            re.I,
+        )
+    )
+
 
 
 def _is_user_facing_error(result: dict) -> bool:

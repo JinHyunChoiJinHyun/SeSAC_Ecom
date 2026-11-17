@@ -7,9 +7,8 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000, description="사용자 메시지")
-    user_id: str = Field("api-user", max_length=200, description="사용자 ID (대화 ID를 만들 때 사용)")
     thread_id: str | None = Field(None, max_length=300,
-                                  description="대화 ID. 비우면 api:<user_id>. Slack과 같은 대화를 이어 가려면 dm:<Slack 사용자 ID>")
+                                  description="서버가 발급한 API 대화 ID. 비우면 본인의 대화로 연결")
 
 
 class TablePayload(BaseModel):

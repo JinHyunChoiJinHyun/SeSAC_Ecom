@@ -226,12 +226,45 @@ def convert_timestamp(
     series = processed_df[timestamp_column]
 
     if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
-        # epoch 정수 (예: Amazon review.timestamp = 밀리초).
-        # 값의 크기로 초/밀리초 단위를 판단합니다.
-        valid = pd.to_numeric(series, errors="coerce").dropna()
-        unit = "ms" if (not valid.empty and valid.abs().median() > 1e11) else "s"
+        # Unix epoch 초·밀리초 범위에 해당하는 값만 날짜로 변환
+        numeric = pd.to_numeric(series, errors="coerce")
+        valid = numeric.dropna()
+
+        if valid.empty:
+            return processed_df, {
+                "success": False,
+                "error": "변환 가능한 숫자 날짜 값이 없습니다.",
+            }
+
+        # 지원 범위: 1971-01-01부터 2100-01-01 미만
+        min_seconds = 31536000
+        max_seconds = 4102444800
+
+        seconds_ok = valid.between(
+            min_seconds, max_seconds, inclusive="left"
+        ).all()
+
+        millis_ok = valid.between(
+            min_seconds * 1000,
+            max_seconds * 1000,
+            inclusive="left",
+        ).all()
+
+        if seconds_ok:
+            unit = "s"
+        elif millis_ok:
+            unit = "ms"
+        else:
+            return processed_df, {
+                "success": False,
+                "error": (
+                    "숫자 값이 Unix epoch 초/밀리초 범위에 있지 않습니다. "
+                    "month, week, YYYYMM 등의 정수는 날짜로 자동 변환하지 않습니다."
+                ),
+            }
+
         converted = pd.to_datetime(
-            pd.to_numeric(series, errors="coerce"),
+            numeric,
             unit=unit,
             errors="coerce",
         )

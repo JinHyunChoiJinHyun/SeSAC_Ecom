@@ -12,6 +12,8 @@ Slack 봇(slack_bot.py)과 같은 Orchestrator 그래프·대화 기억(LangGrap
 from __future__ import annotations
 
 import json
+import shutil
+import uuid
 import os
 import threading
 import time
@@ -28,13 +30,6 @@ from backend.schemas.chat import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-def _file_folders():
-    from agent_system.common_tools.execution_tools.output_tools import CSV_OUTPUT_DIR
-
-    return {"png": PROJECT_ROOT / "visualization_output", "csv": CSV_OUTPUT_DIR}
-
-
-FILE_FOLDERS = _file_folders()
 RESPONSE_ROWS = int(os.getenv("CART_SIGNAL_RESPONSE_ROWS", "100"))
 
 
@@ -65,12 +60,14 @@ class ChatService:
             return self._locks.setdefault(thread_id, threading.Lock())
 
     # ------------------------------------------------------------------ 대화 한 턴
-    def chat(self, request: ChatRequest) -> ChatResponse:
+    def chat(self, request: ChatRequest, user_id: str) -> ChatResponse:
         from agent_system.orchestrator.graph import run_turn
         from env.logger import request_log
         from env.model_settings import model_request
 
-        thread_id = request.thread_id or f"api:{request.user_id}"
+        from backend.api.security import owned_thread
+
+        thread_id = owned_thread(user_id, request.thread_id)
         started = time.perf_counter()
         with request_log(request.message), model_request() as config:
             if not self._slots.acquire(timeout=600):
@@ -82,11 +79,11 @@ class ChatService:
                         thread_id=thread_id,
                         llm_config=config.public(),
                         graph=self.graph,
-                        metadata={"source": "api", "user_id": request.user_id},
+                        metadata={"source": "api", "user_id": user_id},
                     )
             finally:
                 self._slots.release()
-        return self.build_response(result, thread_id, time.perf_counter() - started)
+        return self.build_response(result, thread_id, time.perf_counter() - started, user_id)
 
     # ------------------------------------------------------------------ 결과 → JSON
     @staticmethod
@@ -95,20 +92,20 @@ class ChatService:
 
         return select_result_dataframe(result)[0]
 
-    def build_response(self, result: dict, thread_id: str, elapsed: float) -> ChatResponse:
+    def build_response(self, result: dict, thread_id: str, elapsed: float, user_id: str) -> ChatResponse:
         df = self._dataframe(result)
         files = []
         visualization = result.get("visualization_result") if isinstance(result.get("visualization_result"), dict) else {}
         png = result.get("visualization_path") or visualization.get("file_path")
         if png and Path(str(png)).is_file():
-            files.append(self._file("png", Path(str(png))))
+            files.append(self._file("png", Path(str(png)), user_id))
         if df is not None and not result.get("error"):
             # 공통 Tool: Slack Delivery와 같은 규칙으로 결과 CSV 생성 (0행·대용량은 생략)
             from agent_system.common_tools.execution_tools.output_tools import prepare_result_csv
 
             csv_path = prepare_result_csv(result)["path"]
             if csv_path is not None:
-                files.append(self._file("csv", Path(csv_path)))
+                files.append(self._file("csv", Path(csv_path), user_id))
 
         return ChatResponse(
             thread_id=thread_id,
@@ -129,8 +126,18 @@ class ChatService:
         )
 
     @staticmethod
-    def _file(kind: str, path: Path) -> FilePayload:
-        return FilePayload(kind=kind, file_name=path.name, url=f"/files/{kind}/{path.name}")
+    def _file(kind: str, path: Path, user_id: str) -> FilePayload:
+        from backend.api.security import signed_file_url
+
+        # 동일 파일명 덮어쓰기로 인한 사용자 간 결과물 노출 방지
+        folder = PROJECT_ROOT / "runtime" / "api_downloads" / kind
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        name = f"{uuid.uuid4().hex}.{kind}"
+        destination = folder / name
+        with path.open("rb") as source, destination.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        destination.chmod(0o600)
+        return FilePayload(kind=kind, file_name=name, url=signed_file_url(user_id, kind, name))
 
     @staticmethod
     def _table(df) -> TablePayload | None:
@@ -142,7 +149,10 @@ class ChatService:
                             total_rows=int(len(df)), truncated=len(df) > len(limited))
 
     # ------------------------------------------------------------------ 대화 기억 조회·삭제
-    def conversation(self, thread_id: str) -> ConversationDetail:
+    def conversation(self, thread_id: str, user_id: str) -> ConversationDetail:
+        from backend.api.security import owned_thread
+
+        owned_thread(user_id, thread_id)
         from langchain_core.messages import AIMessage, HumanMessage
 
         values = self.graph.get_state({"configurable": {"thread_id": thread_id}}).values
@@ -157,15 +167,22 @@ class ChatService:
         return ConversationDetail(thread_id=thread_id, last_activity_at=str(values.get("last_activity_at", "")),
                                   messages=messages, last_analysis=values.get("last_analysis") or {})
 
-    def delete_conversation(self, thread_id: str):
-        if not self.graph.get_state({"configurable": {"thread_id": thread_id}}).values:
-            raise ServiceError(f"대화를 찾지 못했습니다: {thread_id}", 404)
-        self.graph.checkpointer.delete_thread(thread_id)
+    def delete_conversation(self, thread_id: str, user_id: str):
+        from backend.api.security import owned_thread
+
+        owned_thread(user_id, thread_id)
+        # 같은 thread_id의 chat 실행이 끝난 뒤 조회 및 삭제
+        with self._lock(thread_id):
+            if not self.graph.get_state(
+                {"configurable": {"thread_id": thread_id}}
+            ).values:
+                raise ServiceError(f"대화를 찾지 못했습니다: {thread_id}", 404)
+            self.graph.checkpointer.delete_thread(thread_id)
 
     # ------------------------------------------------------------------ 결과 파일
     @staticmethod
     def resolve_file(kind: str, file_name: str) -> Path:
-        folder = FILE_FOLDERS.get(kind)
+        folder = (PROJECT_ROOT / "runtime" / "api_downloads" / kind) if kind in ("png", "csv") else None
         if folder is None or Path(file_name).name != file_name or not file_name.endswith(f".{kind}"):
             raise ServiceError("잘못된 파일 요청입니다.", 400)
         path = (folder / file_name).resolve()

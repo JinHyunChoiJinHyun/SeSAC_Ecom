@@ -946,9 +946,16 @@ def data_node(
             )
         )
 
+        # 사용자가 산점도를 명시하면 지표가 3개 이상이어도 요청을 우선합니다.
+        explicit_scatter_requested = any(
+            keyword in str(question or "").lower()
+            for keyword in ("산점도", "scatter")
+        )
+
         relation_requested = (
             has_relation_intent(question)
             or data_result_type == "correlation_matrix"
+            or explicit_scatter_requested
         )
 
         if relation_requested and len(relation_features) >= 2:
@@ -969,7 +976,25 @@ def data_node(
                 )
 
 
-        if relation_requested and len(relation_features) >= 3:
+        if (
+            relation_requested
+            and len(relation_features) >= 3
+            and not explicit_scatter_requested
+        ):
+            # 표본 SQL로 전체 모집단 상관계수를 계산했다고 표시하지 않습니다.
+            # 정확한 전체 상관계수가 필요하면 표본 제한 없이 재생성해야 합니다.
+            if (
+                re.search(
+                    r"\b(?:LIMIT|TABLESAMPLE)\b|\bUSING\s+SAMPLE\b",
+                    sql_query,
+                    flags=re.IGNORECASE,
+                )
+                or data_is_sampled
+            ):
+                raise ValueError(
+                    "상관행렬 계산에 표본 SQL이 사용되었습니다. "
+                    "전체 데이터 기준 SQL로 다시 분석해야 합니다."
+                )
 
             sql_query = (
                 build_correlation_matrix_sql(
@@ -990,7 +1015,9 @@ def data_node(
             )
 
 
-        elif relation_requested and len(relation_features) == 2:
+        elif relation_requested and (
+            len(relation_features) == 2 or explicit_scatter_requested
+        ):
 
             data_result_type = "visual_sample"
             data_uses_full_population = False
@@ -1751,18 +1778,24 @@ dtype:
         in actions
     ):
 
-        group_columns = [
-            column
-            for column in list(
-                getattr(
-                    plan,
-                    "repeat_group_columns",
-                    [],
-                )
-            )
-            if column in processed_df.columns
-        ]
+        # 계획에서 지정한 그룹 컬럼은 누락 없이 그대로 사용
+        requested_group_columns = list(
+            getattr(plan, "repeat_group_columns", []) or []
+        )
 
+        if requested_group_columns:
+            missing_columns = [
+                column
+                for column in requested_group_columns
+                if column not in processed_df.columns
+            ]
+            if missing_columns:
+                raise ValueError(
+                    "반복 집계에 필요한 컬럼이 없습니다: "
+                    + ", ".join(missing_columns)
+                )
+
+        group_columns = requested_group_columns
 
         if not group_columns:
 
@@ -1943,6 +1976,30 @@ dtype:
         },
     }
 
+
+    # 전처리 작업의 실패를 확인한 뒤 완료 상태를 기록합니다.
+    failed_actions = []
+
+    for action_name, action_report in action_reports.items():
+        if (
+            isinstance(action_report, dict)
+            and action_report.get("success") is False
+        ):
+            error_detail = (
+                action_report.get("error")
+                or action_report.get("message")
+                or "실패 원인이 제공되지 않았습니다."
+            )
+            failed_actions.append(
+                f"{action_name}: {error_detail}"
+            )
+
+    if failed_actions:
+        raise ValueError(
+            "전처리 작업에 실패했습니다. "
+            "완료 상태로 기록하지 않습니다. "
+            + " | ".join(failed_actions)
+        )
 
     completed_steps = (
         add_completed_step(
@@ -2370,6 +2427,12 @@ datetime 컬럼:
 
 
     if precomputed_correlation:
+
+        if explicit_scatter:
+            raise ValueError(
+                "산점도 요청에 상관계수 행렬이 전달되었습니다. "
+                "원본 지표 행을 조회하도록 다시 분석해야 합니다."
+            )
 
         plan.chart_type = (
             "heatmap"
@@ -2895,14 +2958,17 @@ def final_response_node(
                     if col not in metric_columns
                     and not is_semantic_identifier(col)
                 ]
-                if metric_columns and label_columns and chart_type == "bar":
-                    metric = next(
-                        (col for col in metric_columns if not any(
-                            word in col.lower() for word in ("share", "ratio", "rate", "percent", "비율", "비중")
-                        )),
-                        metric_columns[0],
-                    )
-                    top = analysis_df[[label_columns[0], metric]].dropna().sort_values(
+                if (
+                    metric_columns
+                    and label_columns
+                    and chart_type == "bar"
+                    and visualization_result.get("x_column") in label_columns
+                    and visualization_result.get("y_column") in metric_columns
+                ):
+                    # 그래프에 실제 사용한 Y축 지표를 그대로 요약
+                    metric = visualization_result["y_column"]
+                    label_column = visualization_result["x_column"]
+                    top = analysis_df[[label_column, metric]].dropna().sort_values(
                         metric, ascending=False
                     ).head(3)
                     if not top.empty:
@@ -2910,7 +2976,7 @@ def final_response_node(
                         for _, item in top.iterrows():
                             value = item[metric]
                             display = f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
-                            top_lines.append(f"- {item[label_columns[0]]}: {display}")
+                            top_lines.append(f"- {item[label_column]}: {display}")
                         final_answer += "\n주요 결과 (상위 3개)\n" + "\n".join(top_lines) + "\n"
 
             if (

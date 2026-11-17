@@ -168,7 +168,10 @@ _CHART_WORDS = (
     "plot", "chart", "histogram", "scatter", "boxplot", "heatmap",
 )
 # 사용자가 그래프 없이 표만 원한다는 표현 ("대표로"처럼 다른 단어 안의 "표로"는 제외)
-_TABLE_ONLY_PATTERN = re.compile(r"(?<![가-힣])표\s*(로|만)|그래프\s*없이|차트\s*없이|숫자만|텍스트로")
+_TABLE_ONLY_PATTERN = re.compile(
+    r"(?:테이블|(?<![가-힣])표)\s*(?:로\s*만|로|만)|그래프\s*없이|차트\s*없이|숫자만|텍스트로",
+    re.I,
+)
 
 
 def keep_previous_chart_type(standalone: str, user_question: str,
@@ -184,7 +187,9 @@ def keep_previous_chart_type(standalone: str, user_question: str,
     lowered = f"{standalone} {user_question}".lower()
     if any(word in lowered for word in _CHART_WORDS):
         return standalone
-    if _TABLE_ONLY_PATTERN.search(user_question or ""):
+    if _TABLE_ONLY_PATTERN.search(
+        f"{standalone} {user_question}"
+    ):
         return standalone
     return f"{standalone.rstrip(' .')} (직전과 같이 {label}로 보여줘)"
 

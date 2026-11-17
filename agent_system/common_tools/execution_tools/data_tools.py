@@ -143,20 +143,109 @@ BLOCKED_FUNCTIONS = [
     "READ_BLOB",
     "GLOB",
     "SNIFF_CSV",
+    "QUERY",
+    "QUERY_TABLE",
 ]
 
 
 def _strip_comments_and_strings(sql: str) -> str:
-    """키워드 검사 전에 주석과 문자열 리터럴을 제거합니다.
+    """SQL 문자열과 주석을 구별하여 검사용 SQL을 생성합니다.
 
-    문자열 안의 단어(예: WHERE text LIKE '%update%')를
-    SQL 키워드로 오인하지 않기 위해서입니다.
+    문자열 내부의 -- 또는 /* */를 주석으로 처리하지 않습니다.
+    문자열은 작은따옴표 두 개('')로 치환하여 기존 파일 경로 검사를 유지합니다.
+    파싱할 수 없는 문자열이나 주석은 안전하게 거부합니다.
     """
+    result = []
+    i = 0
+    n = len(sql)
 
-    text = re.sub(r"--.*?$", " ", sql, flags=re.MULTILINE)
-    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
-    text = re.sub(r"'(?:[^']|'')*'", "''", text)
-    return text
+    while i < n:
+        char = sql[i]
+        next_char = sql[i + 1] if i + 1 < n else ""
+
+        # 작은따옴표 문자열 리터럴
+        if char == "'":
+            i += 1
+            closed = False
+
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+
+                    i += 1
+                    closed = True
+                    break
+
+                i += 1
+
+            if not closed:
+                raise ValueError("닫히지 않은 SQL 문자열입니다.")
+
+            result.append("''")
+            continue
+
+        # 큰따옴표로 감싼 식별자
+        if char == '"':
+            i += 1
+            closed = False
+
+            while i < n:
+                if sql[i] == '"':
+                    if i + 1 < n and sql[i + 1] == '"':
+                        i += 2
+                        continue
+
+                    i += 1
+                    closed = True
+                    break
+
+                i += 1
+
+            if not closed:
+                raise ValueError("닫히지 않은 SQL 식별자입니다.")
+
+            # 식별자 내부도 키워드 검사에서 제외
+            result.append('""')
+            continue
+
+        # 한 줄 주석
+        if char == "-" and next_char == "-":
+            i += 2
+
+            while i < n and sql[i] not in "\\r\\n":
+                i += 1
+
+            result.append(" ")
+            continue
+
+        # 블록 주석
+        if char == "/" and next_char == "*":
+            i += 2
+            depth = 1
+
+            while i < n and depth > 0:
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+
+            if depth:
+                raise ValueError("닫히지 않은 SQL 주석입니다.")
+
+            result.append(" ")
+            continue
+
+        result.append(char)
+        i += 1
+
+    return "".join(result)
+
 
 
 def validate_select_sql(sql: str):
@@ -167,7 +256,10 @@ def validate_select_sql(sql: str):
     if not sql:
         return (False, "SQL이 비어 있습니다.")
 
-    query_check = _strip_comments_and_strings(sql.strip())
+    try:
+        query_check = _strip_comments_and_strings(sql.strip())
+    except ValueError as exc:
+        return (False, str(exc))
     upper_query = query_check.strip().upper()
 
     # SELECT / WITH만 허용
