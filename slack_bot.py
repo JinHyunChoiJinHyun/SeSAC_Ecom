@@ -4,12 +4,15 @@ Team_Project_Ecom Slack DM·채널 멘션 연결 파일입니다.
 역할
 ----
 1. Slack DM 또는 채널 멘션으로 질문을 받습니다.
-2. 현재 구현된 Shared Analysis LangGraph를 실행합니다.
+2. 대화 그래프를 실행합니다 (멀티턴).
+   - Orchestrator: 일상 대화는 바로 답하고, 업무 요청은 이전 대화를 반영해 질문을 다시 써서 특화 Agent로 보냄
+   - General Analysis Agent(공통 분석 LangGraph): 조회 / 전처리 / 시각화
+   - 대화 기억: LangGraph Checkpointer(runtime/conversation_memory.sqlite) + thread_id (DM=사용자별, 채널=채널+사용자별)
+   데이터: common/data_sources.py에 등록된 출처 (현재 H&M 자사 데이터 + Amazon 외부 리뷰 데이터)
 3. Delivery Agent를 호출합니다.
 4. final_answer를 Slack으로 전송합니다.
 5. 결과 DataFrame을 CSV로 생성해 첨부합니다.
 6. Visualization PNG가 있으면 같이 첨부합니다.
-7. 향후 Model / Experiment 결과도 첨부할 수 있는 구조를 사용합니다.
 
 
 설치
@@ -22,6 +25,11 @@ python -m pip install slack-bolt python-dotenv
 SLACK_BOT_TOKEN
 SLACK_APP_TOKEN
 
+(선택) LangSmith 추적 — 대화를 thread 단위로 묶어 볼 수 있습니다.
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=cart-signal
+
 
 실행
 ----
@@ -32,6 +40,7 @@ python slack_bot.py
 import logging
 import json
 import os
+import re
 import time
 
 from collections import (
@@ -286,6 +295,76 @@ def run_project_agent(
             "반환하지 않았습니다."
         )
 
+
+    return result
+
+
+# =========================================================
+# Slack 요청 유형별 실행 경로
+# =========================================================
+
+def _has_visualization_intent(question: str) -> bool:
+    """차트·그래프 생성 요청인지 판단합니다."""
+    return bool(re.search(r"그래프|시각화|차트|막대그래프|bar\s*chart", question, re.I))
+
+
+def _is_user_facing_error(result: dict) -> bool:
+    """사용자에게 그대로 안내해야 하는 오류인지 확인합니다.
+
+    예: 수집 중이라 잠긴 데이터 출처 → "잠시 후 다시 시도" 안내를 Slack에 그대로 전달
+    """
+    from agent_system.common_tools.execution_tools.data_tools import SOURCE_UNAVAILABLE_PREFIX
+
+    return str(result.get("error") or "").startswith(SOURCE_UNAVAILABLE_PREFIX)
+
+
+def _ensure_graph_success(result: dict, label: str, require_visualization=False):
+    """작업 실패를 완료로 간주하거나 이전 실행 이미지를 재사용하지 않습니다."""
+    if not isinstance(result, dict):
+        raise TypeError(f"{label}: LangGraph 결과가 dict가 아닙니다.")
+    if result.get("error") or result.get("visualization_error"):
+        raise RuntimeError(f"{label}: {result.get('error') or result.get('visualization_error')}")
+    if not str(result.get("final_answer") or "").strip():
+        raise ValueError(f"{label}: 최종 답변이 없습니다.")
+    if require_visualization:
+        visualization_result = result.get("visualization_result") or {}
+        chart_path = result.get("visualization_path") or (
+            visualization_result.get("file_path")
+            if isinstance(visualization_result, dict) else None
+        )
+        if not chart_path or "visualization" not in (result.get("completed_steps") or []):
+            raise ValueError(f"{label}: 시각화 결과가 생성되지 않았습니다.")
+
+
+def run_slack_question(question, graph_runner):
+    """Slack 요청 한 턴을 실행하고 결과를 확인합니다.
+
+    graph_runner(question)는 Orchestrator 그래프(Orchestrator → 특화 Agent)를 실행합니다.
+
+    - 일상 대화(chitchat): Orchestrator 답변을 그대로 전달
+    - 분석(analysis): 그래프 요청이면 차트가 실제로 생성됐는지 확인
+      (후속 질문은 재작성된 질문 기준으로 그래프 요청 여부를 판단)
+    """
+
+    result = graph_runner(question)
+
+    if not isinstance(result, dict):
+        raise TypeError("대화 그래프 결과가 dict가 아닙니다.")
+
+    if result.get("turn_type") in ("chitchat", "approval_request", "approval"):
+        print(f"[Slack Router] Orchestrator 답변 ({result.get('turn_type')})")
+        return result
+
+    if _is_user_facing_error(result):
+        print("[Slack Router] 데이터 출처 일시 사용 불가 안내")
+        return result
+
+    analysed_question = result.get("standalone_question") or question
+    if _has_visualization_intent(analysed_question):
+        print("[Slack Router] 시각화 요청: 차트 생성 확인")
+        _ensure_graph_success(result, "시각화", require_visualization=True)
+    else:
+        print("[Slack Router] 분석 요청")
 
     return result
 
@@ -683,9 +762,11 @@ class SlackBridge:
         # Multi Agent 실행
         # =================================================
         try:
-            result = self.runner(question)
+            # 대화 기억(멀티턴)을 위해 Slack 이벤트도 함께 넘깁니다.
+            result = self.runner(question, event)
             # 예외 없이 오류 State가 반환된 경우도 실패로 처리합니다.
-            if result.get("error"):
+            # 단, 출처 일시 사용 불가처럼 사용자에게 안내할 오류는 답변으로 전달합니다.
+            if result.get("error") and not _is_user_facing_error(result):
                 raise RuntimeError(result["error"])
 
             # 최종 답변이 실제로 생성되었는지 확인합니다.
@@ -723,9 +804,9 @@ class SlackBridge:
         # Delivery Agent 실행
         # =================================================
         # 최종 답변을 전송하고, 첨부 가능한 시각화 파일과
-        # Model / Experiment의 별도 결과 파일이 있으면 함께 전송합니다.
+        # Model의 별도 결과 파일이 있으면 함께 전송합니다.
         # CSV용 결과 DataFrame 선택은 별도 결과 파일 수집과 독립적이며,
-        # Experiment → Model → Prep → Data 순서로 선택합니다.
+        # Model → Prep → Data 순서로 선택합니다.
         # 행 수 제한 등 전송 정책에 따라 CSV 생성·첨부 여부를 결정합니다.
         # =================================================
 
@@ -1029,26 +1110,35 @@ def main():
     # LangGraph
     # =====================================================
 
-    from agent_system.shared_analysis.graph import (
-        graph,
+    from agent_system.specialized_agents.general_analysis_agent import (
+        get_general_analysis_graph,
     )
+
+    # 분석 그래프를 먼저 불러와 import 오류를 시작 시점에 확인합니다.
+    get_general_analysis_graph()
+
+    # 멀티턴 대화 그래프 (SQLite 대화 기억 + LangSmith thread 메타데이터)
+    from agent_system.orchestrator.graph import (
+        get_graph as get_conversation_graph,
+        run_turn as run_conversation_turn,
+    )
+    from agent_system.orchestrator.tools.memory import (
+        build_slack_thread_id,
+        langsmith_enabled,
+        MEMORY_DB_PATH,
+    )
+
+    conversation_graph = get_conversation_graph()
+    print(f"[대화 기억] {MEMORY_DB_PATH}")
+    print(f"[LangSmith 추적] {'사용' if langsmith_enabled() else '사용 안 함'}")
 
 
     # =====================================================
     # Delivery Agent
     # =====================================================
 
-    from agent_system.delivery.delivery_agent import (
+    from interfaces.slack.delivery import (
         deliver_to_slack,
-    )
-
-
-    # =====================================================
-    # Purchase Targeting 빠른 Cache 경로
-    # =====================================================
-
-    from agent_system.specialized_agents.purchase_targeting_agent import (
-        try_run_cached_purchase_targeting,
     )
 
 
@@ -1056,56 +1146,25 @@ def main():
     # Agent Runner
     # =====================================================
 
-    def runner(
-        question,
-    ):
+    def runner(question, event):
+        # Orchestrator 그래프: 일상 대화는 바로 답하고,
+        # 업무 요청은 이전 대화를 반영해 다시 쓴 질문으로 특화 Agent(현재 General Analysis)에 넘깁니다.
+        from env.model_settings import get_request_config
 
-        # -------------------------------------------------
-        # 1. 저장된 구매예측 결과로 바로 처리 가능한 질문은
-        #    Purchase Targeting Agent를 먼저 사용합니다.
-        #
-        #    팀 합의에 따라 저장 결과는
-        #    mart.purchase_predictions 하나만 사용합니다.
-        #
-        # 예:
-        # "장바구니 추가 후 24시간 기준으로
-        #  구매확률이 높은 고객 10명을 찾아줘."
-        #
-        # 이 경우 mart.purchase_training_data 전체 조회와
-        # 모델 재추론을 건너뜁니다.
-        # -------------------------------------------------
-        cached_targeting_result = (
-            try_run_cached_purchase_targeting(
-                question
-            )
-        )
-
-        if cached_targeting_result is not None:
-            print(
-                "[Slack Router] "
-                "Purchase Targeting Cache 경로 사용"
-            )
-
-            return cached_targeting_result
-
-        # -------------------------------------------------
-        # 2. Cache 경로에서 처리하지 못한 일반 요청은
-        #    기존 Shared Analysis Graph가 처리합니다.
-        # -------------------------------------------------
-        print(
-            "[Slack Router] "
-            "Shared Analysis Graph fallback"
-        )
-
-        # 요청 로그는 SlackBridge에서 결과 검증과 전송까지 함께 관리합니다.
-        return (
-            run_project_agent(
-                graph=
-                    graph,
-
-                question=
-                    question,
-            )
+        thread_id = build_slack_thread_id(event)
+        return run_slack_question(
+            question=question,
+            graph_runner=lambda q: run_conversation_turn(
+                question=q,
+                thread_id=thread_id,
+                llm_config=get_request_config().public(),
+                graph=conversation_graph,
+                metadata={
+                    "source": "slack",
+                    "slack_channel": event.get("channel", ""),
+                    "slack_user": event.get("user", ""),
+                },
+            ),
         )
 
 
