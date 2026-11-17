@@ -303,11 +303,13 @@ def run_project_agent(
 # Slack 요청 유형별 실행 경로
 # =========================================================
 
+
+
 def _has_visualization_intent(question: str) -> bool:
-    """실제 차트 생성 요청과 단순 언급·설명·제외 요청을 구분합니다."""
+    """차트 제외, 설명, 신규 생성 요청을 구분합니다."""
     text = str(question or "").strip()
 
-    # 그래프 제외 또는 표 전용 요청을 우선 처리
+    # 1. 차트 제외 요청을 가장 먼저 처리
     excluded = (
         r"(?:그래프|차트|시각화)\s*없이"
         r"|(?:그래프|차트|시각화)\s*(?:말고|빼고|제외)"
@@ -317,50 +319,50 @@ def _has_visualization_intent(question: str) -> bool:
     if re.search(excluded, text, re.I):
         return False
 
-    # 기존 차트의 설명·해석만 요청하는 경우 제외
-    explanation = (
-        r"(?:그래프|차트|시각화).{0,20}"
-        r"(?:의미|해석|설명|읽는\s*법|무슨\s*뜻)"
-        r"|(?:앞서|이전|기존|방금)\s*(?:만든|그린|생성한)"
-        r"\s*(?:그래프|차트)"
-    )
-    create_command = (
-        r"(?:그려|만들어|생성해|시각화해|출력해|표시해|보여줘)"
-    )
-    if (
-        re.search(explanation, text, re.I)
-        and not re.search(create_command, text, re.I)
-    ):
-        return False
-
     chart_terms = (
         r"(?:막대그래프|선그래프|히스토그램|산점도|히트맵|"
         r"그래프|차트|시각화|bar\s*chart|scatter\s*plot)"
     )
 
-    # 새로운 차트를 그리거나 생성하라는 명시적 명령
+    # 2. 명시적인 신규 차트 생성 요청
     create_after_chart = (
         chart_terms
-        + r".{0,25}?"
-        + r"(?:그려|그려줘|만들어|만들어줘|생성해|생성해줘|"
-        r"보여줘|표시해|출력해|시각화해)"
+        + r".{0,30}?"
+        + r"(?:그려|만들어|생성해|시각화해|출력해|표시해)"
     )
-
     create_before_chart = (
-        r"(?:그려줘|그려|만들어줘|만들어|생성해줘|생성해|"
-        r"보여줘|표시해|출력해)"
-        + r".{0,25}?"
+        r"(?:그려|만들어|생성해|시각화해)"
+        + r".{0,30}?"
         + chart_terms
     )
 
-    return bool(
-        re.search(
-            create_after_chart + "|" + create_before_chart,
-            text,
-            re.I,
-        )
+    if re.search(
+        create_after_chart + "|" + create_before_chart,
+        text,
+        re.I,
+    ):
+        return True
+
+    # 3. 기존 차트 설명·해석만 요청하는 경우 제외
+    explanation = (
+        r"(?:그래프|차트|시각화).{0,30}"
+        r"(?:의미|해석|설명|읽는\s*법|무슨\s*뜻)"
+        r"|(?:앞서|이전|기존|방금|이)\s*"
+        r"(?:만든|그린|생성한)?\s*"
+        r"(?:그래프|차트).{0,30}"
+        r"(?:설명|해석|의미)"
+    )
+    if re.search(explanation, text, re.I):
+        return False
+
+    # 4. 신규 차트 표시 요청
+    show_after_chart = (
+        chart_terms
+        + r".{0,30}?"
+        + r"(?:보여줘|보여주세요|표시해줘|출력해줘)"
     )
 
+    return bool(re.search(show_after_chart, text, re.I))
 
 
 def _is_user_facing_error(result: dict) -> bool:
@@ -1078,17 +1080,8 @@ def main():
     # .env 로드
     # =====================================================
 
-    load_dotenv(
-        BASE_DIR
-        / "env"
-        / ".env"
-    )
-
-
-    load_dotenv(
-        BASE_DIR
-        / ".env"
-    )
+    # 프로젝트 루트의 .env 파일만 사용합니다.
+    load_dotenv(BASE_DIR / ".env")
 
 
     # =====================================================
