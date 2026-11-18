@@ -8,7 +8,7 @@ from functools import lru_cache # 함수 결과를 메모리에 저장 (캐시) 
 from dotenv import load_dotenv
 
 from sqlalchemy import Engine, create_engine # DB 연결을 관리하는 엔진 클래스와 엔진 생성 도구
-from sqlalchemy.engine import URL # DB 접속 정보 담는 URL 객체
+from sqlalchemy.engine import URL, make_url # DB 접속 정보 담는 URL 객체
 from sqlalchemy.orm import Session, sessionmaker # DB 작업 및 트랜잭션을 관리하는 세션 클래스와 생성 도구
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,11 +17,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(PROJECT_ROOT / "env" / ".env", override=False)
 
-def _database_url() -> str | URL:
-    """DB URL 생성 또는 기존 URL 반환"""
+DRIVER = "postgresql+psycopg"  # psycopg 3
 
-    # url이 있으면 반환 없으면 생성
-    if url := os.getenv("OPS_DATABASE_URL"):
+def _database_url() -> URL:
+    """OPS_DATABASE_URL이 있으면 사용, 없으면 개별 환경변수로 생성"""
+
+    # OPS_DATABASE_URL이 있으면 사용
+    if raw := os.getenv("OPS_DATABASE_URL"):
+        url = make_url(raw)
+
+        # postgresql일 시 psycopg 3으로 설정
+        if url.drivername in ("postgresql", "postgres"):
+            url = url.set(drivername=DRIVER)
         return url
 
     # 필수 env 불러오기
@@ -36,7 +43,7 @@ def _database_url() -> str | URL:
 
     # URL 객체 반환
     return URL.create(
-        "postgresql+psycopg",
+        DRIVER,
         username=required_env["DB_USER"],
         password=required_env["DB_PASSWORD"],
         host=os.getenv("DB_HOST") or "127.0.0.1",
@@ -49,10 +56,12 @@ def get_engine() -> Engine:
     """엔진 생성 후 캐시에 저장하여 재사용"""
     return create_engine(_database_url(), pool_pre_ping=True)
 
+operations_engine = get_engine()
+
 @lru_cache
 def _session_factory() -> sessionmaker[Session]:
     """공통 설정을 가진 세션 생성기 생성 후 캐시에 저장하여 재사용"""
-    return sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
+    return sessionmaker(bind=get_engine(), expire_on_commit=False)
 
 @contextmanager
 def session_scope():
