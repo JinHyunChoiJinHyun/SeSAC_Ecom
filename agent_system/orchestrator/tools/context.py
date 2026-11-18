@@ -44,6 +44,16 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+LOCAL_TZ = timezone(timedelta(hours=9))   # 한국 시간 (대화 판단 LLM에 알려 줄 기준)
+_WEEKDAYS = "월화수목금토일"
+
+
+def format_now(now: datetime | None = None) -> str:
+    """대화 판단 LLM에 넣을 현재 시각 (한국 시간). 예) 2026-11-18 (수) 14:05 KST"""
+    local = (now or _now()).astimezone(LOCAL_TZ)
+    return f"{local:%Y-%m-%d} ({_WEEKDAYS[local.weekday()]}) {local:%H:%M} KST"
+
+
 # =========================================================
 # LLM 입력 텍스트
 # =========================================================
@@ -95,7 +105,7 @@ def format_last_analysis(last_analysis: dict | None) -> str:
 
 
 def manage_context(question: str, history_messages, last_analysis, campaign: dict | None = None,
-                   pending_approval: dict | None = None) -> str:
+                   pending_approval: dict | None = None, now: datetime | None = None) -> str:
     """manage_context Tool: 이전 대화 · 직전 분석 · 확정된 기획전 정보(상품·타깃·일정)를 모아
     대화 판단 LLM 입력 텍스트를 만듭니다."""
 
@@ -107,6 +117,7 @@ def manage_context(question: str, history_messages, last_analysis, campaign: dic
                    f"{pending_approval.get('question', '')}\n"
                    "(사용자가 이번 메시지에서 다른 질문을 했습니다. 질문에 답하면 승인 요청은 다시 안내됩니다)\n\n")
     return (
+        f"[현재 시각] {format_now(now)}\n\n"
         "[이전 대화]\n"
         f"{format_history(history_messages)}\n\n"
         "[직전 분석 요약]\n"
@@ -192,6 +203,111 @@ def keep_previous_chart_type(standalone: str, user_question: str,
     ):
         return standalone
     return f"{standalone.rstrip(' .')} (직전과 같이 {label}로 보여줘)"
+
+
+# "그래프로 보여줘"처럼 조건 변경 없이 그래프만 요청한 문장 (조건·대상 단어가 섞이면 해당 안 됨)
+_CHART_ONLY_PATTERN = re.compile(
+    r"^\s*(?:(?:그거|이거|그걸|이걸|위에|방금|결과를|이\s*결과|다시|그럼|좀|위|그|이|결과)\s+)?"
+    r"(?:가로\s*|세로\s*)?(?:막대|선|꺾은선|원|파이|누적\s*막대)?\s*"
+    r"(?:그래프|차트|시각화|히트맵|산점도|히스토그램|상자\s*그림|박스\s*플롯|plot|chart)\s*"
+    r"(?:으로|로)?\s*(?:만)?\s*(?:다시\s*)?"
+    r"(?:보여\s*줘|보여\s*주세요|보여\s*줄래|그려\s*줘|그려\s*주세요|바꿔\s*줘|바꿔\s*주세요|"
+    r"해\s*줘|해\s*주세요|만들어\s*줘|만들어\s*주세요|줘|부탁해|부탁해요)?\s*[.!?~]*\s*$",
+    re.I,
+)
+
+
+def is_chart_only_request(user_question: str, is_followup: bool) -> bool:
+    """직전 분석에 대해 그래프만 요청한 후속 질문인지 (settings.CHART_ONLY_FOLLOWUP)."""
+
+    if not getattr(settings, "CHART_ONLY_FOLLOWUP", False) or not is_followup:
+        return False
+    return bool(_CHART_ONLY_PATTERN.match(str(user_question or "")))
+
+
+def chart_only_answer(final_answer: str) -> str:
+    """그래프만 요청한 경우의 짧은 답변: 결과 제목 한 줄 + 그래프 첨부 안내."""
+
+    title = next((line.strip() for line in str(final_answer or "").splitlines() if line.strip()), "")
+    title = title.lstrip("#*• ").strip()
+    return f"{title}\n그래프를 첨부했습니다." if title else "그래프를 첨부했습니다."
+
+
+# 새 질문(is_followup=False)에 직전 조건이 잘못 붙는 것을 막는 검사용 단어 (그룹 단위)
+# 상품 카테고리 (한국어 질문 표현 + H&M product_type 영문). "top"(Top N)·"베스트"(베스트셀러)·"bra"·"브라"(브라운)·"hat"처럼
+# 다른 말과 겹치는 단어는 넣지 않습니다.
+_CATEGORY_TERMS = (
+    "니트", "스웨터", "가디건", "카디건", "티셔츠", "셔츠", "블라우스", "후드", "맨투맨", "스웨트셔츠",
+    "바지", "팬츠", "청바지", "데님", "레깅스", "반바지", "쇼츠", "스커트", "치마", "드레스", "원피스",
+    "재킷", "자켓", "코트", "아우터", "점퍼", "패딩", "조끼", "수영복", "비키니", "속옷",
+    "양말", "스타킹", "잠옷", "파자마", "신발", "부츠", "샌들", "운동화", "가방", "모자", "스카프", "액세서리",
+    "상의", "하의",
+    "sweater", "cardigan", "t-shirt", "shirt", "blouse", "hoodie", "trousers", "jeans", "leggings", "shorts",
+    "skirt", "dress", "jacket", "coat", "swimwear", "bikini", "socks", "pyjama", "shoes", "boots", "scarf",
+)
+
+_INHERITABLE_CONDITIONS = {
+    "성별·고객군": ("남성", "여성", "남자", "여자", "아동", "키즈", "유아", "menswear", "ladieswear", "divided",
+                 "baby", "children", "kids"),
+    "채널": ("온라인", "오프라인", "매장"),
+    "카테고리": _CATEGORY_TERMS,
+}
+
+
+ELLIPTICAL_MAX_CHARS = 10   # 공백 제외 이 글자 수 이하 질문은 생략형 후보
+# 생략형 끝말: "남성은?", "Top 5로", "온라인만", "여성도?"
+_ELLIPTICAL_ENDING = re.compile(r"(은|는|도|만|로|으로|이면|라면|면|이랑|하고)\s*[?？]?$")
+# 무엇을 볼지(지표)가 들어 있으면 짧아도 새 질문으로 봄: "월별 구매 건수 추이"
+_METRIC_WORDS = ("건수", "추이", "매출", "판매", "구매", "비중", "비율", "순위", "분포", "평균", "합계", "몇", "얼마")
+
+
+def is_elliptical_question(user_question: str) -> bool:
+    """짧은 생략형 질문인지 ("남성은?", "Top 5로"). 짧아도 지표가 있고 생략형 끝말이 없으면 새 질문."""
+    text = str(user_question or "").strip()
+    if len(re.sub(r"\s+", "", text)) > ELLIPTICAL_MAX_CHARS:
+        return False
+    if _ELLIPTICAL_ENDING.search(text):
+        return True
+    return not any(word in text for word in _METRIC_WORDS)
+
+
+def _source_names() -> list[str]:
+    try:
+        from common.data_sources import get_sources
+        names = [source.label for source in get_sources()]
+    except Exception:
+        names = ["H&M", "Amazon"]
+    return names + ["아마존"]
+
+
+def drop_inherited_conditions(user_question: str, standalone: str, is_followup: bool,
+                              campaign: dict | None = None) -> tuple[str, str]:
+    """새 질문인데 다시 쓴 질문에 원문에 없던 성별·채널·카테고리 조건이 생겼으면 원문으로 되돌립니다.
+
+    반환: (사용할 질문, 되돌린 이유 — 되돌리지 않았으면 "")
+    - 후속 질문(is_followup=True)은 조건을 이어받는 것이 맞으므로 그대로 둡니다.
+    - 짧은 생략형 질문("남성은?", "Top 5로")도 그대로 둡니다 (LLM이 is_followup을 놓친 경우 대비).
+    - 확정된 기획전 정보(campaign)에 있는 값에서 온 조건은 사용자가 가리킨 것으로 보고 그대로 둡니다.
+    - 원문으로 되돌릴 때, 다시 쓴 질문에만 데이터 출처(H&M 등)가 있으면 출처는 앞에 붙여 둡니다.
+    """
+
+    if is_followup or not standalone or not user_question:
+        return standalone, ""
+    if is_elliptical_question(user_question):
+        return standalone, ""
+    original = str(user_question).lower()
+    rewritten = str(standalone).lower()
+    confirmed = " ".join(str(v) for v in ((campaign or {}).get("values") or {}).values()).lower()
+    for group, terms in _INHERITABLE_CONDITIONS.items():
+        added = [t for t in terms if t in rewritten and t not in original and t not in confirmed]
+        if added and not any(t in original for t in terms):
+            question = str(user_question).strip()
+            source = next((name for name in _source_names()
+                           if name.lower() in rewritten and name.lower() not in original), "")
+            if source:
+                question = f"{source} {question}"
+            return question, f"원문에 없는 {group} 조건({', '.join(added)})이 붙어 원문으로 분석"
+    return standalone, ""
 
 
 REWRITTEN_NOTICE_PREFIX = "이전 대화를 반영해"

@@ -740,12 +740,18 @@ def deliver_to_slack(
     # 결과 CSV (공통 Tool: output_tools.prepare_result_csv)
     # =====================================================
 
-    csv_status = prepare_result_csv(result)
+    # 그래프만 요청한 후속 질문(delivery_mode="chart_only")은 직전과 같은 데이터라 CSV를 다시 보내지 않습니다.
+    if result.get("delivery_mode") == "chart_only":
+        csv_status = {"result_type": "chart_only", "path": None, "error": "", "skipped_reason": ""}
+    else:
+        csv_status = prepare_result_csv(result)
     result_type = csv_status["result_type"]
     csv_path = csv_status["path"]
     csv_error = csv_status["error"]
     csv_skipped_reason = csv_status["skipped_reason"]
     attachment_errors = []
+    chart_only = result.get("delivery_mode") == "chart_only"
+    full_answer = str(result.get("final_answer") or "")
 
     if csv_path is not None:
         print("[Slack Delivery CSV]")
@@ -905,6 +911,17 @@ def deliver_to_slack(
     # =====================================================
     # 최종 Slack 메시지 생성
     # =====================================================
+
+    # 그래프 파일을 확인하지 못했다면 요약 대신 전체 분석 내용을 전달
+    if chart_only and any(
+        error.get("type") == "visualization"
+        for error in attachment_errors
+    ):
+        result = {
+            **result,
+            "final_answer": full_answer,
+            "delivery_mode": "text_fallback",
+        }
 
     slack_message = (
         build_slack_message(
@@ -1092,6 +1109,31 @@ def deliver_to_slack(
                 }
             )
 
+
+    # 그래프 업로드에 실패했으면 전체 분석 본문을 추가로 전달
+    chart_upload_failed = chart_only and any(
+        not item.get("success")
+        and str(item.get("file_path", "")).lower().endswith(".png")
+        for item in upload_results
+    )
+
+    if chart_upload_failed and full_answer.strip():
+        try:
+            post_slack_message(
+                client=client,
+                channel_id=channel_id,
+                text=full_answer,
+                thread_ts=thread_ts,
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "그래프 업로드 실패 후 본문 재전송 실패 (%s)",
+                type(exc).__name__,
+            )
+            attachment_errors.append({
+                "type": "text_fallback",
+                "error": repr(exc),
+            })
 
     # =====================================================
     # 실패 항목 확인

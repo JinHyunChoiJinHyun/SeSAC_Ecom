@@ -9,6 +9,10 @@ Orchestrator는 여기에 등록된 Agent 중에서 요청을 처리할 Agent �
 
 만 하면 됩니다. Orchestrator 그래프·Slack 전달 코드는 고치지 않습니다.
 
+팀 규칙: 특화 Agent의 Tool은 반드시 agent_system/common_tools/tool_call_log.run_logged_tool()로 실행해
+어떤 Tool을 어떤 인자로 불렀고 결과(성공/사용 불가/오류)가 어땠는지 로그를 남기고,
+Agent 실행 끝에 log_tool_summary()로 요약을 남깁니다. (예: agent_system/agents/market_analysis_agent.py)
+
 11/16 회의 결정 (전문 Agent 7개)은 아래에 enabled=False로 미리 등록해 두었습니다.
 구현을 마친 Agent부터 enabled=True로 바꾸면 Orchestrator가 바로 라우팅합니다.
 자세한 절차: agent_system/orchestrator/README.md
@@ -124,8 +128,8 @@ AGENTS: list[AgentSpec] = [
         ),
         examples=("요즘 니트 관련 키워드 중 뜨는 게 뭐야?", "하프집업 니트 리뷰에서 고객이 자주 보는 항목은?",
                   "퍼플 니트가 왜 주목받는지 근거 찾아줘"),
-        runner="agent_system.specialized_agents.market_analysis_agent:run",
-        enabled=False,
+        runner="agent_system.agents.market_analysis_agent:run",
+        enabled=True,   # 구현됨. 백엔드 연결 전에는 무신사 샘플만, 네이버·유튜브·패션 매체는 '미연결' 표시
         tools=("get_shopping_trends", "analyze_trend_sustainability", "analyze_youtube_trends",
                "analyze_competitor_reviews", "analyze_selling_points", "search_fashion_trends"),
         scenario="메인: 카테고리 선정·키워드 평가·경쟁 상품 소구점 분석 / 서브: 퍼플 트렌드 근거, 리뷰 기반 촬영 포인트",

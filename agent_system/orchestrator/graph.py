@@ -19,6 +19,7 @@
 - pending_approval : 승인 대기 중인 요청
 """
 
+import re
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -104,6 +105,31 @@ def _interrupt_text(output: dict) -> str:
     return approval.approval_prompt(items[0].value) if items and isinstance(items[0].value, dict) else ""
 
 
+# ---------------------------------------------------------------- 승인 입력 안내 (A안)
+# 승인 판단 규칙(approval.APPROVE)은 보안상 "승인", "네", "좋아요"처럼 한 단어 전체 일치만 승인으로 받습니다.
+# 그보다 긴 승인 표현은 승인으로 처리하지 않고, 아래 안내만 보여 줍니다 (질문은 평소처럼 처리).
+APPROVAL_INPUT_GUIDE = "승인 대기 중입니다. 저장하려면 '승인', 저장하지 않으려면 '반려'만 입력해 주세요."
+_APPROVAL_LIKE_WORDS = {
+    "승인", "승인합니다", "승인할게", "승인할게요", "승인해", "승인해요", "승인해줘", "승인해주세요", "승인이요",
+    "확정", "확정해", "확정해요", "확정해줘", "확정해주세요", "확정할게", "확정할게요", "확정합니다",
+    "저장", "저장해", "저장해요", "저장해줘", "저장해주세요", "저장할게요", "저장합니다",
+    "진행", "진행해", "진행해요", "진행해줘", "진행해주세요", "진행할게요", "진행합니다", "진행하자",
+    "네", "넵", "네네", "예", "응", "응응", "ㅇㅇ", "그래", "그래요", "오케이", "ok", "okay", "yes",
+    "좋아", "좋아요", "좋습니다", "좋네요", "맞아", "맞아요", "맞습니다",
+    "그걸로", "그대로", "그렇게", "해", "해줘", "해주세요", "할게요", "부탁해요", "부탁드려요", "부탁합니다",
+}
+
+
+def looks_like_approval_intent(message: str) -> bool:
+    """승인 대기 중, 질문이 아니고 승인·동의 표현으로만 이루어진 짧은 답인지 (안내용, 승인 처리 아님)."""
+    text = str(message or "").strip()
+    if not text or len(text) > 30 or approval.QUESTION.search(text):
+        return False
+    words = [w.strip(".,!~。·") for w in re.split(r"[\s,]+", text.lower())]
+    words = [w for w in words if w]
+    return bool(words) and all(w in _APPROVAL_LIKE_WORDS for w in words)
+
+
 def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metadata: dict | None = None) -> dict:
     """대화 한 턴을 실행하고 Slack Delivery에 넘길 결과 dict를 반환합니다.
 
@@ -140,6 +166,17 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
                 "thread_id": thread_id,
                 "approval_result": output.get("approval_result") or {},
                 "campaign": output.get("campaign") or {},
+            }
+        if looks_like_approval_intent(question):
+            # 승인 의도는 보이지만 승인 규칙(한 단어 전체 일치)과 다른 답 (예: "승인합니다", "네 좋아요")
+            # → LLM에 넘기지 않고 입력 방법만 안내. 승인 판단 규칙(approval.py)은 바꾸지 않으며 계속 승인 대기
+            print("[승인 대기 중] 승인 의도로 보이는 답 → 입력 방법 안내")
+            return {
+                "turn_type": "approval_request",
+                "final_answer": f"{APPROVAL_INPUT_GUIDE}\n\n{approval.approval_prompt(waiting)}",
+                "completed_steps": [],
+                "thread_id": thread_id,
+                "awaiting_approval": True,
             }
         # 승인과 무관한 질문 → 평소처럼 처리. pending_approval이 남아 있어 끝에서 다시 승인 대기로 멈춤
 
@@ -181,6 +218,12 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
             agent_result.get("final_answer", ""), question,
             agent_result.get("standalone_question", ""), bool(output.get("is_followup")),
         )
+        # "그래프로 보여줘"처럼 그래프만 요청했고 그래프가 만들어졌으면 Slack에는 제목 + 그래프만 보냄
+        if (context.is_chart_only_request(question, bool(output.get("is_followup")))
+                and agent_result.get("visualization_path") and not agent_result.get("error")):
+            agent_result["full_answer"] = agent_result["final_answer"]
+            agent_result["final_answer"] = context.chart_only_answer(agent_result["final_answer"])
+            agent_result["delivery_mode"] = "chart_only"
         if reminder:
             agent_result["final_answer"] += f"\n\n{reminder}"
             agent_result["awaiting_approval"] = True
