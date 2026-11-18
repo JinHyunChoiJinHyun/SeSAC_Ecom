@@ -16,7 +16,7 @@ from shared_analysis.market.review_analysis import similar_products
 
 SELLING_POINT_TERMS = {
     "소재": {
-        "울": r"(?:^|[^가-힣])울(?!트라)|울\s*혼방|wool",
+        "울": r"(?:^|[^가-힣])울(?:\s*혼방)?(?!트라)|wool",
         "메리노울": r"메리노",
         "램스울": r"램스\s*울|lambswool",
         "캐시미어": r"캐시미어|캐시|cashmere",

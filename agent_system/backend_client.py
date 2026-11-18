@@ -72,7 +72,19 @@ def call(method: str, path: str, *, params: dict | None = None, body: dict | Non
         url += "?" + urllib.parse.urlencode(clean)
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     request = urllib.request.Request(url, data=data, method=method.upper(), headers=_headers(headers))
-    timeout = float(os.getenv("CART_SIGNAL_BACKEND_TIMEOUT", "30"))
+    timeout_raw = os.getenv("CART_SIGNAL_BACKEND_TIMEOUT", "30").strip() or "30"
+    try:
+        timeout = float(timeout_raw)
+        if not 0 < timeout < float("inf"):
+            raise ValueError("유효하지 않은 timeout")
+    except (ValueError, OverflowError):
+        return {
+            "available": False,
+            "status": "백엔드 타임아웃 설정 오류",
+            "source": source,
+            "data": {},
+            "evidence": [],
+        }
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return as_tool_result(json.loads(response.read().decode("utf-8") or "{}"), source)

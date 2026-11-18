@@ -166,8 +166,34 @@ def run(request) -> dict:
             tools=build_tools(calls),
             system_prompt=build_system_prompt(getattr(request, "campaign", None)),
         )
-        output = agent.invoke({"messages": [HumanMessage(content=request.question)]},
-                              config={"recursion_limit": RECURSION_LIMIT})
+        user_input = request.question
+
+        if getattr(request, "is_followup", False):
+            previous = getattr(request, "last_analysis", None) or {}
+
+            if previous:
+                # 직전 분석 요약을 후속 질문의 참고 정보로 전달
+                context = {
+                    "previous_question": previous.get("question", ""),
+                    "previous_purpose": previous.get("purpose", ""),
+                    "previous_columns": previous.get("columns", []),
+                    "previous_row_count": previous.get("row_count", 0),
+                    "previous_preview": str(previous.get("preview", ""))[:3000],
+                    "previous_scope": previous.get("scope_note", ""),
+                }
+
+                user_input = (
+                    "[직전 시장 분석 요약]\\n"
+                    + json.dumps(context, ensure_ascii=False, default=str)
+                    + "\\n[이번 사용자 요청]\\n"
+                    + request.question
+                    + "\\n미리보기에 없는 수치는 추정하지 말고 도구로 다시 조회하세요."
+                )
+
+        output = agent.invoke(
+            {"messages": [HumanMessage(content=user_input)]},
+            config={"recursion_limit": RECURSION_LIMIT},
+        )
         answer = next((m.content for m in reversed(output.get("messages", []))
                        if isinstance(m, AIMessage) and m.content and not getattr(m, "tool_calls", None)), "")
         if isinstance(answer, list):  # 일부 모델은 content를 블록 목록으로 반환

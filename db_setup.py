@@ -11,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import uuid
 
 import duckdb
 
@@ -69,6 +70,10 @@ def create_database(dataset: str, mode: str | None, overwrite: bool) -> bool:
     target = DB_DIR / spec["database"]
     final_mode = mode or spec["default_mode"]
 
+    if target.exists() and not overwrite:
+        print(f"[건너뜀] {target} (재생성: --overwrite)")
+        return True
+
     missing = [name for name in spec["files"] if not (source_dir / name).is_file()]
     if missing:
         print(f"[실패] {dataset}: 필수 Parquet 파일을 찾지 못했습니다.")
@@ -76,21 +81,16 @@ def create_database(dataset: str, mode: str | None, overwrite: bool) -> bool:
             print(f"  - {source_dir / name}")
         return False
 
-    if target.exists() and not overwrite:
-        print(f"[건너뜀] {target} (재생성: --overwrite)")
-        return True
-
     # 기존 DB를 직접 덮어쓰지 않고 임시 DB를 만든 후 성공 시 교체
-    temp = DB_DIR / (target.name + ".building.duckdb")
-    if temp.exists():
-        print(f"[실패] 이전 임시 DB가 존재합니다: {temp}")
-        print("  다른 생성 프로세스가 없는지 확인하고 수동으로 처리해 주세요.")
-        return False
+    # 실행마다 별도 파일 사용
+    temp = DB_DIR / f"{target.name}.{uuid.uuid4().hex}.building.duckdb"
+    temp_owned = False
 
     con = None
     try:
         print(f"\n[{dataset.upper()}] 생성 시작 ({final_mode.upper()}): {target}", flush=True)
         con = duckdb.connect(str(temp), read_only=False)
+        temp_owned = True
         con.execute(f'CREATE SCHEMA IF NOT EXISTS "{spec["schema"]}"')
         for filename, table in spec["files"].items():
             path = source_dir / filename
@@ -119,7 +119,7 @@ def create_database(dataset: str, mode: str | None, overwrite: bool) -> bool:
         if con is not None:
             con.close()
         # 실패한 임시 DB만 정리. 기존 target은 보존.
-        if temp.exists():
+        if temp_owned and temp.exists():
             try:
                 temp.unlink()
             except OSError:

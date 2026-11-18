@@ -18,8 +18,14 @@ MIN_VIDEOS = 3              # 영상이 이보다 적으면 '표본 부족' 표�
 
 def latest_rows(videos: pd.DataFrame) -> pd.DataFrame:
     df = videos.copy()
-    df["published_at"] = pd.to_datetime(df["published_at"])
-    df["collected_at"] = pd.to_datetime(df["collected_at"])
+    # 시간대가 없는 날짜도 UTC 기준으로 해석
+    df["published_at"] = pd.to_datetime(
+        df["published_at"], utc=True, errors="coerce"
+    )
+    df["collected_at"] = pd.to_datetime(
+        df["collected_at"], utc=True, errors="coerce"
+    )
+    df = df.dropna(subset=["published_at", "collected_at"])
     df = df.sort_values("collected_at").drop_duplicates(["keyword", "video_id"], keep="last")
     age = (df["collected_at"] - df["published_at"]).dt.total_seconds() / 86400
     df["age_days"] = age.clip(lower=1.0)

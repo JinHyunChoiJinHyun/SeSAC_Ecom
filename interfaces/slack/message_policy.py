@@ -34,7 +34,13 @@ def to_slack_mrkdwn(lines):
             heading = _MD_HEADING.match(line)
             if heading:
                 line = f"*{heading.group(1).strip('*').strip()}*"
-            line = _MD_BOLD.sub(lambda m: f"*{m.group(1).strip()}*", line)
+            # 백틱으로 감싼 인라인 코드는 Markdown 변환에서 제외
+            parts = re.split(r"(`+[^`\\n]+`+)", line)
+            line = "".join(
+                part if part.startswith("`") else
+                _MD_BOLD.sub(lambda m: f"*{m.group(1).strip()}*", part)
+                for part in parts
+            )
         out.append(line)
     return out
 

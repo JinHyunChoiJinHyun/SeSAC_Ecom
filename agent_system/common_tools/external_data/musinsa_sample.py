@@ -43,11 +43,22 @@ def status() -> dict:
 
 def load() -> dict:
     """{"products", "reviews", "collected_at"} — 파일이 바뀌면 다시 읽습니다."""
+    global _cache
     folder = data_dir()
     ranking_path = folder / "ranking.csv"
     if not ranking_path.is_file():
         raise FileNotFoundError(status()["status"])
-    key = (str(folder), ranking_path.stat().st_mtime)
+    # 세 CSV 파일의 추가·삭제·수정을 모두 감지
+    filenames = ("ranking.csv", "add_info.csv", "review.csv")
+    files = tuple(folder / name for name in filenames)
+    key = (
+        str(folder),
+        tuple(
+            (name, path.stat().st_mtime_ns, path.stat().st_size)
+            if path.is_file() else (name, None, None)
+            for name, path in zip(filenames, files)
+        ),
+    )
     with _lock:
         if _cache.get("key") == key:
             return _cache
@@ -67,6 +78,12 @@ def load() -> dict:
         else:
             stamp = datetime.fromtimestamp(ranking_path.stat().st_mtime, tz=timezone.utc).date().isoformat()
             collected = f"미상 (파일 수정일 {stamp})"
-        _cache.clear()
-        _cache.update(key=key, products=products, reviews=reviews, collected_at=collected)
-        return _cache
+        # 이전 요청이 참조하던 캐시는 변경하지 않음
+        snapshot = {
+            "key": key,
+            "products": products,
+            "reviews": reviews,
+            "collected_at": collected,
+        }
+        _cache = snapshot
+        return snapshot

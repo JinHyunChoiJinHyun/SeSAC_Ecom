@@ -22,10 +22,17 @@ SERIES_TAIL = 12            # 요약에 보여 줄 키워드별 최근 구간 �
 def prepare_series(series: pd.DataFrame, keywords: list[str]) -> tuple[pd.DataFrame, dict]:
     """요청한 키워드만, 키워드마다 한 요청의 시계열로 정리. 반환: (series, 키워드별 요청 정보)"""
     if series is None or series.empty:
-        return pd.DataFrame(columns=["keyword", "period", "ratio"]), {}
+        empty = pd.DataFrame({
+            "keyword": pd.Series(dtype="str"),
+            "period": pd.Series(dtype="datetime64[ns]"),
+            "ratio": pd.Series(dtype="float64"),
+        })
+        return empty, {}
     df = series[series["keyword"].isin(keywords)].copy()
     df["period"] = pd.to_datetime(df["period"])
     df["ratio"] = pd.to_numeric(df["ratio"], errors="coerce")
+    df = df.dropna(subset=["period", "ratio"])
+    df = df[df["ratio"].between(0, 100)]
     info = {}
     if "request_id" in df and "collected_at" in df:
         df["collected_at"] = pd.to_datetime(df["collected_at"])
@@ -36,7 +43,9 @@ def prepare_series(series: pd.DataFrame, keywords: list[str]) -> tuple[pd.DataFr
         info = {k: {"request_id": str(r.request_id), "collected_at": str(r.collected_at)} for k, r in latest.iterrows()}
     elif "collected_at" in df:
         df["collected_at"] = pd.to_datetime(df["collected_at"])
-        df = df.sort_values("collected_at").drop_duplicates(["keyword", "period"], keep="last")
+        # 구간별 최신값을 이어 붙이지 않고 키워드별 최신 수집 배치만 사용
+        latest_batch = df.groupby("keyword")["collected_at"].transform("max")
+        df = df[df["collected_at"].eq(latest_batch)]
     df = df.drop_duplicates(["keyword", "period"], keep="last").sort_values(["keyword", "period"])
     return df[["keyword", "period", "ratio"]], info
 
