@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+from pathlib import Path
 from langchain_tavily import TavilySearch
 from langchain.tools import tool
 import re
@@ -6,7 +7,7 @@ from env.db_client import get_duckdb_connection
 
 # TavilySearch는 AI Agent가 인터넷에서 실시간으로 정보를 검색할 수 있도록 해주는 웹 검색 도구
 def get_tavily():
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     return TavilySearch(max_results=5)
 
 def make_system_propmt(suffix:str) -> str:
