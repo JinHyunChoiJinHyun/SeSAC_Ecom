@@ -25,19 +25,27 @@ from env.gpt_client import get_openai_chat_client
 
 
 class StateUpdate(BaseModel):
-    key: str = Field(description="확정값 항목: category / products / target / schedule / theme / note 중 하나")
+    key: str = Field(description=(
+        "확정값 항목: category / products / target / schedule / theme / note 중 하나. "
+        "진행 중인 워크플로가 다른 key(selling_points / page / report / page_url / first_screen)를 기다리면 그 key"))
     value: str = Field(description="확정할 값 (사용자가 말한 그대로, 대화·직전 분석에서 가리키는 대상을 구체적으로)")
 
 
 class IntentDecision(BaseModel):
 
-    intent: Literal["chitchat", "analysis", "decision"] = Field(
+    intent: Literal["chitchat", "analysis", "decision", "workflow"] = Field(
         description=(
             "chitchat = 데이터 조회 없이 대화로 답할 수 있음 "
             "(인사, 잡담, 사용법, 직전 결과 설명). "
             "analysis = DB 조회·집계·전처리·시각화가 새로 필요함. "
-            "decision = 사용자가 기획전 확정값(카테고리·상품·타깃·일정·주제)을 정하거나 바꾸겠다고 말함"
+            "decision = 사용자가 기획전 확정값(카테고리·상품·타깃·일정·주제)을 정하거나 바꾸겠다고 말함. "
+            "workflow = 등록된 업무 흐름(기획전 준비 전체 등)을 처음부터 진행해 달라고 함"
         )
+    )
+
+    workflow: str = Field(
+        default="",
+        description="intent가 workflow일 때 시작할 워크플로 이름 ([워크플로] 목록의 name). 그 밖에는 빈 문자열",
     )
 
     updates: list[StateUpdate] = Field(
@@ -112,6 +120,17 @@ analysis (데이터 조회 필요)
   예) "남성은?", "Top 20으로", "그거 막대그래프로 그려줘", "온라인만 다시"
 - 예측 요청도 analysis로 넘기십시오 (분석 단계에서 미지원 안내를 합니다)
 
+workflow (업무 흐름 시작)
+- 아래 [워크플로] 중 하나를 처음부터 단계대로 진행해 달라는 요청일 때. workflow에 name을 쓰십시오.
+  예) "3주 뒤부터 4주간 기획전을 열 예정이야. 주력 상품 선정부터 기획전 준비 전체 단계를 순서대로 진행해줘" → trend_planning
+- 특정 분석 하나만 묻는 질문("하프집업 니트 후보 찾아줘", "니트 구매 추이")은 workflow가 아니라 analysis입니다.
+- [진행 중인 워크플로]가 '선택 대기'이고 사용자가 그 값을 고르거나 정하면 decision입니다.
+  updates의 key는 대기 중인 key를 쓰십시오. (예: 대기 key가 category이고 "니트로 할게" → category=니트)
+- [진행 중인 워크플로]가 있을 때 다른 질문은 평소처럼 chitchat/analysis로 판단하십시오 (끝에 단계 안내가 붙습니다).
+
+[워크플로]
+@@WORKFLOWS@@
+
 분석 대상(데이터·지표)이 정해지는 질문인데 대화로 답할지 분석할지 애매하면 analysis를 고르십시오.
 분석 대상 자체를 정할 수 없으면 chitchat으로 되물으십시오.
 데이터에 근거하지 않은 숫자를 지어내면 안 됩니다.
@@ -174,7 +193,16 @@ def build_intent_prompt(sources=None) -> str:
         .replace("@@SOURCE_CAPABILITIES@@", "\n".join(f"- {source.capability}" for source in sources))
         .replace("@@AGENT_CAPABILITIES@@", ", ".join(spec.label for spec in get_agents()))
         .replace("@@DEFAULT_SOURCE@@", default or "메인")
+        .replace("@@WORKFLOWS@@", _workflow_list())
     )
+
+
+def _workflow_list() -> str:
+    from agent_system.orchestrator import settings
+    if not getattr(settings, "ENABLE_WORKFLOWS", True):
+        return "(사용 안 함 — workflow를 고르지 마십시오)"
+    from agent_system.workflows.registry import describe_workflows
+    return describe_workflows()
 
 
 def get_intent_agent(model_config=None):

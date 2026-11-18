@@ -183,11 +183,11 @@ def run(request) -> dict:
                 }
 
                 user_input = (
-                    "[직전 시장 분석 요약]\\n"
+                    "[직전 시장 분석 요약]\n"
                     + json.dumps(context, ensure_ascii=False, default=str)
-                    + "\\n[이번 사용자 요청]\\n"
+                    + "\n[이번 사용자 요청]\n"
                     + request.question
-                    + "\\n미리보기에 없는 수치는 추정하지 말고 도구로 다시 조회하세요."
+                    + "\n미리보기에 없는 수치는 추정하지 말고 도구로 다시 조회하세요."
                 )
 
         output = agent.invoke(

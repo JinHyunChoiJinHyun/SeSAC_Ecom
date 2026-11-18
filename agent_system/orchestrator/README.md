@@ -17,8 +17,10 @@ Slack 메시지
   → 특화 Agent (registry.py에서 enabled=True)
        general_analysis  자유 데이터 질문 (SQL·전처리·시각화)  ← 켜짐 (기본 Agent)
        market_analysis   시장 관심도·외부 리뷰 분석            ← 켜짐 (agent_system/agents/market_analysis_agent.py)
-       product_analysis · targeting · content_generation ·
-       validation · reporting · campaign_execution             ← 회의 결정, 구현 전(enabled=False)
+       product_analysis  H&M 상품 검색·키워드 매칭·판매 비교   ← 켜짐 (agent_system/agents/product_analysis_agent.py)
+       targeting · content_generation ·
+       validation · reporting · campaign_execution             ← 코드 있음(agent_system/agents/), 데이터·모델·백엔드
+                                                                  연결 전이라 enabled=False · Tool은 '미구현' 반환
   → Slack Delivery (답변·표·PNG·CSV) + Checkpointer가 새 상태 저장
 ```
 
@@ -67,16 +69,34 @@ Slack 메시지
 
 특화 Agent가 결과에 넣을 수 있는 값: `decisions`(바로 저장) · `approval_request`(`{"title","question","updates"}`, 승인 후 저장)
 
+## 워크플로 (agent_system/workflows/)
+
+아키텍처 원칙 5(혼합형 오케스트레이션): 대화 판단이 "어떤 워크플로인가"까지만 정하고, 단계 순서·마케터 선택·승인은 워크플로가 고정합니다.
+
+| 워크플로 | 파일 | 단계 |
+|---|---|---|
+| `trend_planning` 트렌드 기반 기획전 | `workflows/trend_planning/` | s1 주력 상품 선정(2~10) → s2 페이지 틀(11~16) → s3 타깃·발송(17~22) → s4 보고·승인(23~29) |
+| `photography_planning` 촬영·콘텐츠 기획 | `workflows/photography_planning.py` | 메인 주력 상품 확정 후 시작, 4단계 |
+
+- 진행: `orchestrator` → `workflow` 노드(`tools/workflow.py run_workflow_node`)가 단계 순서대로 전문 Agent 실행
+- 마케터 선택 단계: 질문을 남기고 멈춤 → 마케터가 값을 말하면 확정값 승인(check_approval) → 승인되면 다음 단계 자동 진행
+- 담당 Agent 구현 전: 시각화 같은 선택 단계(optional)는 건너뛰고, 필수 단계는 멈춤 → 구현 후 "워크플로 계속"
+- 대기 중 다른 질문: 평소처럼 답하고 끝에 현재 단계 안내 (같은 단계로 복귀)
+- 명령: "워크플로 상태" · "워크플로 계속"(멈춘 단계 다시 시도) · "워크플로 취소"(확정값은 유지)
+- run 상태는 지금 LangGraph state(`workflow_run`)에 저장. 백엔드 run API가 생기면 `workflows/base.py record_run_event()`에서 전송
+- 끄기: `settings.ENABLE_WORKFLOWS = False`
+
 ## 라우팅 판단 순서
 
-1. 켜진 Agent가 1개면 그 Agent (LLM 호출 없음) — 지금은 2개(general_analysis·market_analysis)라 3번 LLM 판단 사용
+1. 켜진 Agent가 1개면 그 Agent (LLM 호출 없음) — 지금은 3개(general_analysis·market_analysis·product_analysis)라 3번 LLM 판단 사용
 2. 후속 질문이고 직전 분석을 처리한 Agent가 있으면 같은 Agent (`KEEP_ROUTE_ON_FOLLOWUP = True`)
 3. 그 밖에는 LLM이 Agent의 `description`·`examples`를 보고 선택
 4. LLM 실패·등록되지 않은 이름 → 기본 Agent(`general_analysis`)
 
 ## 전문 Agent 추가 방법
 
-1. `agent_system/specialized_agents/<이름>_agent.py`에 `run(request) -> dict` 작성
+1. `agent_system/agents/<이름>_agent.py`에 `run(request) -> dict` 작성 (Tool은 `agent_system/tools/<이름>_tools.py`,
+   계산은 `shared_analysis/<영역>/`, 프롬프트는 `agent_system/prompts/` — 아키텍처 구조)
    - 입력 `AgentRequest`: `question`(다시 쓴 질문), `user_question`, `is_followup`, `last_analysis`, `llm_config`
    - 출력: `final_answer` 필수, 선택 `dataframe`, `visualization_path`, `visualization_result`, `sql_query`,
      `data_sources`, `data_purpose`, `data_scope_note`, `error` (`registry.py` 위쪽 주석 참고)

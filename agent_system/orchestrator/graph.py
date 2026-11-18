@@ -1,9 +1,10 @@
 """멀티턴 대화 그래프 — LangGraph StateGraph + Checkpointer + thread_id + interrupt.
 
     START → orchestrator ──(manage_workflow: 조건부 엣지)──▶ <특화 Agent> ──▶ check_approval | END
+                                                          ├▶ workflow (워크플로 단계 실행) ──▶ check_approval | END
                                                           ├▶ check_approval (승인 대기, interrupt)
                                                           └▶ END (일상 대화)
-            check_approval → END
+            check_approval ──▶ workflow (선택 대기 중인 값이 승인되면 다음 단계) | END
 
 멀티턴 방식
 - 그래프를 Checkpointer(SQLite, runtime/conversation_memory.sqlite)와 함께 compile 합니다.
@@ -17,6 +18,7 @@
 - last_analysis    : 직전 분석 요약 (후속 질문용)
 - campaign         : 확정된 기획전 정보 (상품·타깃·일정 등) + 변경 기록
 - pending_approval : 승인 대기 중인 요청
+- workflow_run     : 진행 중인 워크플로 run (단계·상태·지난 단계 기록, agent_system/workflows/)
 """
 
 import re
@@ -50,6 +52,7 @@ class OrchestratorState(MessagesState):
     campaign: dict               # 확정된 기획전 정보 (update_conversation_state)
     pending_approval: dict       # 승인 대기 요청 (check_approval)
     approval_result: dict        # 마지막 승인 처리 결과
+    workflow_run: dict           # 진행 중인 워크플로 run (manage_workflow)
 
 
 def build_graph(checkpointer=None):
@@ -61,16 +64,18 @@ def build_graph(checkpointer=None):
     for spec in agents:
         builder.add_node(spec.name, make_agent_node(spec))
     builder.add_node(workflow.CHECK_APPROVAL, approval.check_approval_node)
+    builder.add_node(workflow.WORKFLOW_NODE, workflow.run_workflow_node)
 
     builder.add_edge(START, "orchestrator")
     # manage_workflow: 조건부 엣지
     builder.add_conditional_edges(
         "orchestrator", workflow.after_orchestrator,
-        [spec.name for spec in agents] + [workflow.CHECK_APPROVAL, END],
+        [spec.name for spec in agents] + [workflow.WORKFLOW_NODE, workflow.CHECK_APPROVAL, END],
     )
     for spec in agents:
         builder.add_conditional_edges(spec.name, workflow.after_agent, [workflow.CHECK_APPROVAL, END])
-    builder.add_edge(workflow.CHECK_APPROVAL, END)
+    builder.add_conditional_edges(workflow.WORKFLOW_NODE, workflow.after_workflow, [workflow.CHECK_APPROVAL, END])
+    builder.add_conditional_edges(workflow.CHECK_APPROVAL, workflow.after_approval, [workflow.WORKFLOW_NODE, END])
     return builder.compile(checkpointer=checkpointer)
 
 
@@ -157,8 +162,17 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
         answer = approval.resolve_approval_answer(question)
         print(f"[승인 대기 중] 메시지 판단 = {answer.kind}")
         if answer.kind != "other":
-            output = graph.invoke(Command(resume={"kind": answer.kind, "text": question}), config=config)
+            # turn_id를 새로 넣어 승인 뒤 워크플로가 이어서 실행되면 그 결과를 이번 턴으로 받습니다
+            try:
+                output = graph.invoke(Command(resume={"kind": answer.kind, "text": question},
+                                              update={"turn_id": turn_id}), config=config)
+            finally:
+                resumed_result = pop_turn_result(turn_id)
             _prune(graph, thread_id)
+            if output.get("turn_type") == "workflow" and resumed_result is not None:
+                resumed_result.update(thread_id=thread_id, approval_result=output.get("approval_result") or {},
+                                      campaign=output.get("campaign") or {})
+                return _with_reminders(resumed_result, output)
             return {
                 "turn_type": "approval",
                 "final_answer": output.get("reply", ""),
@@ -206,6 +220,13 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     reminder = _interrupt_text(output)
     turn_type = output.get("turn_type")
 
+    if turn_type == "workflow":
+        if agent_result is None:
+            raise RuntimeError("워크플로 결과를 찾지 못했습니다.")
+        agent_result["thread_id"] = thread_id
+        agent_result["conversation_reset"] = bool(output.get("was_reset"))
+        return _with_reminders(agent_result, output)
+
     if turn_type == "analysis":
         if agent_result is None:
             raise RuntimeError("Agent 결과를 찾지 못했습니다.")
@@ -224,14 +245,15 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
             agent_result["full_answer"] = agent_result["final_answer"]
             agent_result["final_answer"] = context.chart_only_answer(agent_result["final_answer"])
             agent_result["delivery_mode"] = "chart_only"
-        if reminder:
-            agent_result["final_answer"] += f"\n\n{reminder}"
-            agent_result["awaiting_approval"] = True
-        return agent_result
+        return _with_reminders(agent_result, output)
 
     answer = output.get("reply", "")
     if reminder and turn_type != "approval_request":
         answer = f"{answer}\n\n{reminder}" if answer else reminder
+    # 워크플로가 마케터 선택을 기다리는 중이면 다른 질문에 답한 뒤 현재 단계를 다시 안내 (같은 단계로 복귀)
+    step_note = workflow.workflow_reminder(output.get("workflow_run"), output.get("campaign"))
+    if step_note and turn_type != "approval_request":
+        answer = f"{answer}\n\n{step_note}" if answer else step_note
     return {
         "turn_type": "approval_request" if turn_type == "approval_request" else "chitchat",
         "final_answer": answer,
@@ -241,6 +263,20 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
         "conversation_reset": bool(output.get("was_reset")),
         "awaiting_approval": bool(reminder),
     }
+
+
+def _with_reminders(result: dict, output: dict) -> dict:
+    """Agent·워크플로 결과 끝에 승인 대기·워크플로 단계 안내를 붙입니다."""
+
+    reminder = _interrupt_text(output)
+    if reminder:
+        result["final_answer"] = f"{result.get('final_answer', '')}\n\n{reminder}"
+        result["awaiting_approval"] = True
+    if result.get("turn_type") != "workflow":
+        step_note = workflow.workflow_reminder(output.get("workflow_run"), output.get("campaign"))
+        if step_note:
+            result["final_answer"] = f"{result.get('final_answer', '')}\n\n{step_note}"
+    return result
 
 
 def _prune(graph, thread_id: str):

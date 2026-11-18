@@ -3,7 +3,7 @@
 Orchestrator는 여기에 등록된 Agent 중에서 요청을 처리할 Agent 하나를 고릅니다.
 새 특화 Agent(신제품 기획, 트렌드 분석 등)를 추가할 때는
 
-    1. agent_system/specialized_agents/<이름>_agent.py 에 run(request) 함수 작성
+    1. agent_system/agents/<이름>_agent.py 에 run(request) 함수 작성 (③~⑦은 agent_system/base_agent.py 공통 실행 사용)
        (입력: AgentRequest / 출력: 아래 "결과 형식"을 따르는 dict)
     2. 아래 AGENTS 목록에 AgentSpec 하나 추가
 
@@ -13,8 +13,9 @@ Orchestrator는 여기에 등록된 Agent 중에서 요청을 처리할 Agent �
 어떤 Tool을 어떤 인자로 불렀고 결과(성공/사용 불가/오류)가 어땠는지 로그를 남기고,
 Agent 실행 끝에 log_tool_summary()로 요약을 남깁니다. (예: agent_system/agents/market_analysis_agent.py)
 
-11/16 회의 결정 (전문 Agent 7개)은 아래에 enabled=False로 미리 등록해 두었습니다.
-구현을 마친 Agent부터 enabled=True로 바꾸면 Orchestrator가 바로 라우팅합니다.
+11/16 회의 결정 (전문 Agent 7개)은 모두 등록되어 있습니다.
+①·②는 켜져 있고(enabled=True), ③~⑦은 코드만 있고 데이터·예측 모델·백엔드 API 연결 전이라 enabled=False입니다
+(호출해도 Tool이 '미구현'을 돌려줌). 연결되면 enabled=True로 바꾸면 Orchestrator·워크플로가 바로 사용합니다.
 자세한 절차: agent_system/orchestrator/README.md
 
 결과 형식 (모든 Agent 공통, Delivery와 대화 기억이 이 이름을 읽습니다)
@@ -58,6 +59,9 @@ class AgentRequest:
     last_analysis: dict = field(default_factory=dict)  # 직전 분석 요약 (같은 Agent였을 때만 채움)
     llm_config: dict | None = None    # 요청에 고정된 LLM 설정 (API 키 없음)
     campaign: dict = field(default_factory=dict)       # 확정된 기획전 정보 {"values": {...}, "stage": ...} (manage_context)
+    # 사람이 명시적으로 승인한 실행 Tool 이름 (예: ("send_approval_email",)). 비어 있으면 메일·발송 같은
+    # 실행 Tool은 호출되지 않습니다 (agent_system/base_agent.py). 승인 기록 기능이 생기면 그 기록으로 채웁니다.
+    approved_actions: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -141,11 +145,13 @@ AGENTS: list[AgentSpec] = [
             "자사(H&M) 상품 정보와 구매 기록을 분석해 적합한 상품을 고릅니다. "
             "카테고리·속성·스타일 태그로 상품 검색, 트렌드 키워드와 상품 속성 매칭, "
             "같은 기간·조건의 상품별 구매 실적 비교, 상품 상세(설명·소재·색상·이미지) 조회, "
-            "후보 상품의 키워드 일치도와 판매 근거 비교를 합니다."
+            "후보 상품의 키워드 일치도와 판매 근거 비교를 합니다. "
+            "상품을 고르거나 후보를 비교하는 질문용이며, 단순 집계(Top N·월별 추이·비중·분포)는 general_analysis가 맡습니다."
         ),
-        examples=("하프집업 니트 중 우리 상품 후보 찾아줘", "브라운이랑 네이비 후보 최근 4주 온라인 구매 비교해줘"),
-        runner="agent_system.specialized_agents.product_analysis_agent:run",
-        enabled=False,
+        examples=("하프집업 니트 중 우리 상품 후보 찾아줘", "브라운이랑 네이비 후보 최근 4주 온라인 구매 비교해줘",
+                  "퍼플 니트랑 케이블 니트에 맞는 H&M 상품 있어?"),
+        runner="agent_system.agents.product_analysis_agent:run",
+        enabled=True,   # 구현됨. 백엔드 연결 전에는 로컬 H&M DuckDB(읽기 전용), 기간은 데이터 마지막 날 기준
         tools=("search_products", "match_product_keywords", "analyze_product_sales", "get_product_details",
                "compare_product_candidates"),
         scenario="메인: 트렌드에 맞는 H&M 주력 상품 추천 / 서브: 브라운·네이비 구매 기록 비교, 첫 화면 상품 결정",
@@ -159,8 +165,8 @@ AGENTS: list[AgentSpec] = [
             "연락 가능 여부·발송 상한·대조군을 반영한 최종 발송 명단을 만듭니다."
         ),
         examples=("이번 기획전 발송 대상 뽑아줘", "핵심 타깃 고객에게 어떤 상품을 추천할지 정해줘"),
-        runner="agent_system.specialized_agents.targeting_agent:run",
-        enabled=False,
+        runner="agent_system.agents.targeting_agent:run",
+        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("calculate_target_scores", "recommend_customer_products", "segment_customers",
                "build_campaign_audience"),
         scenario="메인: 고객 세분화·고객별 추천 상품·발송 명단 (점수 계산과 추천은 별도 Tool)",
@@ -174,8 +180,8 @@ AGENTS: list[AgentSpec] = [
             "리뷰·상품 정보 기반 필수 촬영 컷과 추가 컷 제안을 생성합니다."
         ),
         examples=("기획전 대표 문구 만들어줘", "핵심 타깃용 메시지 써줘", "꼭 찍어야 할 촬영 컷 알려줘"),
-        runner="agent_system.specialized_agents.content_generation_agent:run",
-        enabled=False,
+        runner="agent_system.agents.content_generation_agent:run",
+        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("generate_campaign_copy", "build_campaign_page", "generate_segment_messages",
                "plan_product_photography"),
         scenario="메인: 기획전 문구·HTML 페이지·세그먼트 메시지 / 서브: 촬영 컷 기획 (요청서 작성은 결과 정리)",
@@ -189,8 +195,8 @@ AGENTS: list[AgentSpec] = [
             "기획전 기간·혜택·링크·발송 조건을 검사합니다. 무신사 리뷰를 H&M 상품 특성으로 단정하지 않도록 막습니다."
         ),
         examples=("이 문구에 근거 없는 표현 있는지 확인해줘",),
-        runner="agent_system.specialized_agents.validation_agent:run",
-        enabled=False,
+        runner="agent_system.agents.validation_agent:run",
+        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("validate_data_evidence", "validate_marketing_copy", "validate_campaign_conditions"),
         scenario="메인: 페이지·메시지·보고서 근거 검사 / 서브: 촬영 요청서 근거 확인",
     ),
@@ -203,8 +209,8 @@ AGENTS: list[AgentSpec] = [
             "촬영 우선순위·구도·상품 정보를 담은 촬영 요청서, 보고서·요청서 PDF 출력을 합니다."
         ),
         examples=("지금까지 결과로 실행 계획 보고서 만들어줘", "촬영 요청서 한 장으로 정리해줘"),
-        runner="agent_system.specialized_agents.reporting_agent:run",
-        enabled=False,
+        runner="agent_system.agents.reporting_agent:run",
+        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("visualize_analysis_results", "generate_campaign_report", "generate_photography_brief",
                "export_report_pdf"),
         scenario="메인: 후보 시각화·실행 계획 보고서 / 서브: 촬영 요청서 PDF",
@@ -218,8 +224,8 @@ AGENTS: list[AgentSpec] = [
             "실제 발송이 포함되므로 명시적인 승인 없이 실행하지 않습니다."
         ),
         examples=("팀장님께 승인 요청 보내줘",),
-        runner="agent_system.specialized_agents.campaign_execution_agent:run",
-        enabled=False,
+        runner="agent_system.agents.campaign_execution_agent:run",
+        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("send_approval_email", "track_approval_status", "deliver_approved_page", "check_campaign_url",
                "send_campaign_messages", "schedule_campaign_followup"),
         scenario="메인: 승인 요청 → 승인 후 페이지 전달·URL 확인·발송·사후 확인 (규모가 부담되면 Orchestrator와 합칠 수 있음)",

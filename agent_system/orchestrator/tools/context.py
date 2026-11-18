@@ -105,7 +105,8 @@ def format_last_analysis(last_analysis: dict | None) -> str:
 
 
 def manage_context(question: str, history_messages, last_analysis, campaign: dict | None = None,
-                   pending_approval: dict | None = None, now: datetime | None = None) -> str:
+                   pending_approval: dict | None = None, now: datetime | None = None,
+                   workflow_status: str = "") -> str:
     """manage_context Tool: 이전 대화 · 직전 분석 · 확정된 기획전 정보(상품·타깃·일정)를 모아
     대화 판단 LLM 입력 텍스트를 만듭니다."""
 
@@ -116,6 +117,7 @@ def manage_context(question: str, history_messages, last_analysis, campaign: dic
         pending = ("[승인 대기 중]\n"
                    f"{pending_approval.get('question', '')}\n"
                    "(사용자가 이번 메시지에서 다른 질문을 했습니다. 질문에 답하면 승인 요청은 다시 안내됩니다)\n\n")
+    running = f"[진행 중인 워크플로]\n{workflow_status}\n\n" if workflow_status else ""
     return (
         f"[현재 시각] {format_now(now)}\n\n"
         "[이전 대화]\n"
@@ -125,6 +127,7 @@ def manage_context(question: str, history_messages, last_analysis, campaign: dic
         "[확정된 기획전 정보]\n"
         f"{format_campaign(campaign)}\n\n"
         f"{pending}"
+        f"{running}"
         "[이번 사용자 메시지]\n"
         f"{question}"
     )
