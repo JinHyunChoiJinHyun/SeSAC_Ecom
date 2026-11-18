@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from shared_analysis.market.common import clean_words, phrase_match, rnd
+from shared_analysis.market.common import clean_words, phrase_match, rnd, text_or_empty
 
 TOP_PRODUCTS = 10           # 결과에 넣을 유사 상품 수
 
@@ -73,7 +73,7 @@ def similar_products(products: pd.DataFrame, keywords, exclude=None) -> pd.DataF
 
 
 def parse_satisfaction(text: str) -> dict[str, str]:
-    parts = [str(text or "")]
+    parts = [text_or_empty(text)]           # 결측(None·NaN·pd.NA)은 빈 응답 (리뷰는 본문 집계에 그대로 포함)
     for sep in SATISFACTION_SEPARATORS:
         parts = [p for part in parts for p in part.split(sep)]
     found = {}
@@ -105,7 +105,7 @@ def analyze_reviews(products: pd.DataFrame, reviews: pd.DataFrame, keywords, exc
     base = {"keywords": keywords, "similar_products": len(found), "reviews": total,
             "top_similar_products": [
                 {"ranking": int(r.ranking) if "ranking" in found and pd.notna(r.ranking) else None,
-                 "brand": str(getattr(r, "brand", "") or ""), "name": r.name, "matched_keyword": r.matched_keyword}
+                 "brand": text_or_empty(getattr(r, "brand", "")), "name": r.name, "matched_keyword": r.matched_keyword}
                 for r in found.head(TOP_PRODUCTS).itertuples()]}
     if total == 0:
         return {**base, "rows": [], "complaint_terms": [],

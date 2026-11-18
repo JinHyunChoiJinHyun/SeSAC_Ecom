@@ -47,6 +47,29 @@ def _headers(extra: dict | None = None) -> dict:
     return headers
 
 
+def _origin(url: str) -> tuple:
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or {"http": 80, "https": 443}.get(parts.scheme.lower())
+    return parts.scheme.lower(), (parts.hostname or "").lower(), port
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """같은 오리진(scheme·host·port)으로의 리디렉션만 따라갑니다 (CodeRabbit 리뷰).
+
+    기본 처리기는 다른 서버로 리디렉션돼도 X-API-Key·Authorization 헤더를 그대로 복사하므로
+    오리진이 바뀌면 따라가지 않고 HTTP 오류로 돌려줍니다.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        if _origin(target) != _origin(req.full_url):
+            raise urllib.error.HTTPError(req.full_url, code, "다른 오리진으로의 리디렉션 거부", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SameOriginRedirect)
+
+
 def as_tool_result(body, source: str = "") -> dict:
     if isinstance(body, dict) and "data" in body:
         result = dict(body)
@@ -86,7 +109,7 @@ def call(method: str, path: str, *, params: dict | None = None, body: dict | Non
             "evidence": [],
         }
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _OPENER.open(request, timeout=timeout) as response:
             return as_tool_result(json.loads(response.read().decode("utf-8") or "{}"), source)
     except urllib.error.HTTPError as exc:
         detail = ""
@@ -96,6 +119,8 @@ def call(method: str, path: str, *, params: dict | None = None, body: dict | Non
             pass
         reason = {503: "분석 데이터 갱신 중이거나 백엔드 준비 안 됨", 401: "인증 실패", 403: "권한 없음",
                   404: "API 없음 (백엔드에 아직 없는 기능)", 409: "지금 단계에서 허용되지 않음"}.get(exc.code, "백엔드 오류")
+        if 300 <= exc.code < 400:
+            reason = "다른 주소로의 리디렉션 거부 (인증 정보 보호)"
         return {"available": False, "status": f"{reason} (HTTP {exc.code}){': ' + str(detail) if detail else ''}",
                 "source": source, "data": {}, "evidence": []}
     except Exception as exc:  # 네트워크·시간 초과·JSON 오류

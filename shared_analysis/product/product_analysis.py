@@ -49,6 +49,21 @@ def make_period(as_of: date, weeks: int = DEFAULT_WEEKS, end_date: date | None =
             "data_as_of": as_of.isoformat(), "note": note}
 
 
+def _key_text(value) -> str:
+    """상품 키를 문자열로 (정수 123 → "123", 123.0 → "123"). 이미 문자열이면 앞자리 0을 그대로 둠."""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _same_keys(frame: pd.DataFrame, key: str) -> pd.DataFrame:
+    if frame is None or frame.empty or key not in frame:
+        return frame
+    out = frame.copy()
+    out[key] = out[key].map(_key_text)
+    return out
+
+
 def summarize_sales(totals: pd.DataFrame, weekly: pd.DataFrame, info: pd.DataFrame, key: str = "article_id") -> dict:
     """같은 기간·조건의 상품별 구매 실적 비교.
 
@@ -57,6 +72,8 @@ def summarize_sales(totals: pd.DataFrame, weekly: pd.DataFrame, info: pd.DataFra
     info    key + INFO_COLUMNS                  (상품 이름·색상 표시용)
     반환    {"rows": [...], "total_purchases", "small_sample": [key…]}
     """
+    # 세 표의 상품 키를 같은 형식(문자열)으로 맞춘 뒤 조회 (CodeRabbit 리뷰: 정수 키 누락 방지)
+    totals, weekly, info = _same_keys(totals, key), _same_keys(weekly, key), _same_keys(info, key)
     current = totals[totals["period"] == "current"].set_index(key) if not totals.empty else pd.DataFrame()
     previous = totals[totals["period"] == "previous"].set_index(key) if not totals.empty else pd.DataFrame()
     keys = list(dict.fromkeys(info[key].astype(str))) if not info.empty else []

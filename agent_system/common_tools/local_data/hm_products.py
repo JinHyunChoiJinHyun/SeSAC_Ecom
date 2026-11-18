@@ -1,15 +1,14 @@
 """H&M 상품·구매 기록 읽기 (로컬 모드 전용, 읽기 전용).
 
 백엔드가 생기면 같은 일을 backend/repositories/analytics/hm_product_repository(articles, product_features,
-article_images)와 daily_purchases 조회가 합니다. 그때 이 파일은 쓰이지 않습니다.
+article_image_paths)와 daily_purchases 조회가 합니다. 그때 이 파일은 쓰이지 않습니다.
 
 - 연결: common/db_client.get_analysis_connection() (READ_ONLY ATTACH + 외부 접근 차단)
 - 기준일(as_of): H&M 마지막 거래일 (아키텍처 ANALYSIS_AS_OF = 2020-09-22). 실제 오늘 날짜를 쓰지 않습니다.
   환경변수 CART_SIGNAL_ANALYSIS_AS_OF(YYYY-MM-DD)로 바꿀 수 있습니다.
 - 스타일 태그: shared_analysis/product/keyword_matching.extract_style_tags (규칙 기반)
   → 아키텍처의 product_features(스타일 태그)가 생기기 전 임시 계산. 상품 전체를 한 번 태그해 캐시합니다.
-- 이미지: Kaggle H&M 이미지 폴더 규칙 images/{article_id 앞 3자리}/{article_id}.jpg
-  폴더 위치는 CART_SIGNAL_HM_IMAGE_DIR (기본: 프로젝트 루트/h-and-m-images). 없으면 경로만 알려 주고 '파일 없음' 표시.
+- 이미지: hm_images.py (경로 인덱스 hm.article_image_paths + 이미지 폴더). image_info()는 그 함수를 그대로 부릅니다.
 - 다음에 상품·판매 출처가 바뀌면(무신사·네이버 쇼핑 배치 등) 이 파일과 같은 함수 이름으로 새 파일을 만들고
   agent_system/tools/product_tools.py의 LOCAL 모듈만 바꾸면 됩니다.
 """
@@ -147,9 +146,6 @@ def sales(keys: list[str], key: str, period: dict, channel: str = "online") -> t
 
 
 def image_info(article_id: str) -> dict:
-    article_id = str(article_id)
-    folder = Path(os.getenv("CART_SIGNAL_HM_IMAGE_DIR") or PROJECT_ROOT / "h-and-m-images")
-    relative = f"{article_id[:3]}/{article_id}.jpg"
-    path = folder / relative
-    return {"image_path": relative, "image_available": path.is_file(),
-            "image_status": "있음" if path.is_file() else f"이미지 파일 없음 ({folder.name}/{relative})"}
+    """상품 이미지 상태 {"image_available", "image_path", "image_status"} (자세한 규칙: hm_images.py)."""
+    from agent_system.common_tools.local_data import hm_images
+    return hm_images.image_info(article_id)

@@ -86,6 +86,20 @@ Slack 메시지
 - run 상태는 지금 LangGraph state(`workflow_run`)에 저장. 백엔드 run API가 생기면 `workflows/base.py record_run_event()`에서 전송
 - 끄기: `settings.ENABLE_WORKFLOWS = False`
 
+## 보고서 (PDF + Word 2부)
+
+| 요청 | 보고서 | 내용 |
+|---|---|---|
+| "보고서 만들어줘", "분석 보고서로 정리해줘" | 일반 분석 보고서 | 대화 중 분석 결과(최근 10건): 질문·답변·표(앞 20행)·그래프·분석 기준(SQL) |
+| "기획전 보고서 만들어줘", "실행 계획 보고서 작성해줘" | 기획전 실행 계획 보고서 | 확정값, 워크플로 단계별 상태·결과, 남은 단계 (백엔드 연결 전에는 '초안') |
+
+- 규칙으로 판단(LLM 없음)하고 `tools/report.py` → `common_tools/report_export/`(문서 구조·PDF·Word)로 만듭니다.
+- 재료: Agent·워크플로 단계가 끝날 때마다 `analysis_log`에 기록 (표는 `runtime/report_data/`). 실패·미구현 결과는 기록 안 함.
+- 파일은 `delivery_output/reports/`에 저장하고 Slack에 첨부합니다 (`result["attachments"]`).
+- 기록한 결과만 옮기며 새 숫자를 만들지 않습니다. 12시간 자동 리셋 때 기록도 비웁니다.
+- 필요 패키지: `reportlab`, `python-docx`. PDF 한글 글꼴은 AppleGothic·나눔고딕·맑은 고딕 순으로 찾고, `CART_SIGNAL_REPORT_FONT`로 지정 가능.
+- ⑥ 결과 정리 Agent(백엔드 `/reports/campaign`)가 연결되면 기획전 보고서는 그 결과를 같은 문서 구조로 받아 같은 출력기로 내보냅니다.
+
 ## 라우팅 판단 순서
 
 1. 켜진 Agent가 1개면 그 Agent (LLM 호출 없음) — 지금은 3개(general_analysis·market_analysis·product_analysis)라 3번 LLM 판단 사용

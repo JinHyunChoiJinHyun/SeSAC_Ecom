@@ -12,6 +12,7 @@ Orchestrator Tool (멘토 조언 5개 기능)
     1. Checkpointer가 thread_id로 이전 상태(messages · last_analysis · campaign · pending_approval)를 넣어 줌
     2. 기억 정리 · 12시간 자동 리셋                                        context
     3. 워크플로 명령('워크플로 취소/계속/상태')이면 규칙으로 바로 처리     manage_workflow
+       보고서 요청('보고서 만들어줘')이면 PDF·Word 2부 생성                tools/report.py
     4. 대화 판단 (LLM): chitchat / analysis / decision / workflow         manage_context + route_request
     5. decision이면 승인 요청(pending_approval) 작성                     check_approval 준비
        analysis이면 후속 질문 재작성 → 담당 Agent 선택                    route_request
@@ -25,7 +26,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_system.orchestrator import settings
 from agent_system.orchestrator.registry import AgentRequest, normalize_agent_result
-from agent_system.orchestrator.tools import approval, context, intent, routing, workflow
+from agent_system.common_tools.report_export import analysis_log as report_log
+from agent_system.orchestrator.tools import approval, context, intent, report, routing, workflow
 from agent_system.orchestrator.tools.conversation_state import normalize_updates, update_conversation_state
 
 # 이번 턴의 Agent 결과 전체(DataFrame 포함). 기억(checkpoint)에는 넣지 않고
@@ -70,6 +72,8 @@ def orchestrator_node(state) -> dict:
         trim = context.remove_all(history)
         history, last_analysis = [], {}
         common["last_analysis"] = {}
+        report_log.remove_files(state.get("analysis_log") or [])
+        common["analysis_log"] = []          # 보고서 재료도 새 대화에서 다시 모음
         if not getattr(settings, "KEEP_CAMPAIGN_ON_RESET", True):
             campaign, pending = {}, {}
             common.update(campaign={}, pending_approval={})
@@ -88,6 +92,18 @@ def orchestrator_node(state) -> dict:
             if changed_run is not None:
                 update["workflow_run"] = changed_run
             return update
+
+    # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
+    report_kind = report.detect(question)
+    if report_kind:
+        made = report.handle_report_request(report_kind, [] if was_reset else state.get("analysis_log"),
+                                            campaign, run)
+        store_turn_result(state["turn_id"], {"turn_type": "report", "final_answer": made["reply"],
+                                             "attachments": made["attachments"], "report_kind": report_kind,
+                                             "report_errors": made["errors"]})
+        return {**common, "turn_type": "report", "reply": made["reply"], "standalone_question": "", "route": "",
+                "route_reason": "", "conversation_reason": f"보고서 요청 ({report_kind})", "is_followup": False,
+                "messages": trim + [AIMessage(content=made["reply"], name="orchestrator")]}
 
     # ── manage_context + route_request(1): 대화 판단 (LLM)
     try:
@@ -201,7 +217,11 @@ def make_agent_node(spec):
         result.update(turn_type="analysis", standalone_question=question, route=spec.name, route_label=spec.label)
         store_turn_result(state["turn_id"], result)
 
+        entry = report_log.make_entry(result, entry_id=state["turn_id"], question=question,
+                                      user_question=state.get("user_question") or question,
+                                      route=spec.name, route_label=spec.label)
         update = {
+            "analysis_log": report_log.append(state.get("analysis_log"), entry),   # 보고서 재료
             "last_analysis": context.summarize_analysis(question, result, spec),
             "messages": [AIMessage(content=context.memory_answer(result.get("final_answer", "")), name=spec.name)],
         }

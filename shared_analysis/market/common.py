@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -35,6 +35,23 @@ def to_date(value) -> date | None:
         return None
 
 
+def is_missing(value) -> bool:
+    """None·NaN·pd.NA·NaT이면 True (pd.NA를 if/or로 평가하면 예외가 나므로 이 함수로 확인)."""
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, dict)):
+        return False
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def text_or_empty(value) -> str:
+    """결측이면 빈 문자열, 아니면 문자열."""
+    return "" if is_missing(value) else str(value)
+
+
 def phrase_match(name: str, phrase: str) -> bool:
     """'하프집업 니트'처럼 띄어 쓴 키워드는 단어가 모두 들어 있어야 일치 (공백·대소문자 무시)."""
     text = str(name).lower().replace(" ", "")
@@ -50,5 +67,9 @@ def records(df: pd.DataFrame) -> list[dict]:
     for column in out.columns:
         if pd.api.types.is_datetime64_any_dtype(out[column]):
             out[column] = out[column].dt.strftime("%Y-%m-%d")
+        elif out[column].dtype == object:
+            # .dt.date로 만든 date·datetime 값도 문자열로 (CodeRabbit 리뷰: json.dumps TypeError 방지)
+            out[column] = out[column].map(
+                lambda v: v.isoformat() if isinstance(v, (date, datetime)) and not is_missing(v) else v)
     out = out.astype(object).where(pd.notna(out), None)
     return out.to_dict("records")

@@ -19,6 +19,7 @@
 - campaign         : 확정된 기획전 정보 (상품·타깃·일정 등) + 변경 기록
 - pending_approval : 승인 대기 중인 요청
 - workflow_run     : 진행 중인 워크플로 run (단계·상태·지난 단계 기록, agent_system/workflows/)
+- analysis_log     : 분석 결과 기록 최근 10건 (보고서 재료. 표는 runtime/report_data/에 저장)
 """
 
 import re
@@ -53,6 +54,7 @@ class OrchestratorState(MessagesState):
     pending_approval: dict       # 승인 대기 요청 (check_approval)
     approval_result: dict        # 마지막 승인 처리 결과
     workflow_run: dict           # 진행 중인 워크플로 run (manage_workflow)
+    analysis_log: list           # 분석 결과 기록 (보고서 재료, common_tools/report_export/analysis_log.py)
 
 
 def build_graph(checkpointer=None):
@@ -219,6 +221,12 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     _prune(graph, thread_id)
     reminder = _interrupt_text(output)
     turn_type = output.get("turn_type")
+
+    if turn_type == "report":
+        # 보고서 요청: 답변 + PDF·Word 첨부 (Slack Delivery가 attachments를 업로드)
+        result = agent_result or {"final_answer": output.get("reply", ""), "attachments": []}
+        result.update(turn_type="report", thread_id=thread_id, completed_steps=[])
+        return _with_reminders(result, output)
 
     if turn_type == "workflow":
         if agent_result is None:

@@ -43,7 +43,13 @@ CANCEL_COMMAND = re.compile(
     r"\s*[.!?~]*\s*$"
 )
 
-CONTINUE_COMMAND = re.compile(r"(워크플로|기획전\s*준비).{0,6}(계속|재개|이어|다시\s*시도)")
+# 메시지 전체가 계속 명령일 때만 재개 (CodeRabbit 리뷰: "워크플로 계속하지 마"·"워크플로 계속해도 돼?"는 명령 아님)
+CONTINUE_COMMAND = re.compile(
+    r"^\s*(?:워크플로|기획전\s*준비)\s*(?:를\s*|을\s*)?"
+    r"(?:계속|재개|이어서|이어\s*가기|다시\s*시도)\s*"
+    r"(?:진행\s*)?(?:해\s*줘|해\s*주세요|해주세요|해줘|할게|하자|해|하기)?"
+    r"\s*[.!~]*\s*$"
+)
 STATUS_COMMAND = re.compile(
     r"(?:워크플로|기획전\s*준비)"
     r".*?(?:현재\s*)?(?:상태|어디까지|진행\s*상황|몇\s*단계)"
@@ -160,6 +166,8 @@ def run_workflow_node(state) -> dict:
     steps = workflow.steps()
     index = int(run.get("step_index", 0))
     sections, results, last_spec, last_question = [], [], None, ""
+    from agent_system.common_tools.report_export import analysis_log as report_log
+    log = list(state.get("analysis_log") or [])
     run["status"] = "running"
     run["waiting_key"] = ""
 
@@ -229,6 +237,11 @@ def run_workflow_node(state) -> dict:
             break
         results.append(result)
         last_spec, last_question = spec, base.render(step.instruction, run, campaign)
+        log = report_log.append(log, report_log.make_entry(   # 기획전 실행 계획 보고서 재료
+            result, entry_id=f"{state['turn_id']}_{index}", question=last_question,
+            user_question=f"{step.no}단계 {step.title}", route=spec.name, route_label=spec.label,
+            kind="workflow_step", workflow={"run_id": run["run_id"], "workflow": workflow.name,
+                                            "title": workflow.title, "step_no": step.no, "step_title": step.title}))
         run["previous"] = context.memory_answer(answer)[:PREVIOUS_CHARS]
         run["history"] = _history(run, step, "done", run["previous"])
         index += 1
@@ -264,6 +277,7 @@ def run_workflow_node(state) -> dict:
 
     update = {
         "workflow_run": run,
+        "analysis_log": log,
         "turn_type": "workflow",
         "reply": final_answer,
         "messages": [AIMessage(content=context.memory_answer(final_answer), name=WORKFLOW_NODE)],

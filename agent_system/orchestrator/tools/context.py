@@ -257,6 +257,35 @@ _INHERITABLE_CONDITIONS = {
 }
 
 
+# 같은 값을 뜻하는 말(동의어)은 하나의 조건으로 셉니다 (CodeRabbit 리뷰: "여성"과 "여자"는 같은 조건)
+_SAME_CONDITION = {
+    "여성": "여성", "여자": "여성", "ladieswear": "여성",
+    "남성": "남성", "남자": "남성", "menswear": "남성",
+    "아동": "아동", "키즈": "아동", "kids": "아동", "children": "아동",
+    "유아": "유아", "baby": "유아",
+    "온라인": "온라인", "오프라인": "매장", "매장": "매장",
+    "니트": "니트", "스웨터": "니트", "sweater": "니트",
+    "가디건": "가디건", "카디건": "가디건", "cardigan": "가디건",
+    "티셔츠": "티셔츠", "t-shirt": "티셔츠", "셔츠": "셔츠", "shirt": "셔츠",
+    "블라우스": "블라우스", "blouse": "블라우스", "후드": "후드", "hoodie": "후드",
+    "맨투맨": "맨투맨", "스웨트셔츠": "맨투맨",
+    "바지": "바지", "팬츠": "바지", "trousers": "바지", "청바지": "청바지", "데님": "청바지", "jeans": "청바지",
+    "레깅스": "레깅스", "leggings": "레깅스", "반바지": "반바지", "쇼츠": "반바지", "shorts": "반바지",
+    "스커트": "스커트", "치마": "스커트", "skirt": "스커트", "드레스": "드레스", "원피스": "드레스", "dress": "드레스",
+    "재킷": "재킷", "자켓": "재킷", "jacket": "재킷", "코트": "코트", "coat": "코트",
+    "수영복": "수영복", "swimwear": "수영복", "비키니": "비키니", "bikini": "비키니",
+    "양말": "양말", "socks": "양말", "잠옷": "잠옷", "파자마": "잠옷", "pyjama": "잠옷",
+    "신발": "신발", "shoes": "신발", "부츠": "부츠", "boots": "부츠", "스카프": "스카프", "scarf": "스카프",
+}
+
+
+def _conditions(text: str, terms) -> set[str]:
+    """문장 속 조건 값 (동의어는 하나로, 더 긴 단어의 일부인 단어는 제외: '티셔츠' 안의 '셔츠')."""
+    found = [t for t in terms if t in text]
+    found = [t for t in found if not any(t != other and t in other for other in found)]
+    return {_SAME_CONDITION.get(t, t) for t in found}
+
+
 ELLIPTICAL_MAX_CHARS = 10   # 공백 제외 이 글자 수 이하 질문은 생략형 후보
 # 생략형 끝말: "남성은?", "Top 5로", "온라인만", "여성도?"
 _ELLIPTICAL_ENDING = re.compile(r"(은|는|도|만|로|으로|이면|라면|면|이랑|하고)\s*[?？]?$")
@@ -302,13 +331,16 @@ def drop_inherited_conditions(user_question: str, standalone: str, is_followup: 
     rewritten = str(standalone).lower()
     confirmed = " ".join(str(v) for v in ((campaign or {}).get("values") or {}).values()).lower()
     for group, terms in _INHERITABLE_CONDITIONS.items():
-        added = [t for t in terms if t in rewritten and t not in original and t not in confirmed]
-        if added and not any(t in original for t in terms):
+        # 조건 값 하나하나를 비교 (원문에 같은 그룹의 다른 값이 있어도, 새로 붙은 값이 있으면 되돌림)
+        added = sorted(_conditions(rewritten, terms) - _conditions(original, terms) - _conditions(confirmed, terms))
+        if added:
             question = str(user_question).strip()
-            source = next((name for name in _source_names()
-                           if name.lower() in rewritten and name.lower() not in original), "")
-            if source:
-                question = f"{source} {question}"
+            names = _source_names()
+            # 원문에 출처가 없을 때만 다시 쓴 질문의 출처를 붙임 (원문 출처가 있으면 그대로)
+            if not any(name.lower() in original for name in names):
+                source = next((name for name in names if name.lower() in rewritten), "")
+                if source:
+                    question = f"{source} {question}"
             return question, f"원문에 없는 {group} 조건({', '.join(added)})이 붙어 원문으로 분석"
     return standalone, ""
 

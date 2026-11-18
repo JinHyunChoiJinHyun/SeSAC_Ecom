@@ -851,6 +851,19 @@ def deliver_to_slack(
 
 
     # =====================================================
+    # 추가 첨부 (보고서 PDF·Word 등: result["attachments"])
+    # 프로젝트 안의 실제 파일만 올립니다 (resolve_project_file)
+    # =====================================================
+
+    for raw_attachment in result.get("attachments") or []:
+        try:
+            file_paths.append(resolve_project_file(raw_attachment, base_dir))
+        except Exception as exc:
+            print(f"[Slack Delivery 첨부 제외] {raw_attachment}: {exc}")
+            attachment_errors.append({"type": "attachment", "error": repr(exc)})
+
+
+    # =====================================================
     # 중복 첨부파일 제거
     # =====================================================
 

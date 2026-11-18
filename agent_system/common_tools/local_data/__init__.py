@@ -5,4 +5,5 @@
 백엔드 주소(CART_SIGNAL_BACKEND_URL)를 설정하면 이 폴더는 쓰이지 않습니다.
 
     hm_products.py   H&M 상품(articles)·구매 기록(transactions) 조회 — 백엔드 hm_product_repository 역할의 임시판
+    hm_images.py     H&M 상품 이미지 조회 (경로 인덱스 hm.article_image_paths + 이미지 폴더)
 """

@@ -25,6 +25,7 @@ from collections import Counter
 import pandas as pd
 
 from agent_system import backend_client
+from agent_system.common_tools.local_data import hm_images as IMAGES
 from agent_system.common_tools.local_data import hm_products as LOCAL
 from shared_analysis.market.common import clean_words
 from shared_analysis.product import keyword_matching as KM
@@ -73,6 +74,12 @@ def _brief(row) -> dict:
     return {"article_id": row["article_id"], "product_code": row["product_code"], "prod_name": row["prod_name"],
             "product_type_name": row["product_type_name"], "colour_group_name": row["colour_group_name"],
             "index_group_name": row["index_group_name"], "style_tags": list(row["style_tags"])}
+
+
+def _with_images(rows: list[dict]) -> list[dict]:
+    """상품 행에 이미지 상태(image_available·image_path·image_status) 추가 (시나리오 9단계: 후보를 이미지와 함께 정리)."""
+    images = IMAGES.lookup([r["article_id"] for r in rows if r.get("article_id")])
+    return [{**r, **images.get(str(r.get("article_id")), {})} for r in rows]
 
 
 def _filter_by_query(products: pd.DataFrame, query: str | None) -> tuple[pd.DataFrame, dict]:
@@ -125,7 +132,7 @@ def search_products(query: str, name_contains: str | None = None, limit: int = D
         "total_products": int(found["product_code"].nunique()),
         "colour_counts": found["colour_group_name"].value_counts().head(10).to_dict(),
         "style_tag_counts": dict(tag_counts.most_common(15)),
-        "rows": [_brief(row) for _, row in found.head(limit).iterrows()],
+        "rows": _with_images([_brief(row) for _, row in found.head(limit).iterrows()]),
         "basis": "H&M articles 전체 (article_id = 색상별 상품, product_code = 상품 모델)",
     }
     if parsed["unmatched_terms"]:
@@ -155,6 +162,7 @@ def match_product_keywords(keywords: list[str], base_query: str | None = None, t
         products, parsed = _filter_by_query(products, base_query)
         scope_note = f"'{base_query}' 조건 상품 {len(products)}개 ({'; '.join(KM.mapping_notes(parsed))})"
     result = KM.match_keywords(products, keywords, top_n=top_n)
+    result["rows"] = _with_images(result["rows"])
     result["scope"] = scope_note
     ids = list(dict.fromkeys(r["article_id"] for r in result["rows"]))
     return _ok(result, _product_evidence(ids))
@@ -238,8 +246,8 @@ def get_product_details(article_ids: list[str]) -> dict:
             "design_features": [t for t in tags if KM.tag_group(t) in ("디자인", "짜임", "핏", "무늬", "형태")],
             "other_colours": [{"article_id": s["article_id"], "colour_group_name": s["colour_group_name"]}
                               for _, s in siblings.iterrows()],
-            **LOCAL.image_info(row["article_id"]),
         })
+    rows = _with_images(rows)
     data = {"rows": rows, "unknown_ids": [i for i in ids if i not in set(found["article_id"])],
             "note": "materials·design_features는 상품 설명 문장에서 규칙으로 찾은 값입니다 (H&M에 소재 컬럼 없음)."}
     return _ok(data, _product_evidence(found["article_id"]))
@@ -274,6 +282,7 @@ def compare_product_candidates(article_ids: list[str], keywords: list[str], week
             keyword_rows += [{"article_id": r["article_id"], "keyword": keyword, "match_rate": float(r["match_rate"])}
                              for _, r in scored.iterrows()]
     result = PA.compare_candidates(details["data"]["rows"], keyword_rows, sales["data"].get("rows", []), keywords)
+    result["rows"] = _with_images(result["rows"])
     result.update({"keywords": keyword_notes, "period": sales["data"].get("period"),
                    "channel": sales["data"].get("channel"), "unknown_ids": details["data"]["unknown_ids"],
                    "small_sample": sales["data"].get("small_sample", [])})
@@ -303,4 +312,8 @@ def data_status() -> dict:
             status += f", 데이터 마지막 날 {LOCAL.data_as_of()}"
         except Exception as exc:  # DB를 열 수 없으면 상태에 표시
             status = f"조회 실패 ({type(exc).__name__})"
+        try:
+            status += f"; 상품 이미지: {IMAGES.status()['status']}"
+        except Exception as exc:
+            status += f"; 상품 이미지: 조회 실패 ({type(exc).__name__})"
     return {"hm": status}

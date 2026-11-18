@@ -145,15 +145,27 @@ STOP_WORDS = {"상품", "제품", "옷", "의류", "신상", "요즘", "트렌�
 _COMPILED = {tag: (group, re.compile(pattern)) for tag, (group, pattern) in STYLE_TAG_RULES.items()}
 
 
+def _missing(value) -> bool:
+    """None·NaN·pd.NA이면 True (pd.NA를 or로 평가하면 예외)."""
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, dict)):
+        return False
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def _text(*values) -> str:
-    return " ".join(str(v) for v in values if v is not None and not (isinstance(v, float) and pd.isna(v))).lower()
+    return " ".join(str(v) for v in values if not _missing(v)).lower()
 
 
 def extract_style_tags(prod_name, detail_desc, graphical_appearance=None) -> list[str]:
     """상품명·상품 설명에서 스타일 태그 목록 (사전 순서)."""
     text = _text(prod_name, detail_desc)
     tags = [tag for tag, (_, pattern) in _COMPILED.items() if pattern.search(text)]
-    appearance = str(graphical_appearance or "").lower()
+    appearance = "" if _missing(graphical_appearance) else str(graphical_appearance).lower()   # 결측이면 무늬 검사만 건너뜀
     if "stripe" in appearance and "스트라이프" not in tags:
         tags.append("스트라이프")
     if "jacquard" in appearance and "자카드" not in tags:
@@ -240,8 +252,9 @@ def color_mask(products: pd.DataFrame, colors: list[str]) -> pd.Series:
 
 def gender_mask(products: pd.DataFrame, genders: list[str]) -> pd.Series:
     values = [v for g in genders for v in GENDER_RULES.get(g, [])]
+    # 성별 열이 없으면 성별을 확인할 수 없으므로 미충족 (CodeRabbit 리뷰: 근거 없이 완전 일치 금지)
     return products["index_group_name"].isin(values) if "index_group_name" in products else \
-        pd.Series(True, index=products.index)
+        pd.Series(False, index=products.index)
 
 
 def tag_mask(products: pd.DataFrame, tags: list[str]) -> pd.Series:

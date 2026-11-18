@@ -34,13 +34,33 @@ def prepare_series(series: pd.DataFrame, keywords: list[str]) -> tuple[pd.DataFr
     df = df.dropna(subset=["period", "ratio"])
     df = df[df["ratio"].between(0, 100)]
     info = {}
-    if "request_id" in df and "collected_at" in df:
-        df["collected_at"] = pd.to_datetime(df["collected_at"])
-        latest = (df.sort_values(["collected_at", "request_id"])
-                  .groupby("keyword")[["request_id", "collected_at"]].last())
-        keep = df.set_index(["keyword", "request_id"]).index.isin(list(latest["request_id"].items()))
-        df = df[keep]
-        info = {k: {"request_id": str(r.request_id), "collected_at": str(r.collected_at)} for k, r in latest.iterrows()}
+    if "request_id" in df:
+        # 키워드마다 요청 1개의 시계열만 사용 (CodeRabbit 리뷰)
+        #   요청이 1개면 그대로 / 여러 개면 수집일이 있는 행 중 최신 요청 (ID·수집일은 같은 행에서)
+        #   여러 요청인데 수집일이 하나도 없으면 최신 요청을 정할 수 없으므로 그 키워드는 비교 불가로 뺌
+        has_time = "collected_at" in df
+        if has_time:
+            df["collected_at"] = pd.to_datetime(df["collected_at"], errors="coerce")
+        df["request_id"] = df["request_id"].astype(str)
+        parts = []
+        for keyword, group in df.groupby("keyword", sort=False):
+            requests = group["request_id"].unique()
+            if len(requests) == 1:
+                chosen = requests[0]
+                times = group["collected_at"].dropna() if has_time else pd.Series(dtype="datetime64[ns]")
+                collected = times.max() if len(times) else None
+            else:
+                timed = group.dropna(subset=["collected_at"]) if has_time else group.iloc[0:0]
+                if timed.empty:
+                    info[keyword] = {"request_id": None, "collected_at": None, "comparable": False,
+                                     "note": f"요청 {len(requests)}개가 섞여 있고 수집일이 없어 최신 요청을 정할 수 없음"}
+                    continue
+                last = timed.sort_values(["collected_at", "request_id"]).iloc[-1]
+                chosen, collected = last["request_id"], last["collected_at"]
+            parts.append(group[group["request_id"] == chosen])
+            info[keyword] = {"request_id": str(chosen),
+                             "collected_at": str(collected) if collected is not None and pd.notna(collected) else ""}
+        df = pd.concat(parts) if parts else df.iloc[0:0]
     elif "collected_at" in df:
         df["collected_at"] = pd.to_datetime(df["collected_at"])
         # 구간별 최신값을 이어 붙이지 않고 키워드별 최신 수집 배치만 사용
@@ -71,10 +91,12 @@ def summarize_trends(series: pd.DataFrame, keywords, start_date=None, end_date=N
             "recent_values": [rnd(v, 2) for v in group["ratio"].tail(SERIES_TAIL)],
             "request": info.get(keyword, {}),
         })
+    notes = ["ratio는 같은 요청 안의 상대값(최대 100)입니다. 요청이 다른 키워드끼리 크기를 비교하지 마십시오."]
+    notes += [f"{k}: 비교 불가 — {v['note']}" for k, v in info.items() if v.get("comparable") is False]
     return {
         "keywords": keywords, "rows": rows, "series": records(df),
         "missing_keywords": [k for k in keywords if k not in {r["keyword"] for r in rows}],
-        "notes": ["ratio는 같은 요청 안의 상대값(최대 100)입니다. 요청이 다른 키워드끼리 크기를 비교하지 마십시오."],
+        "notes": notes,
     }
 
 
@@ -105,7 +127,7 @@ def analyze_sustainability(series: pd.DataFrame, keywords, base_keyword=None,
     """
     keywords = clean_words(keywords)
     base = str(base_keyword or "").strip()
-    df, _ = prepare_series(series, keywords + ([base] if base and base not in keywords else []))
+    df, request_info = prepare_series(series, keywords + ([base] if base and base not in keywords else []))
     k = RECENT_PERIODS
     c_start, c_end = to_date(campaign_start), to_date(campaign_end)
     year = pd.DateOffset(years=1)
@@ -141,7 +163,10 @@ def analyze_sustainability(series: pd.DataFrame, keywords, base_keyword=None,
     rows = []
     for keyword in keywords:
         if keyword not in metrics:
-            rows.append({"keyword": keyword, "judgement": "데이터 없음"})
+            if (request_info.get(keyword) or {}).get("comparable") is False:
+                rows.append({"keyword": keyword, "judgement": "비교 불가 (" + request_info[keyword]["note"] + ")"})
+            else:
+                rows.append({"keyword": keyword, "judgement": "데이터 없음"})
             continue
         row = dict(metrics[keyword])
         growth = row.get("recent_growth")

@@ -37,7 +37,10 @@ MAX_ROWS_FOR_LLM = 40       # Tool 결과를 LLM에 넘길 때 목록 최대 행
 # Slack 표·CSV로 보낼 표 우선순위 (요약 표 우선, 원시 추이 시계열은 마지막)
 TABLE_PRIORITY = ("compare_product_candidates", "analyze_product_sales", "match_product_keywords",
                   "get_product_details", "search_products")
-NESTED_COLUMNS = {"weekly", "matched_parts", "other_colours", "full_match_keywords"}   # 표에서 뺄 중첩 값
+NESTED_COLUMNS = {"weekly", "matched_parts", "other_colours", "full_match_keywords",   # 표에서 뺄 중첩 값
+                  "image_path", "image_status"}                                       # 이미지는 image_available만 표에
+IMAGE_TOOLS = ("compare_product_candidates", "get_product_details", "match_product_keywords", "search_products")
+MAX_PRODUCT_IMAGES = 6      # 보고서에 붙일 상품 이미지 수
 LIST_COLUMNS = {"style_tags", "materials", "design_features"}                         # 표에는 쉼표로 이어 붙임
 
 
@@ -153,6 +156,30 @@ def product_result(calls: list[dict]) -> dict:
     return out
 
 
+def product_images(calls: list[dict], limit: int = MAX_PRODUCT_IMAGES) -> list[dict]:
+    """보고서에 붙일 상품 이미지 [{"article_id", "label", "path"}].
+
+    Tool 결과 행 중 이미지가 있는 상품만, IMAGE_TOOLS 순서(후보 비교 → 상세 → 키워드 매칭 → 검색)로 최대 limit개.
+    실제 파일 위치는 여기서만 찾고 LLM에는 넘기지 않습니다.
+    """
+    from agent_system.common_tools.local_data import hm_images
+
+    labels: dict[str, str] = {}
+    for name in IMAGE_TOOLS:
+        for call in calls:
+            if call["name"] != name or not call["result"].get("available"):
+                continue
+            for row in _data(call).get("rows") or []:
+                if isinstance(row, dict) and row.get("image_available") and row.get("article_id"):
+                    article_id = str(row["article_id"])
+                    labels.setdefault(article_id, " · ".join(
+                        str(v) for v in (article_id, row.get("prod_name"), row.get("colour_group_name")) if v))
+    out = []
+    for item in hm_images.image_files(list(labels), limit=limit):
+        out.append({"article_id": item["article_id"], "label": labels[item["article_id"]], "path": item["path"]})
+    return out
+
+
 # =====================================================================
 # 실행
 # =====================================================================
@@ -234,6 +261,13 @@ def run(request) -> dict:
     table = pick_table(calls)
     if table is not None:
         result["dataframe"] = table
+    try:
+        images = product_images(calls)
+    except Exception as exc:   # 이미지 조회 실패는 답변을 막지 않음
+        print(f"[상품 분석 Agent] 이미지 조회 실패: {type(exc).__name__}: {exc}")
+        images = []
+    if images:
+        result["product_images"] = images
     return result
 
 

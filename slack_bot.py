@@ -416,6 +416,10 @@ def run_slack_question(question, graph_runner):
         print("[Slack Router] 데이터 출처 일시 사용 불가 안내")
         return result
 
+    if result.get("turn_type") == "report":
+        print("[Slack Router] 보고서 전달 (PDF·Word 첨부)")
+        return result
+
     if result.get("turn_type") == "workflow":
         # 워크플로는 여러 단계 결과를 한 번에 전달 (그래프는 단계 결과에 있을 때만 첨부)
         print("[Slack Router] 워크플로 단계 결과")
