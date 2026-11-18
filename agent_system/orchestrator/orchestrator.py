@@ -75,7 +75,7 @@ def orchestrator_node(state) -> dict:
     try:
         result = intent.get_intent_agent(state.get("llm_config")).invoke(
             {"messages": [HumanMessage(content=context.manage_context(question, history, last_analysis,
-                                                                     campaign, pending))]},
+                                                                     campaign, pending, now=now))]},
             config={"recursion_limit": 10},
         )
         decision = result.get("structured_response")
@@ -121,6 +121,9 @@ def orchestrator_node(state) -> dict:
                 "messages": trim + [AIMessage(content=reply, name="orchestrator")]}
 
     # ── analysis: 후속 질문 보정 → route_request(2): 담당 Agent 선택
+    standalone, dropped = context.drop_inherited_conditions(question, standalone, is_followup, campaign)
+    if dropped:
+        print(f"[조건 검사] {dropped}")
     standalone = context.keep_previous_chart_type(standalone, question, last_analysis, is_followup)
     print(f"standalone_question = {standalone} / is_followup = {is_followup}")
     route = routing.route_request(

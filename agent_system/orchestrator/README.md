@@ -15,8 +15,9 @@ Slack 메시지
        ⑤ 라우팅               처리할 특화 Agent 선택                              tools/routing.py
        ⑥ 다음 노드            조건부 엣지 (Agent / check_approval / END)          tools/workflow.py
   → 특화 Agent (registry.py에서 enabled=True)
-       general_analysis  자유 데이터 질문 (SQL·전처리·시각화)  ← 지금 켜져 있는 유일한 Agent
-       market_analysis · product_analysis · targeting · content_generation ·
+       general_analysis  자유 데이터 질문 (SQL·전처리·시각화)  ← 켜짐 (기본 Agent)
+       market_analysis   시장 관심도·외부 리뷰 분석            ← 켜짐 (agent_system/agents/market_analysis_agent.py)
+       product_analysis · targeting · content_generation ·
        validation · reporting · campaign_execution             ← 회의 결정, 구현 전(enabled=False)
   → Slack Delivery (답변·표·PNG·CSV) + Checkpointer가 새 상태 저장
 ```
@@ -68,7 +69,7 @@ Slack 메시지
 
 ## 라우팅 판단 순서
 
-1. 켜진 Agent가 1개면 그 Agent (LLM 호출 없음, 현재 상태)
+1. 켜진 Agent가 1개면 그 Agent (LLM 호출 없음) — 지금은 2개(general_analysis·market_analysis)라 3번 LLM 판단 사용
 2. 후속 질문이고 직전 분석을 처리한 Agent가 있으면 같은 Agent (`KEEP_ROUTE_ON_FOLLOWUP = True`)
 3. 그 밖에는 LLM이 Agent의 `description`·`examples`를 보고 선택
 4. LLM 실패·등록되지 않은 이름 → 기본 Agent(`general_analysis`)
@@ -79,6 +80,8 @@ Slack 메시지
    - 입력 `AgentRequest`: `question`(다시 쓴 질문), `user_question`, `is_followup`, `last_analysis`, `llm_config`
    - 출력: `final_answer` 필수, 선택 `dataframe`, `visualization_path`, `visualization_result`, `sql_query`,
      `data_sources`, `data_purpose`, `data_scope_note`, `error` (`registry.py` 위쪽 주석 참고)
+   - **Tool 호출 로그 필수**: Tool은 `agent_system/common_tools/tool_call_log.py`의 `run_logged_tool()`로 실행하고,
+     끝에 `log_tool_summary()`를 부릅니다 (`[Tool 호출]`·`[Tool 결과]`·`[Tool 요약]` 로그가 logs/app.log에 남음)
 2. `registry.py`에서 해당 Agent의 `enabled=False` → `True`
 3. 봇 재시작 → 라우팅 프롬프트·그래프 노드·대화 판단 안내에 자동 반영
 

@@ -61,9 +61,12 @@ def local_addresses():
 # =========================================================
 
 def load_admin_env(project):
-    """프로젝트의 env/.env에서 관리자 아이디와 비밀번호 설정만 읽습니다."""
-    path = project / "env" / ".env"
-    if not path.is_file():
+    """프로젝트의 .env에서 관리자 아이디와 비밀번호 설정만 읽습니다.
+
+    .env는 프로젝트 루트(WORKS 바로 아래)로 옮겼습니다. 루트에 없으면 예전 위치(env/.env)를 읽습니다.
+    """
+    path = next((p for p in (project / ".env", project / "env" / ".env") if p.is_file()), None)
+    if path is None:
         return
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         match = re.match(r"^\s*(?:export\s+)?(ECOM_ADMIN_USER|ECOM_ADMIN_PASSWORD)\s*=\s*(.*)$", line)

@@ -232,3 +232,40 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CART_SIGNAL 로컬 환경 및 산출물
+/CART_SIGNAL/
+.venv/
+project_agent/
+.env.*
+!.env.example
+*.py[cod]
+.DS_Store
+.vscode/
+.idea/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.db-wal
+*.db-shm
+/Amazon_parquet/
+/h-and-m-parquet/
+/database/musinsa/
+/logs/
+/runtime/
+/delivery_output/
+/visualization_output/
+/duckdb_structure_output/
+/youtube_cache/
+/Claude_Outputs/
+*.bak
+*.py.bak
+
+# CART_SIGNAL 로컬 데이터 및 참고 자료
+/database/amazon_data.duckdb
+/database/hm_data.duckdb
+/merge_reference/
+
+/local_tests/
+
+/.vscode/

@@ -740,7 +740,11 @@ def deliver_to_slack(
     # 결과 CSV (공통 Tool: output_tools.prepare_result_csv)
     # =====================================================
 
-    csv_status = prepare_result_csv(result)
+    # 그래프만 요청한 후속 질문(delivery_mode="chart_only")은 직전과 같은 데이터라 CSV를 다시 보내지 않습니다.
+    if result.get("delivery_mode") == "chart_only":
+        csv_status = {"result_type": "chart_only", "path": None, "error": "", "skipped_reason": ""}
+    else:
+        csv_status = prepare_result_csv(result)
     result_type = csv_status["result_type"]
     csv_path = csv_status["path"]
     csv_error = csv_status["error"]
