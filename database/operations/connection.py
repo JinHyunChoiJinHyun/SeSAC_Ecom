@@ -12,7 +12,10 @@ from sqlalchemy.engine import URL # DB 접속 정보 담는 URL 객체
 from sqlalchemy.orm import Session, sessionmaker # DB 작업 및 트랜잭션을 관리하는 세션 클래스와 생성 도구
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(PROJECT_ROOT / ".env")
+# 프로젝트 루트의 환경변수 파일을 순서대로 불러오기
+# 이미 설정된 환경변수는 덮어쓰지 않음
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+load_dotenv(PROJECT_ROOT / "env" / ".env", override=False)
 
 def _database_url() -> str | URL:
     """DB URL 생성 또는 기존 URL 반환"""

@@ -1,12 +1,10 @@
 from env.model_settings import model_request
 import pandas as pd
 
-from langchain_core.messages import (
-    HumanMessage,
-)
+import uuid
 
-from agent_system.shared_analysis.graph import (
-    graph,
+from agent_system.orchestrator.graph import (
+    run_turn as run_conversation_turn,
 )
 
 from env.logger import (
@@ -39,14 +37,21 @@ def main():
     )
 
 
+    from common.data_sources import get_available_sources
+
     print(
-        "CART SIGNAL Shared Analysis 시작"
+        "CART SIGNAL General Analysis 시작 ("
+        + " + ".join(source.label for source in get_available_sources())
+        + ")"
     )
 
 
     print(
-        "종료하려면 exit 입력\n"
+        "종료하려면 exit, 새 대화를 시작하려면 '새 대화' 입력\n"
     )
+
+    # 터미널 대화 ID (같은 실행 안에서 이전 질문을 기억합니다)
+    thread_id = f"cli:{uuid.uuid4().hex[:8]}"
 
 
     while True:
@@ -73,6 +78,17 @@ def main():
             break
 
 
+        if user_input in ["새 대화", "reset", "/reset"]:
+
+            thread_id = f"cli:{uuid.uuid4().hex[:8]}"
+            print("새 대화를 시작합니다.\n")
+            continue
+
+
+        if not user_input:
+            continue
+
+
         # =================================================
         # 요청 단위 Logging
         # =================================================
@@ -87,27 +103,11 @@ def main():
                 # Graph 실행
                 # =========================================
 
-                result = graph.invoke(
-                    {
-                        "messages": [
-                            HumanMessage(
-                                content=
-                                    user_input
-                            )
-                        ],
-
-                        "llm_config": llm_config.public(),
-                        "completed_steps":
-                            [],
-                    },
-
-                    # -------------------------------------
-                    # 비정상 Routing 반복 방지
-                    # -------------------------------------
-
-                    config={
-                        "recursion_limit": 30
-                    }
+                result = run_conversation_turn(
+                    question=user_input,
+                    thread_id=thread_id,
+                    llm_config=llm_config.public(),
+                    metadata={"source": "cli"},
                 )
 
 
@@ -115,38 +115,19 @@ def main():
                 # 최종 사용자 응답
                 # =========================================
 
-                messages = result.get(
-                    "messages",
-                    []
+                print(
+                    "\nAgent >"
                 )
 
+                print(
+                    result.get("final_answer", "")
+                )
 
-                if messages:
+                if result.get("turn_type") == "chitchat":
+                    continue
 
-                    last_message = (
-                        messages[-1]
-                    )
-
-
-                    print(
-                        "\nAgent >"
-                    )
-
-
-                    # -------------------------------------
-                    # 여기 출력되는 final_answer에는 수행한 작업에 따라
-                    #
-                    # - 분석 결과
-                    # - 전처리 결과
-                    # - 시각화 결과
-                    # - 기반 데이터 검증 SQL
-                    #
-                    # 해당 결과가 포함되며, 생성된 SQL이 있으면 검증용으로 덧붙입니다.
-                    # -------------------------------------
-
-                    print(
-                        last_message.content
-                    )
+                # 다시 쓴 질문 표시는 agent_system/orchestrator/settings.py의
+                # SHOW_REWRITTEN_QUESTION 설정에 따라 final_answer 맨 위에 들어갑니다.
 
 
                 # =========================================

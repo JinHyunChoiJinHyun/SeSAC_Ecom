@@ -7,7 +7,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 # OpenAI 기본 클라이언트 생성 함수
 def get_gpt_client():
     try:
-        load_dotenv()
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
         client = OpenAI(api_key = os.getenv("OPENAI_API_KEY"))
     except:
         client = None
@@ -17,7 +17,7 @@ def get_gpt_client():
 def get_openai_chat_client(model=None, *, model_config=None):
     """요청에 고정된 제공 업체로 채팅 클라이언트를 생성합니다."""
     # 기존 OpenAI 조직·프록시 등 환경변수 설정도 절대 경로에서 로드합니다.
-    load_dotenv(Path(__file__).with_name(".env"))
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     from env.model_settings import (
         get_request_config, validate_selection, require_api_key,
         environment_value, ModelSettingsError,
@@ -48,7 +48,7 @@ def get_openai_chat_client(model=None, *, model_config=None):
 # OpenAI 임베딩 모델 클라이언트 생성 함수
 def get_openai_embedding_client():
     try:
-        load_dotenv()
+        load_dotenv(Path(__file__).resolve().parents[1] / ".env")
         client = OpenAIEmbeddings(api_key = os.getenv("OPENAI_API_KEY"),
                                   model = 'text-embedding-3-small')
     except:
