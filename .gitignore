@@ -9,6 +9,16 @@ synerise.duckdb.tmp
 delivery_output/
 visualization_output/
 
+# 데이터 파일 전체
+data/
+
+# DuckDB 파일
+*.duckdb
+*.duckdb.wal
+
+# Parquet 파일
+*.parquet
+
 # model 폴더
 models/
 

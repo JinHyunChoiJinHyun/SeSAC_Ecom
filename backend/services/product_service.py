@@ -24,25 +24,25 @@ backend/services/product_service.py
 
 from datetime import timedelta
 
-from backend.core.config import settings
-from backend.core.exceptions import InvalidRequestError
+# from backend.core.config import settings
+from backend.core.exceptions import InvalidRequestError, NotFoundError
 from backend.repositories.analytics.hm_product_repository import HMProductRepository
 from backend.repositories.analytics.hm_sale_repository import HMSaleRepository
 from backend.schemas.common import Evidence, ToolResult
 from backend.schemas.product import(
-    KeywordMatchData,
-    ProductCompareData,
-    ProductCompareRequest,
+    # KeywordMatchData,
+    # ProductCompareData,
+    # ProductCompareRequest,
     ProductDetail,
     ProductDetailData,
     ProductFilter,
-    ProductKeywordMatchRequest,
-    ProductSalesData,
-    ProductSalesRequest,
+    # ProductKeywordMatchRequest,
+    # ProductSalesData,
+    # ProductSalesRequest,
     ProductSearchData,
     ProductSearchQuery,
     ProductSummary,
-    SalesPeriod,
+    # SalesPeriod,
 )
 from backend.services.evidence_service import EvidenceService
 
@@ -63,6 +63,51 @@ def _product_evidence(p: ProductSummary) -> Evidence:
 # 3. 생성 규칙이 변경되면 함수 한 곳만 수정
 def _snapshot_evidence(source_type: str, snapshot_id: int, label: str) -> Evidence:
     return Evidence(source_type=source_type, source_id=f"snapshot:{snapshot_id}", label=label)
+
+# ==================================================
+# DuckDB 조회 전용
+# ==================================================
+
+class ProductQueryService:
+    def __init__(self, analytics):
+        self.products = HMProductRepository(analytics)
+
+    def search_products(
+            self,
+            query: ProductSearchQuery
+    ) -> ToolResult[ProductSearchData]:
+        total_count, rows = self.products.search(
+            keyword=query.keyword,
+            filters=query.filters,
+            limit=query.limit,
+            offset=query.offset
+        )
+
+        return ToolResult[ProductSearchData](
+            data=ProductSearchData(items=rows, total=total_count),
+            evidence=[_hm_product_evidence(r["article_id"], r["product_name"]) for r in rows]
+        )
+
+    def get_product_details(
+            self,
+            article_id: str
+    ) -> ToolResult[ProductDetailData]:
+        product = self.products.get_detail(article_id)
+
+        if product is None:
+            raise NotFoundError
+        
+        return ToolResult[ProductDetailData](
+            data={"product":product},
+            evidence=[_hm_product_evidence(article_id, product["product_name"])]
+        )
+
+# ==================================================
+# Evidence 헬퍼
+# ==================================================
+
+def _hm_product_evidence(article_id: str, label: str) -> Evidence:
+    return Evidence(source_type="hm_product", source_id=article_id, label=label)
 
 class ProductService:
     def __init__(self, analytics, session):
@@ -102,16 +147,18 @@ class ProductService:
         )
 
     # ── match_product_keywords ──────────────────────────────────────────────
-    def match_product_keywords(
-            self,
-            request: ProductKeywordMatchRequest,
-            run_id: str
-    ) -> ToolResult[KeywordMatchData]:
-        evidence: list[Evidence] = []
-        if request.trend_snapshot_id is not None:
-            trend = self.evidence.load_snapshot(request.trend_snapshot_id, run_id=run_id, expected_tool_name=TOOL_TREND)
-            keywords = list(trend.result["keywords"])
-            evidence.append(_snapshot_evidence("trend", request.trend_snapshot_id, "트랜드 키워드"))
-        else:
-            keywords = request.keywords
+    # def match_product_keywords(
+    #         self,
+    #         request: ProductKeywordMatchRequest,
+    #         run_id: str
+    # ) -> ToolResult[KeywordMatchData]:
+    #     evidence: list[Evidence] = []
+    #     if request.trend_snapshot_id is not None:
+    #         trend = self.evidence.load_snapshot(request.trend_snapshot_id, run_id=run_id, expected_tool_name=TOOL_TREND)
+    #         keywords = list(trend.result["keywords"])
+    #         evidence.append(_snapshot_evidence("trend", request.trend_snapshot_id, "트랜드 키워드"))
+    #     else:
+    #         keywords = request.keywords
+
+        # mapping, unmapped = keyword_matching.ma
 

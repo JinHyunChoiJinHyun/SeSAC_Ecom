@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 from datetime import date
 from pydantic import Field, BaseModel, ConfigDict, model_validator, field_validator
 
-from backend.core.config import settings
+# from backend.core.config import settings
 
 # H&M 상품 ID 타입
 # 사용 시점: 상품 검색, 상세 조회, 판매 분석 등에서 상품 ID를 입력받거나 반환할 때
@@ -124,6 +124,10 @@ class ProductDetail(ProductSummary):
 # ProductFilter를 상속하여 검색 조건을 받고, 페이지네이션 조건도 함께 지정한다.
 class ProductSearchQuery(ProductFilter):
     keyword: str | None = Field(None, min_length=1, max_length=50, description="상품명·detail_desc 부분 일치")
+    filters: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="상품 검색 필터"
+    )
     limit: int = Field(20, ge=1, le=50)
     offset: int = Field(0, ge=0)
 
@@ -159,185 +163,211 @@ class ProductDetailData(BaseModel):
 # 사용 시점: match_product_keywords 실행 시 사용한다.
 # 트렌드 분석 스냅샷 또는 마케터가 직접 입력한 키워드 중 하나를 전달한다.
 # ProductFilter를 상속하므로 매칭 대상 상품의 범위도 제한할 수 있다.
-class ProductKeywordMatchRequest(ProductFilter):
-    trend_snapshot_id: SnapshotId | None = Field(
-        None,
-        description="analyze_trend_sustainability 결과. 서버가 이 스냅샷에서 키워드를 읽는다"
-    )
-    keywords: list[str] | None = Field(
-        None,
-        min_length=1,
-        max_length=30,
-        description=(
-            "마케터가 직접 입력한 키워드일 때만 사용. "
-            "트렌드 분석에서 나온 키워드는 여기에 옮겨 적지 말고 trend_snapshot_id를 넘길 것"
-        )
-    )
-    limit: int = Field(20, ge=1, le=50)
+# class ProductKeywordMatchRequest(ProductFilter):
+#     trend_snapshot_id: SnapshotId | None = Field(
+#         None,
+#         description=(
+#             "analyze_trend_sustainability 결과. 서버가 이 스냅샷에서 카테고리와 키워드를 함께 읽는다. "
+#             "트렌드 분석을 하지 않아 스냅샷이 없으면 비워 둔다. "
+#             "이때 카테고리는 마케터가 직접 말한 경우에만 category에 넣는다"
+#         )
+#     )
+#     category: CategoryName | None = Field(
+#         None, 
+#         description=(
+#             "마케터가 대화에서 '니트로 해 줘'처럼 카테고리를 직접 말했으면 여기에 '니트'를 넣어라. "
+#             "트렌드 분석 결과를 쓰는 경우라면 여기에는 아무것도 넣지 말고(null), 대신 trend_snapshot_id에 스냅샷 번호를 넣어라. "
+#             "마케터가 카테고리를 말하지 않았고 트렌드 결과도 없으면 추측해서 넣지 말고 비워 둬라. "
+#             "비워 두면 카테고리 제한 없이 키워드에 맞는 상품을 찾는다."
+#         ),
+#     )
+#     keywords: list[str] | None = Field(
+#         None,
+#         min_length=1,
+#         max_length=30,
+#         description=(
+#             "마케터가 직접 입력한 키워드일 때만 사용. "
+#             "트렌드 분석에서 나온 키워드는 여기에 옮겨 적지 말고 trend_snapshot_id를 넘길 것"
+#         )
+#     )
+#     limit: int = Field(20, ge=1, le=50)
 
-    @model_validator(mode="after")
-    def validate_single_source(self):
-        """trend_snapshot_id와 keywords 중 정확히 하나만 입력하도록 검증"""
-        if (self.trend_snapshot_id is None) == (self.keywords is None):
-            raise ValueError("trend_snapshot_id와 keywords 중 하나만 지정해야 합니다")
-        return self
+#     @model_validator(mode="after")
+#     def validate_keyword_source(self):
+#         """키워드 출처는 트렌드 스냅샷과 마케터 입력 중 정확히 하나"""
+#         if (self.trend_snapshot_id is None) == (self.keywords is None):
+#             raise ValueError("trend_snapshot_id와 keywords 중 하나만 지정해야 합니다")
+#         return self
 
-# 키워드와 실제 상품 속성이 어떻게 연결되었는지 나타내는 스키마
-# 사용 시점: 키워드 매칭 결과에서 개별 키워드의 매칭 근거를 반환할 때 사용한다.
-# 예: 퍼플 → color → Purple
-class KeywordHit(BaseModel):
-    keyword: str = Field(description="입력 키워드 (예: 퍼플)")
-    attribute: Literal[
-        "product_group", "product_type", "garment_group", "color", "color_master", "tone", "appearance"
-    ]
-    value: str = Field(description="매칭된 H&M 정식 값 (hm_vocab.json에 있는 값)")
+#     @model_validator(mode="after")
+#     def validate_category_source(self):
+#         """트렌드 스냅샷을 쓰면 카테고리도 스냅샷에서 읽는다 (category는 마케터 입력 경로에서만)"""
+#         if self.trend_snapshot_id is not None and self.category is not None:
+#             raise ValueError("트렌드 결과를 쓸 때는 카테고리도 스냅샷에서 읽습니다. category를 비우세요")
+#         return self
 
-# 키워드 매칭 결과에 포함되는 개별 상품 정보
-# 사용 시점: 특정 상품의 키워드 매칭 점수와 매칭된 속성 정보를 반환할 때 사용한다.
-class KeywordMatchItem(BaseModel):
-    product: ProductSummary
-    match_score: float = Field(ge=0, le=1)
-    matched: list[KeywordHit]
+# # 키워드와 실제 상품 속성이 어떻게 연결되었는지 나타내는 스키마
+# # 사용 시점: 키워드 매칭 결과에서 개별 키워드의 매칭 근거를 반환할 때 사용한다.
+# # 예: 퍼플 → color → Purple
+# class KeywordHit(BaseModel):
+#     keyword: str = Field(description="입력 키워드 (예: 퍼플)")
+#     attribute: Literal[
+#         "product_group", "product_type", "garment_group", "color", "color_master", "tone", "appearance"
+#     ]
+#     value: str = Field(description="매칭된 H&M 정식 값 (hm_vocab.json에 있는 값)")
 
-# 키워드 매칭 API의 응답 데이터 스키마
-# 사용 시점: match_product_keywords 실행 후 전체 매칭 결과를 반환할 때 사용한다.
-# 분석 결과는 스냅샷으로 저장하고 snapshot_id를 반환하여 후속 Tool에서 참조할 수 있다.
-class KeywordMatchData(BaseModel):
-    snapshot_id: int
-    keywords: list[str]
-    unmapped_keywords: list[str] = Field(description="H&M 속성 사전에 대응 값이 없는 키워드 (예: 꾸안꾸)")
-    items: list[KeywordMatchItem]
+# # 키워드 매칭 결과에 포함되는 개별 상품 정보
+# # 사용 시점: 특정 상품의 키워드 매칭 점수와 매칭된 속성 정보를 반환할 때 사용한다.
+# class KeywordMatchItem(BaseModel):
+#     product: ProductSummary
+#     match_score: float = Field(ge=0, le=1)
+#     matched: list[KeywordHit]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# analyze_product_sales   POST /products/sales   ([Duck] daily_purchases)
-# ──────────────────────────────────────────────────────────────────────────────
+# # 키워드 매칭 API의 응답 데이터 스키마
+# # 사용 시점: match_product_keywords 실행 후 전체 매칭 결과를 반환할 때 사용한다.
+# # 분석 결과는 스냅샷으로 저장하고 snapshot_id를 반환하여 후속 Tool에서 참조할 수 있다.
+# class KeywordMatchData(BaseModel):
+#     snapshot_id: int
+#     keywords: list[str]
+#     unmapped_keywords: list[str] = Field(description="H&M 속성 사전에 대응 값이 없는 키워드 (예: 꾸안꾸)")
+#     keyword_count: int = Field(description="중복을 뺀 입력 키워드 수")
+#     mapped_keyword_count: int = Field(description="H&M 속성으로 해석된 키워드 수")
+#     resolution_rate: float = Field(
+#         ge=0, le=1,
+#         description="해석 성공률. match_score는 해석된 키워드만 기준이므로 이 값과 함께 해석할 것",
+#     )
+#     items: list[KeywordMatchItem]
 
-# 상품 판매 분석 기간을 지정하는 스키마
-# 사용 시점: ProductSalesRequest에서 분석 시작일과 종료일을 지정할 때 사용한다.
-# H&M 데이터가 존재하는 기간 안에서만 조회할 수 있도록 검증한다.
-class SalesPeriod(_Request):
-    start_date: date
-    end_date: date
+# # ──────────────────────────────────────────────────────────────────────────────
+# # analyze_product_sales   POST /products/sales   ([Duck] daily_purchases)
+# # ──────────────────────────────────────────────────────────────────────────────
 
-    @model_validator(mode="after")
-    def _within_hm_data(self):
-        if self.start_date > self.end_date:
-            raise ValueError("start_date가 end_date보다 늦습니다")
-        if self.start_date < settings.HM_DATA_START or self.end_date > settings.HM_DATA_REFERENCE_DATE:
-            raise ValueError(
-                f"H&M 데이터 기간({settings.HM_DATA_START} ~ {settings.HM_DATA_REFERENCE_DATE}) 안에서만 조회할 수 있습니다. "
-                "오늘 날짜가 아니라 분석 기준일을 기준으로 지정하세요"
-            )
+# # 상품 판매 분석 기간을 지정하는 스키마
+# # 사용 시점: ProductSalesRequest에서 분석 시작일과 종료일을 지정할 때 사용한다.
+# # H&M 데이터가 존재하는 기간 안에서만 조회할 수 있도록 검증한다.
+# class SalesPeriod(_Request):
+#     start_date: date
+#     end_date: date
 
-        return self
+#     @model_validator(mode="after")
+#     def _within_hm_data(self):
+#         if self.start_date > self.end_date:
+#             raise ValueError("start_date가 end_date보다 늦습니다")
+#         if self.start_date < settings.HM_DATA_START or self.end_date > settings.HM_DATA_REFERENCE_DATE:
+#             raise ValueError(
+#                 f"H&M 데이터 기간({settings.HM_DATA_START} ~ {settings.HM_DATA_REFERENCE_DATE}) 안에서만 조회할 수 있습니다. "
+#                 "오늘 날짜가 아니라 분석 기준일을 기준으로 지정하세요"
+#             )
 
-# 상품 판매 분석 API의 요청 스키마
-# 사용 시점: analyze_product_sales 실행 시 사용한다.
-# 분석할 상품, 분석 기간, 판매 채널, 집계 단위를 전달한다.
-# 기간을 생략하면 서비스에서 기준일을 바탕으로 기본 분석 기간을 설정한다.
-class ProductSalesRequest(_Request):
-    article_ids: list[ArticleId] = Field(min_length=1, max_length=50)
-    period: SalesPeriod | None = Field(None, description="생략하면 HM_DATA_REFERENCE_DATE 기준 최근 28일 (서비스에서 결정)")
-    channel: Channel = "all"
-    granularity: Literal["total", "week"] = "total"
+#         return self
 
-    @field_validator("article_ids") # article_ids 필드에 값 입력 시
-    @classmethod
-    def _remove_duplicate_ids(cls, ids: list[str]) -> list[str]:
-        return _unique(ids)
+# # 상품 판매 분석 API의 요청 스키마
+# # 사용 시점: analyze_product_sales 실행 시 사용한다.
+# # 분석할 상품, 분석 기간, 판매 채널, 집계 단위를 전달한다.
+# # 기간을 생략하면 서비스에서 기준일을 바탕으로 기본 분석 기간을 설정한다.
+# class ProductSalesRequest(_Request):
+#     article_ids: list[ArticleId] = Field(min_length=1, max_length=50)
+#     period: SalesPeriod | None = Field(None, description="생략하면 HM_DATA_REFERENCE_DATE 기준 최근 28일 (서비스에서 결정)")
+#     channel: Channel = "all"
+#     granularity: Literal["total", "week"] = "total"
 
-# 개별 상품의 판매 지표 스키마
-# 사용 시점: 상품별 판매량, 구매 고객 수, 가격 지표 등
-# 판매 분석 결과의 수치 데이터를 반환할 때 사용한다.
-class SalesMetrics(BaseModel):
-    """매출 지표 스키마 모델"""
-    qty: int = Field(description="daily_purchases.qty 합계 (반복 행 = 수량)")
-    buyers: int = Field(description="고유 구매 고객 수")
-    price_index_sum: float = Field(description="정규화 가격 지표 합. 통화 금액이 아니므로 원화·매출로 표기 금지")
-    first_sale_date: date = Field(
-        description="기간 안에서 처음 판매된 날 (관측값. 출시일이 아님)"
-    )
-    qty_per_day: float = Field(
-        description="qty ÷ (first_sale_date ~ 기간 종료일 일수). 판매 시작 시점이 다른 상품 비교용"
-    )
+#     @field_validator("article_ids") # article_ids 필드에 값 입력 시
+#     @classmethod
+#     def _remove_duplicate_ids(cls, ids: list[str]) -> list[str]:
+#         return _unique(ids)
 
-# 주간 판매 추이를 나타내는 스키마
-# 사용 시점: ProductSalesRequest의 granularity가 "week"일 때
-# 주별 판매량과 구매 고객 수를 반환하는 데 사용한다.
-class SalesPoint(BaseModel):
-    week_start: date
-    qty: int
-    buyers: int
+# # 개별 상품의 판매 지표 스키마
+# # 사용 시점: 상품별 판매량, 구매 고객 수, 가격 지표 등
+# # 판매 분석 결과의 수치 데이터를 반환할 때 사용한다.
+# class SalesMetrics(BaseModel):
+#     """매출 지표 스키마 모델"""
+#     qty: int = Field(description="daily_purchases.qty 합계 (반복 행 = 수량)")
+#     buyers: int = Field(description="고유 구매 고객 수")
+#     price_index_sum: float = Field(description="정규화 가격 지표 합. 통화 금액이 아니므로 원화·매출로 표기 금지")
+#     first_sale_date: date = Field(
+#         description="기간 안에서 처음 판매된 날 (관측값. 출시일이 아님)"
+#     )
+#     qty_per_day: float = Field(
+#         description="qty ÷ (first_sale_date ~ 기간 종료일 일수). 판매 시작 시점이 다른 상품 비교용"
+#     )
 
-# 판매 분석 결과에 포함되는 개별 상품 정보
-# 사용 시점: analyze_product_sales 실행 후 상품별 판매 지표와 순위를 반환할 때 사용한다.
-# 주간 분석을 요청한 경우 주별 판매 추이도 포함한다.
-class ProductSalesItem(BaseModel):
-    article_id: ArticleId
-    metrics: SalesMetrics
-    rank_by_qty_per_day: int
-    series: list[SalesPoint] | None = None
+# # 주간 판매 추이를 나타내는 스키마
+# # 사용 시점: ProductSalesRequest의 granularity가 "week"일 때
+# # 주별 판매량과 구매 고객 수를 반환하는 데 사용한다.
+# class SalesPoint(BaseModel):
+#     week_start: date
+#     qty: int
+#     buyers: int
 
-# 상품 판매 분석 API의 응답 데이터 스키마
-# 사용 시점: analyze_product_sales 실행 후 전체 판매 분석 결과를 반환할 때 사용한다.
-# 실제 적용된 분석 기간, 판매 채널, 상품별 판매 지표, 해석 주의사항을 포함한다.
-class ProductSalesData(BaseModel):
-    snapshot_id: int
-    period: SalesPeriod  # 서비스가 실제 적용한 기간 (기본값 포함)
-    channel: Channel
-    reference_date: date
-    items: list[ProductSalesItem]
-    notes: list[str] = Field(
-        default_factory=list,
-        description=(
-            "해석 주의: 2018-09·2020-09 부분 월, 채널 1·2 명칭은 추정, "
-            "2020-03-20~05-05 채널 1(매장) 공백, 2018~2020 과거 데이터"
-        ),
-    )
+# # 판매 분석 결과에 포함되는 개별 상품 정보
+# # 사용 시점: analyze_product_sales 실행 후 상품별 판매 지표와 순위를 반환할 때 사용한다.
+# # 주간 분석을 요청한 경우 주별 판매 추이도 포함한다.
+# class ProductSalesItem(BaseModel):
+#     article_id: ArticleId
+#     metrics: SalesMetrics
+#     rank_by_qty_per_day: int
+#     series: list[SalesPoint] | None = None
 
-# ──────────────────────────────────────────────────────────────────────────────
-# compare_product_candidates   POST /products/compare   (앞 결과 조합)
-# ──────────────────────────────────────────────────────────────────────────────
+# # 상품 판매 분석 API의 응답 데이터 스키마
+# # 사용 시점: analyze_product_sales 실행 후 전체 판매 분석 결과를 반환할 때 사용한다.
+# # 실제 적용된 분석 기간, 판매 채널, 상품별 판매 지표, 해석 주의사항을 포함한다.
+# class ProductSalesData(BaseModel):
+#     snapshot_id: int
+#     period: SalesPeriod  # 서비스가 실제 적용한 기간 (기본값 포함)
+#     channel: Channel
+#     reference_date: date
+#     items: list[ProductSalesItem]
+#     notes: list[str] = Field(
+#         default_factory=list,
+#         description=(
+#             "해석 주의: 2018-09·2020-09 부분 월, 채널 1·2 명칭은 추정, "
+#             "2020-03-20~05-05 채널 1(매장) 공백, 2018~2020 과거 데이터"
+#         ),
+#     )
 
-# 상품 후보 비교 API의 요청 스키마
-# 사용 시점: compare_product_candidates 실행 시 사용한다.
-# 앞서 실행한 키워드 매칭 또는 판매 분석 결과의 snapshot_id를 전달하여
-# 기존 분석 결과를 바탕으로 여러 상품을 비교한다.
-class ProductCompareRequest(_Request):
-    article_ids: list[ArticleId] = Field(min_length=2, max_length=10)
-    keyword_match_snapshot_id: SnapshotId | None = None # match_product_keywords에서 생성한 키워드 매칭 분석 결과
-    sales_snapshot_id: SnapshotId | None = None # analyze_product_sales에서 생성한 판매 분석 결과
+# # ──────────────────────────────────────────────────────────────────────────────
+# # compare_product_candidates   POST /products/compare   (앞 결과 조합)
+# # ──────────────────────────────────────────────────────────────────────────────
 
-    @field_validator("article_ids") # article_ids 필드에 값 입력 시
-    @classmethod
-    def _remove_duplicate_ids(cls, ids: list[str]) -> list[str]:
-        return _unique(ids)
+# # 상품 후보 비교 API의 요청 스키마
+# # 사용 시점: compare_product_candidates 실행 시 사용한다.
+# # 앞서 실행한 키워드 매칭 또는 판매 분석 결과의 snapshot_id를 전달하여
+# # 기존 분석 결과를 바탕으로 여러 상품을 비교한다.
+# class ProductCompareRequest(_Request):
+#     article_ids: list[ArticleId] = Field(min_length=2, max_length=10)
+#     keyword_match_snapshot_id: SnapshotId | None = None # match_product_keywords에서 생성한 키워드 매칭 분석 결과
+#     sales_snapshot_id: SnapshotId | None = None # analyze_product_sales에서 생성한 판매 분석 결과
 
-    @model_validator(mode="after")
-    def _validate_comparison_requirements(self):
-        if len(self.article_ids) < 2:
-            raise ValueError("서로 다른 상품을 2개 이상 지정해야 합니다.")
+#     @field_validator("article_ids") # article_ids 필드에 값 입력 시
+#     @classmethod
+#     def _remove_duplicate_ids(cls, ids: list[str]) -> list[str]:
+#         return _unique(ids)
 
-        # 분석 결과 여부 검증
-        if self.keyword_match_snapshot_id is None and self.sales_snapshot_id is None:
-            raise ValueError("keyword_match_snapshot_id 또는 sales_snapshot_id 중 하나 이상이 필요합니다")
+#     @model_validator(mode="after")
+#     def _validate_comparison_requirements(self):
+#         if len(self.article_ids) < 2:
+#             raise ValueError("서로 다른 상품을 2개 이상 지정해야 합니다.")
 
-        return self
+#         # 분석 결과 여부 검증
+#         if self.keyword_match_snapshot_id is None and self.sales_snapshot_id is None:
+#             raise ValueError("keyword_match_snapshot_id 또는 sales_snapshot_id 중 하나 이상이 필요합니다")
 
-# 상품 후보 비교 결과에 포함되는 개별 상품 정보
-# 사용 시점: 비교 대상 상품별 키워드 매칭 결과와 판매 지표를 함께 반환할 때 사용한다.
-# 매칭 정보나 판매 분석 정보가 없는 경우 해당 값은 None으로 반환할 수 있다.
-class CompareRow(BaseModel):
-    product: ProductSummary
-    match_score: float | None = None
-    matched: list[KeywordHit] = Field(default_factory=list)
-    sales: SalesMetrics | None = None
-    sales_rank: int | None = None
+#         return self
 
-# 상품 후보 비교 API의 응답 데이터 스키마
-# 사용 시점: compare_product_candidates 실행 후 상품별 비교 결과를 반환할 때 사용한다.
-# 상품 속성의 차이, 키워드 매칭 결과, 판매 성과를 종합하여 반환한다.
-class ProductCompareData(BaseModel):
-    snapshot_id: int
-    rows: list[CompareRow]
-    differing_attributes: list[str] = Field(description="후보끼리 값이 다른 속성 (예: color)")
+# # 상품 후보 비교 결과에 포함되는 개별 상품 정보
+# # 사용 시점: 비교 대상 상품별 키워드 매칭 결과와 판매 지표를 함께 반환할 때 사용한다.
+# # 매칭 정보나 판매 분석 정보가 없는 경우 해당 값은 None으로 반환할 수 있다.
+# class CompareRow(BaseModel):
+#     product: ProductSummary
+#     match_score: float | None = None
+#     matched: list[KeywordHit] = Field(default_factory=list)
+#     sales: SalesMetrics | None = None
+#     sales_rank: int | None = None
+
+# # 상품 후보 비교 API의 응답 데이터 스키마
+# # 사용 시점: compare_product_candidates 실행 후 상품별 비교 결과를 반환할 때 사용한다.
+# # 상품 속성의 차이, 키워드 매칭 결과, 판매 성과를 종합하여 반환한다.
+# class ProductCompareData(BaseModel):
+#     snapshot_id: int
+#     rows: list[CompareRow]
+#     differing_attributes: list[str] = Field(description="후보끼리 값이 다른 속성 (예: color)")

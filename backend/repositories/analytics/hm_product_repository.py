@@ -1,5 +1,9 @@
 from typing import Any
-from sql_utils import (
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from .sql_utils import (
     build_in_clause,
     escape_like,
     fetch_dicts
@@ -43,10 +47,10 @@ class HMProductRepository:
         self.connection = connection
 
     @staticmethod
-    def _build_filter_conditions(filters: dict[str, list[str]]) -> tuple[list[str], list[Any]]:
+    def _build_filter_conditions(filters: dict[str, list[str]] | None = None) -> tuple[list[str], list[Any]]:
         """검색 필터를 SQL where 조건과 바인딩 파라미터로 변환"""
         conditions, params = [], [] # where 조건 목록, 바인딩 파라미터 목록
-        for filter_name, values in filters.items():
+        for filter_name, values in (filters or {}).items():
             if not values:
                 continue
             column = FIELD_COLUMNS[FILTER_FIELDS[filter_name]]
@@ -59,9 +63,9 @@ class HMProductRepository:
     def search(
             self,
             keyword: str | None,
-            filters: dict[str, list[str]],
-            limit: int,
-            offset: int
+            filters: dict[str, list[str]] | None = None,
+            limit: int = 20,
+            offset: int = 0
     ) -> tuple[int, list[dict[str, Any]]]:
         """상품 검색을 위한 필터 및 키워드 조건 구성과 조회"""
         conditions, params = self._build_filter_conditions(filters)
@@ -75,7 +79,8 @@ class HMProductRepository:
         where = "WHERE " + " AND ".join(conditions) if conditions else "" # condition의 0번쨰 요소에는 AND가 붙지 않음
 
         total_count = self.connection.execute(f"SELECT COUNT(*) FROM hm.articles AS a {where}", params).fetchone()[0]
-        rows = self._fetch_dicts(
+        rows = fetch_dicts(
+            self.connection,
             f"""
             SELECT
                 {_SUMMARY_SELECT}
@@ -90,9 +95,10 @@ class HMProductRepository:
         return total_count, rows
         
     # ── get_product_details ────────────────────────────────────────────────
-    def get(self, article_id: str) -> dict[str, Any] | None:
+    def get_detail(self, article_id: str) -> dict[str, Any] | None:
         """상품 ID로 상품 요약 정보와 상세 설명 조회"""
-        rows = self._fetch_dicts(
+        rows = fetch_dicts(
+            self.connection,
             f"""
             SELECT
                 {_SUMMARY_SELECT},
@@ -109,7 +115,7 @@ class HMProductRepository:
         if not article_ids:
             return []
         clause, params = build_in_clause("a.article_id", article_ids)
-        return self._fetch_dicts(
+        return fetch_dicts(
             f"SELECT {_SUMMARY_SELECT} {_FROM} WHERE {clause}",
             params
         )
@@ -148,7 +154,8 @@ class HMProductRepository:
         conditions.insert(0, "(" + " OR ".join(any_clauses) + ")")
         params.extend(filter_params)
 
-        return self._fetch_dicts(
+        return fetch_dicts(
+            self.connection,
             f"""
             SELECT {_SUMMARY_SELECT}
             {_FROM}
