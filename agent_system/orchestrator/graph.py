@@ -93,18 +93,60 @@ def get_graph():
     return _graph
 
 
-def pending_interrupt(graph, thread_id: str):
-    """thread가 check_approval에서 멈춰 있으면 interrupt 값을, 아니면 None."""
-
+def _snapshot(graph, thread_id: str):
     try:
-        snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
+        return graph.get_state({"configurable": {"thread_id": thread_id}})
     except Exception:
         return None
+
+
+def _interrupts(snapshot) -> list:
+    if snapshot is None:
+        return []
     interrupts = list(getattr(snapshot, "interrupts", ()) or ())
     if not interrupts:
         for task in getattr(snapshot, "tasks", ()) or ():
             interrupts.extend(getattr(task, "interrupts", ()) or ())
+    return interrupts
+
+
+def pending_interrupt(graph, thread_id: str):
+    """thread가 check_approval에서 멈춰 있으면 interrupt 값을, 아니면 None."""
+
+    interrupts = _interrupts(_snapshot(graph, thread_id))
     return interrupts[0].value if interrupts else None
+
+
+def pending_interrupt_token(graph, thread_id: str) -> str:
+    """멈춰 있는 승인 요청의 고유 ID (Slack 버튼이 '그 요청'에 대한 것인지 확인용). 없으면 빈 문자열."""
+
+    interrupts = _interrupts(_snapshot(graph, thread_id))
+    return str(getattr(interrupts[0], "id", "") or "") if interrupts else ""
+
+
+# ---------------------------------------------------------------- Slack 버튼으로 받을 수 있는 확인
+ACTIVE_WORKFLOW_STATUS = ("blocked", "waiting_input")
+
+
+def pending_actions(graph, thread_id: str) -> list[dict]:
+    """지금 사용자 확인을 기다리는 것 (Slack이 버튼으로 보여 줌, interfaces/slack/actions.py).
+
+    - 승인 대기(check_approval interrupt) → [{"type": "approval", "token", "title"}]   (승인·반려·취소)
+    - 승인 대기가 없고 워크플로가 멈춤/선택 대기 → [{"type": "workflow", "run_id", "status"}]
+      (멈춤: 다시 시도·진행 상황·취소 / 선택 대기: 진행 상황·취소)
+    승인 대기가 있으면 워크플로 버튼은 보여 주지 않습니다 (한 번에 한 가지 확인만).
+    """
+
+    snapshot = _snapshot(graph, thread_id)
+    interrupts = _interrupts(snapshot)
+    if interrupts:
+        value = interrupts[0].value if isinstance(interrupts[0].value, dict) else {}
+        return [{"type": "approval", "token": str(getattr(interrupts[0], "id", "") or ""),
+                 "title": str(value.get("title", ""))}]
+    run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+    if run.get("status") in ACTIVE_WORKFLOW_STATUS and run.get("run_id"):
+        return [{"type": "workflow", "run_id": run["run_id"], "status": run["status"]}]
+    return []
 
 
 def _interrupt_text(output: dict) -> str:
@@ -115,7 +157,7 @@ def _interrupt_text(output: dict) -> str:
 # ---------------------------------------------------------------- 승인 입력 안내 (A안)
 # 승인 판단 규칙(approval.APPROVE)은 보안상 "승인", "네", "좋아요"처럼 한 단어 전체 일치만 승인으로 받습니다.
 # 그보다 긴 승인 표현은 승인으로 처리하지 않고, 아래 안내만 보여 줍니다 (질문은 평소처럼 처리).
-APPROVAL_INPUT_GUIDE = "승인 대기 중입니다. 저장하려면 '승인', 저장하지 않으려면 '반려'만 입력해 주세요."
+APPROVAL_INPUT_GUIDE = "승인 대기 중입니다. 아래 [승인] / [반려] 버튼을 눌러 주세요."
 _APPROVAL_LIKE_WORDS = {
     "승인", "승인합니다", "승인할게", "승인할게요", "승인해", "승인해요", "승인해줘", "승인해주세요", "승인이요",
     "확정", "확정해", "확정해요", "확정해줘", "확정해주세요", "확정할게", "확정할게요", "확정합니다",
@@ -137,15 +179,145 @@ def looks_like_approval_intent(message: str) -> bool:
     return bool(words) and all(w in _APPROVAL_LIKE_WORDS for w in words)
 
 
-def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metadata: dict | None = None) -> dict:
+APPROVAL_BUTTON_LABELS = {"approve": "승인", "reject": "반려", "cancel": "승인 요청 취소"}
+WORKFLOW_BUTTON_COMMANDS = {"continue": "워크플로 계속", "status": "워크플로 상태", "cancel": "워크플로 취소"}
+STALE_ACTION_REPLY = "이 버튼은 이미 처리되었거나 지난 요청의 버튼입니다. 가장 최근 메시지의 버튼을 눌러 주세요."
+
+
+
+# CART_SIGNAL_MARKET_CHART_BRIDGE_V1
+def _attach_market_trend_chart(result: dict, question: str) -> dict:
+    """시장 추이 DataFrame이 있을 때 기존 공통 선그래프를 생성합니다."""
+    import re
+    from pathlib import Path
+    import pandas as pd
+
+    # 사용자가 명시적으로 그래프를 요청했을 때만 실행
+    if not re.search(r"그래프|차트|시각화", question, re.I):
+        return result
+    if re.search(r"그래프\\s*(?:없이|제외|말고)|차트\\s*(?:없이|제외|말고)", question):
+        return result
+
+    frame = result.get("dataframe")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return result
+    if "period" not in frame.columns:
+        return result
+    if result.get("visualization_path"):
+        return result
+
+    # 현재 네이버 추이 표: period + 키워드별 숫자 열
+    numeric_columns = [
+        col for col in frame.columns
+        if col != "period"
+        and pd.api.types.is_numeric_dtype(frame[col])
+    ]
+    if len(numeric_columns) != 1:
+        return result
+
+    y_column = numeric_columns[0]
+
+    try:
+        from agent_system.tools.visualization_tools import create_line_chart
+
+        chart = create_line_chart(
+            df=frame,
+            x_column="period",
+            y_column=y_column,
+            title=f"{y_column} 관심 추이",
+            x_label="관측 기간",
+            y_label="상대 관심도 (검색 횟수 아님)",
+        )
+
+        chart_path = chart.get("file_path")
+        if not chart.get("success") or not chart_path:
+            raise ValueError(chart.get("error") or "선그래프 생성 실패")
+        if not Path(chart_path).is_file():
+            raise FileNotFoundError(chart_path)
+
+        result["visualization_path"] = str(chart_path)
+        result["visualization_result"] = chart
+        steps = list(result.get("completed_steps") or [])
+        if "visualization" not in steps:
+            steps.append("visualization")
+        result["completed_steps"] = steps
+
+        print(f"[시장 추이 그래프 생성] {chart_path}", flush=True)
+
+    except Exception as exc:
+        # 분석 결과를 보존하되 그래프 실패 사실을 명확히 안내
+        print(
+            f"[시장 추이 그래프 실패] {type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        result["final_answer"] = (
+            str(result.get("final_answer") or "")
+            + "\\n\\n[시각화 미완료] 분석 데이터는 생성됐지만 "
+              "그래프 파일 생성에 실패했습니다."
+        )
+        result["visualization_error"] = str(exc)
+
+    return result
+
+
+def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metadata: dict | None = None,
+             action: dict | None = None) -> dict:
     """대화 한 턴을 실행하고 Slack Delivery에 넘길 결과 dict를 반환합니다.
 
     - analysis : 특화 Agent 결과 전체 (dataframe·그래프 경로 포함)
     - chitchat / approval_request / approval : {"final_answer": 답변, "turn_type": ...}
     승인 대기 중이면 답변 끝에 승인 질문을 다시 붙입니다.
+
+    action (Slack 버튼, 선택)
+        {"type": "approval", "decision": "approve"|"reject"|"cancel", "token": 승인 요청 ID}
+        {"type": "workflow", "command": "continue"|"status"|"cancel", "run_id": 워크플로 run ID}
+        글자 판단 없이 버튼 값 그대로 처리합니다. 버튼이 가리키는 요청이 지금 기다리는 요청과 다르면 처리하지 않습니다.
+    결과의 "actions"에는 지금 사용자 확인을 기다리는 것(pending_actions)을 담아 Slack이 버튼을 붙입니다.
     """
 
     graph = graph or get_graph()
+    result = _run_turn(question, thread_id, llm_config, graph, metadata, action)
+    actions = pending_actions(graph, thread_id)
+    # 워크플로 버튼은 워크플로 결과·워크플로 명령 답변에만 붙임 (대기 중 다른 질문마다 버튼이 쌓이지 않게)
+    if actions and actions[0]["type"] == "workflow":
+        workflow_turn = (result.get("turn_type") == "workflow" or (action or {}).get("type") == "workflow"
+                         or workflow.is_workflow_command(question)
+                         or any(label in str(result.get("final_answer", "")) for label in workflow.BUTTON_LABELS))
+        if not workflow_turn:
+            actions = []
+    result["actions"] = actions
+    return result
+
+
+def _resume_approval(graph, config: dict, turn_id: str, thread_id: str, kind: str, text: str) -> dict:
+    """멈춰 있는 승인 요청에 답을 넣어 이어서 실행 (Command(resume=...))."""
+
+    # turn_id를 새로 넣어 승인 뒤 워크플로가 이어서 실행되면 그 결과를 이번 턴으로 받습니다
+    try:
+        output = graph.invoke(Command(resume={"kind": kind, "text": text}, update={"turn_id": turn_id}), config=config)
+    finally:
+        resumed_result = pop_turn_result(turn_id)
+    _prune(graph, thread_id)
+    if output.get("turn_type") == "workflow" and resumed_result is not None:
+        resumed_result.update(thread_id=thread_id, approval_result=output.get("approval_result") or {},
+                              campaign=output.get("campaign") or {})
+        return _with_reminders(resumed_result, output)
+    return {
+        "turn_type": "approval",
+        "final_answer": output.get("reply", ""),
+        "completed_steps": [],
+        "thread_id": thread_id,
+        "approval_result": output.get("approval_result") or {},
+        "campaign": output.get("campaign") or {},
+    }
+
+
+def _notice(thread_id: str, text: str) -> dict:
+    return {"turn_type": "approval", "final_answer": text, "completed_steps": [], "thread_id": thread_id}
+
+
+def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: dict | None,
+              action: dict | None) -> dict:
     turn_id = uuid.uuid4().hex
     run_metadata = {"thread_id": thread_id, "session_id": thread_id, **(metadata or {})}
     config = {
@@ -158,31 +330,41 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     if langsmith_enabled():
         print(f"[LangSmith] 추적 사용 (thread_id={thread_id})")
 
+    # ── Slack 버튼 (글자 판단 없이 버튼 값 그대로)
+    skip_approval_check = False
+    if action:
+        kind = action.get("type")
+        if kind == "approval":
+            decision = action.get("decision")
+            token = pending_interrupt_token(graph, thread_id)
+            if decision not in APPROVAL_BUTTON_LABELS or pending_interrupt(graph, thread_id) is None \
+                    or not token or token != str(action.get("token") or ""):
+                print(f"[버튼] 승인 요청 불일치·없음 → 처리 안 함 ({decision})")
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            print(f"[버튼] 승인 요청 → {decision}")
+            return _resume_approval(graph, config, turn_id, thread_id, decision,
+                                    f"[버튼] {APPROVAL_BUTTON_LABELS[decision]}")
+        if kind == "workflow":
+            command = action.get("command")
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+            if command not in WORKFLOW_BUTTON_COMMANDS or not run.get("run_id") \
+                    or run.get("run_id") != action.get("run_id") or run.get("status") not in ACTIVE_WORKFLOW_STATUS:
+                print(f"[버튼] 워크플로 불일치·종료 → 처리 안 함 ({command})")
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            print(f"[버튼] 워크플로 → {command}")
+            question = WORKFLOW_BUTTON_COMMANDS[command]   # 기존 워크플로 명령과 같은 처리
+            skip_approval_check = True                     # 승인 답으로 해석하지 않음
+        else:
+            return _notice(thread_id, "알 수 없는 버튼입니다.")
+
     # ── check_approval: 멈춰 있는 승인 요청에 대한 답이면 이어서 실행 (Command(resume=...))
-    waiting = pending_interrupt(graph, thread_id)
+    waiting = None if skip_approval_check else pending_interrupt(graph, thread_id)
     if waiting is not None:
         answer = approval.resolve_approval_answer(question)
         print(f"[승인 대기 중] 메시지 판단 = {answer.kind}")
         if answer.kind != "other":
-            # turn_id를 새로 넣어 승인 뒤 워크플로가 이어서 실행되면 그 결과를 이번 턴으로 받습니다
-            try:
-                output = graph.invoke(Command(resume={"kind": answer.kind, "text": question},
-                                              update={"turn_id": turn_id}), config=config)
-            finally:
-                resumed_result = pop_turn_result(turn_id)
-            _prune(graph, thread_id)
-            if output.get("turn_type") == "workflow" and resumed_result is not None:
-                resumed_result.update(thread_id=thread_id, approval_result=output.get("approval_result") or {},
-                                      campaign=output.get("campaign") or {})
-                return _with_reminders(resumed_result, output)
-            return {
-                "turn_type": "approval",
-                "final_answer": output.get("reply", ""),
-                "completed_steps": [],
-                "thread_id": thread_id,
-                "approval_result": output.get("approval_result") or {},
-                "campaign": output.get("campaign") or {},
-            }
+            return _resume_approval(graph, config, turn_id, thread_id, answer.kind, question)
         if looks_like_approval_intent(question):
             # 승인 의도는 보이지만 승인 규칙(한 단어 전체 일치)과 다른 답 (예: "승인합니다", "네 좋아요")
             # → LLM에 넘기지 않고 입력 방법만 안내. 승인 판단 규칙(approval.py)은 바꾸지 않으며 계속 승인 대기
@@ -247,6 +429,11 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
             agent_result.get("final_answer", ""), question,
             agent_result.get("standalone_question", ""), bool(output.get("is_followup")),
         )
+        if output.get("route") == "market_analysis":
+            agent_result = _attach_market_trend_chart(
+                agent_result,
+                agent_result.get("standalone_question") or question,
+            )
         # "그래프로 보여줘"처럼 그래프만 요청했고 그래프가 만들어졌으면 Slack에는 제목 + 그래프만 보냄
         if (context.is_chart_only_request(question, bool(output.get("is_followup")))
                 and agent_result.get("visualization_path") and not agent_result.get("error")):

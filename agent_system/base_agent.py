@@ -106,7 +106,7 @@ def not_ready_result(config: ToolAgentConfig) -> dict:
     tools = ", ".join(config.tools)
     return {
         "final_answer": (f"{config.label} Agent는 아직 미구현 상태입니다. 결과를 추정해서 만들지 않습니다.\n"
-                         f"{status}\n- Tool: {tools}\n연결되면 같은 요청으로 다시 실행하거나, 워크플로에서는 '워크플로 계속'이라고 해 주세요."),
+                         f"{status}\n- Tool: {tools}\n연결되면 같은 요청으로 다시 실행하거나, 워크플로에서는 [다시 시도] 버튼을 눌러 주세요."),
         "not_ready": True,
         "data_sources": [],
         "data_purpose": f"{config.label}: 미구현",

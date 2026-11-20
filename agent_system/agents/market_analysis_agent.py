@@ -36,7 +36,13 @@ MAX_ROWS_FOR_LLM = 40       # Tool 결과를 LLM에 넘길 때 목록 최대 행
 # Slack 표·CSV로 보낼 표 우선순위 (요약 표 우선, 원시 추이 시계열은 마지막)
 TABLE_PRIORITY = ("analyze_trend_sustainability", "analyze_youtube_trends", "analyze_competitor_reviews",
                   "analyze_selling_points", "get_shopping_trends", "search_fashion_trends")
-NESTED_COLUMNS = {"top_videos", "top_values", "recent_values", "request"}   # 표에서 뺄 중첩 값
+TOOL_TABLE_TITLES = {"analyze_trend_sustainability": "네이버 관심 상승률·지속 근거",
+                     "analyze_youtube_trends": "유튜브 반응 (보조 근거)",
+                     "analyze_competitor_reviews": "무신사 유사 상품 리뷰 항목 (언급률·불만 비율)",
+                     "analyze_selling_points": "무신사 유사 상품 소구점 (소재·핏·관리·디자인)",
+                     "get_shopping_trends": "네이버 검색 추이", "search_fashion_trends": "패션 매체 근거"}
+MAX_EXTRA_TABLES = 3        # 보고서에 같이 넣을 다른 Tool 표 수 (대표 표 1개 + 최대 3개)
+NESTED_COLUMNS = {"top_videos", "top_values", "recent_values", "request", "related_candidates", "evidence_links"}   # 표에서 뺄 중첩 값
 
 
 # =====================================================================
@@ -53,11 +59,44 @@ def _json_for_llm(result: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def build_tools(calls: list[dict]) -> list[StructuredTool]:
+
+# CART_SIGNAL_MARKET_DATE_GUARD_V1
+def _explicit_date_range(question: str):
+    """질문에 명시된 조회 시작일과 종료일을 추출합니다."""
+    import re
+    from datetime import date
+
+    pattern = (
+        r"(20\\d{2})년\\s*(\\d{1,2})월\\s*(\\d{1,2})일"
+        r"\\s*부터\\s*(?:(20\\d{2})년\\s*)?"
+        r"(\\d{1,2})월\\s*(\\d{1,2})일\\s*까지"
+    )
+    match = re.search(pattern, question)
+    if not match:
+        return None
+
+    year, month, day, end_year, end_month, end_day = match.groups()
+    start = date(int(year), int(month), int(day))
+    end = date(int(end_year or year), int(end_month), int(end_day))
+
+    if start > end:
+        raise ValueError("조회 시작일이 종료일보다 늦습니다.")
+
+    return start.isoformat(), end.isoformat()
+
+
+def build_tools(calls: list[dict], fixed_date_range=None) -> list[StructuredTool]:
     """이번 요청 전용 Tool 목록. 호출 기록을 calls에 남깁니다."""
 
     def wrap(name, func):
         def runner(**kwargs):
+            if name == "get_shopping_trends" and fixed_date_range:
+                kwargs["start_date"], kwargs["end_date"] = fixed_date_range
+                print(
+                    "[시장 분석 날짜 보호] 사용자 지정 기간:",
+                    fixed_date_range,
+                    flush=True,
+                )
             # 공통 Tool 로그: 호출 인자·결과(성공/사용 불가/오류)·시간 (agent_system/common_tools/tool_call_log.py)
             result, record = run_logged_tool(AGENT_NAME, name, func, kwargs)
             calls.append(record)
@@ -129,14 +168,28 @@ def _table(call: dict) -> pd.DataFrame | None:
     return pd.DataFrame(rows) if rows else None
 
 
-def pick_table(calls: list[dict]) -> pd.DataFrame | None:
+def _tables(calls: list[dict]) -> list[tuple[str, pd.DataFrame]]:
+    """(Tool 이름, 표) — TABLE_PRIORITY 순서, Tool마다 마지막 호출 1개."""
+    out = []
     for name in TABLE_PRIORITY:
         for call in reversed(calls):
             if call["name"] == name and call["result"].get("available"):
                 table = _table(call)
                 if table is not None and not table.empty:
-                    return table
-    return None
+                    out.append((name, table))
+                    break
+    return out
+
+
+def pick_table(calls: list[dict]) -> pd.DataFrame | None:
+    tables = _tables(calls)
+    return tables[0][1] if tables else None
+
+
+def extra_tables(calls: list[dict]) -> list[dict]:
+    """대표 표 외의 Tool 표 (보고서에 함께 넣음, analysis_log.make_entry의 extra_tables)."""
+    return [{"title": TOOL_TABLE_TITLES.get(name, name), "dataframe": table}
+            for name, table in _tables(calls)[1:1 + MAX_EXTRA_TABLES]]
 
 
 def market_result(calls: list[dict]) -> dict:
@@ -163,7 +216,7 @@ def run(request) -> dict:
     try:
         agent = create_agent(
             model=get_market_model(request.llm_config),
-            tools=build_tools(calls),
+            tools=build_tools(calls, _explicit_date_range(request.question)),
             system_prompt=build_system_prompt(getattr(request, "campaign", None)),
         )
         user_input = request.question
@@ -227,9 +280,11 @@ def run(request) -> dict:
         "market_result": market_result(calls),
         "completed_steps": ["market_analysis"],
     }
-    table = pick_table(calls)
-    if table is not None:
-        result["dataframe"] = table
+    tables = _tables(calls)
+    if tables:
+        result["dataframe"] = tables[0][1]
+        result["table_title"] = TOOL_TABLE_TITLES.get(tables[0][0], tables[0][0])
+        result["extra_tables"] = extra_tables(calls)
     return result
 
 

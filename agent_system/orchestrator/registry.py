@@ -206,13 +206,14 @@ AGENTS: list[AgentSpec] = [
         description=(
             "각 Agent의 결과를 시각화하고 실행 문서로 통합합니다. "
             "트렌드·상품 비교·타깃 결과 그래프, 기획전 실행 계획 보고서, "
-            "촬영 우선순위·구도·상품 정보를 담은 촬영 요청서, 보고서·요청서 PDF 출력을 합니다."
+            "촬영 우선순위·구도·상품 정보를 담은 촬영 요청서, 보고서·요청서 PDF 출력, "
+            "대화 중 분석을 묶은 일반 분석 보고서를 만듭니다 (문서 작성 담당)."
         ),
         examples=("지금까지 결과로 실행 계획 보고서 만들어줘", "촬영 요청서 한 장으로 정리해줘"),
         runner="agent_system.agents.reporting_agent:run",
         enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("visualize_analysis_results", "generate_campaign_report", "generate_photography_brief",
-               "export_report_pdf"),
+               "export_report_pdf", "generate_analysis_report"),
         scenario="메인: 후보 시각화·실행 계획 보고서 / 서브: 촬영 요청서 PDF",
     ),
     AgentSpec(

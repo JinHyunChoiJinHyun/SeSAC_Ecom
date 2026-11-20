@@ -3,6 +3,8 @@
 입력 series: DataFrame
     keyword, period(구간 시작일), ratio(상대 클릭량)          필수
     request_id, collected_at                                 선택 (있으면 키워드마다 가장 최근 요청만 사용)
+일 단위 시계열(구간 간격 1일)은 주 단위(월~일) 평균으로 묶어 계산합니다 (7일이 다 찬 주만 사용).
+    → "최근 4구간 vs 직전 4구간"이 일 단위에서도 4주 vs 4주가 되도록 (결과의 period_unit에 표시)
 주의: 네이버 ratio는 '한 번의 요청 안' 상대값(최대 100)입니다.
     → 서로 다른 요청의 값끼리 크기를 비교하면 안 됩니다. 증가율(같은 시계열 안의 비율)은 비교할 수 있습니다.
 """
@@ -70,10 +72,36 @@ def prepare_series(series: pd.DataFrame, keywords: list[str]) -> tuple[pd.DataFr
     return df[["keyword", "period", "ratio"]], info
 
 
+def weekly_if_daily(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """키워드별로 구간 간격이 1일이면 주 단위(월요일 시작) 평균으로 묶음. 반환: (series, 구간 단위 설명)
+
+    7일이 다 차지 않은 주(데이터 처음·끝의 일부 주)는 평균이 치우치므로 뺍니다.
+    같은 요청 안의 상대값끼리 평균하므로 ratio의 의미(같은 요청 안 상대값)는 그대로입니다.
+    """
+    if df is None or df.empty:
+        return df, "원래 간격"
+    parts, converted = [], False
+    for keyword, group in df.groupby("keyword", sort=False):
+        group = group.sort_values("period")
+        gaps = group["period"].diff().dropna()
+        if len(gaps) and gaps.median() <= pd.Timedelta(days=1):
+            week = group["period"].dt.to_period("W-SUN").dt.start_time
+            agg = group.assign(week=week).groupby("week").agg(ratio=("ratio", "mean"), days=("ratio", "size"))
+            agg = agg[agg["days"] >= 7].reset_index().rename(columns={"week": "period"})
+            agg["keyword"] = keyword
+            parts.append(agg[["keyword", "period", "ratio"]])
+            converted = True
+        else:
+            parts.append(group[["keyword", "period", "ratio"]])
+    out = pd.concat(parts, ignore_index=True) if parts else df
+    return out, ("일 단위 → 주 단위(월~일) 평균" if converted else "원래 간격")
+
+
 def summarize_trends(series: pd.DataFrame, keywords, start_date=None, end_date=None) -> dict:
     """get_shopping_trends: 키워드별 추이 요약 + 시계열."""
     keywords = clean_words(keywords)
     df, info = prepare_series(series, keywords)
+    df, unit = weekly_if_daily(df)
     start, end = to_date(start_date), to_date(end_date)
     if start:
         df = df[df["period"].dt.date >= start]
@@ -93,8 +121,10 @@ def summarize_trends(series: pd.DataFrame, keywords, start_date=None, end_date=N
         })
     notes = ["ratio는 같은 요청 안의 상대값(최대 100)입니다. 요청이 다른 키워드끼리 크기를 비교하지 마십시오."]
     notes += [f"{k}: 비교 불가 — {v['note']}" for k, v in info.items() if v.get("comparable") is False]
+    if unit != "원래 간격":
+        notes.append(f"구간 단위: {unit} (7일이 다 찬 주만)")
     return {
-        "keywords": keywords, "rows": rows, "series": records(df),
+        "keywords": keywords, "period_unit": unit, "rows": rows, "series": records(df),
         "missing_keywords": [k for k in keywords if k not in {r["keyword"] for r in rows}],
         "notes": notes,
     }
@@ -128,6 +158,7 @@ def analyze_sustainability(series: pd.DataFrame, keywords, base_keyword=None,
     keywords = clean_words(keywords)
     base = str(base_keyword or "").strip()
     df, request_info = prepare_series(series, keywords + ([base] if base and base not in keywords else []))
+    df, unit = weekly_if_daily(df)
     k = RECENT_PERIODS
     c_start, c_end = to_date(campaign_start), to_date(campaign_end)
     year = pd.DateOffset(years=1)
@@ -175,6 +206,7 @@ def analyze_sustainability(series: pd.DataFrame, keywords, base_keyword=None,
     return {
         "keywords": keywords, "base_keyword": base or None, "base_recent_growth": base_growth,
         "basis": f"최근 {k}구간 평균 ÷ 직전 {k}구간 평균 - 1, 상승 ≥ {GROWTH_UP:+.0%}, 하락 ≤ {GROWTH_DOWN:+.0%}",
+        "period_unit": unit,
         "campaign": {"start": str(c_start) if c_start else None, "end": str(c_end) if c_end else None},
         "rows": rows, "missing_keywords": [r["keyword"] for r in rows if r["judgement"] == "데이터 없음"],
         "notes": ["growth_vs_base_pp = 키워드 증가율 - 기준어 증가율 (0.05 = 5%p 더 빠르게 증가)",

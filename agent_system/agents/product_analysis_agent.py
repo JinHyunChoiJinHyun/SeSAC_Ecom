@@ -58,11 +58,39 @@ def _json_for_llm(result: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def build_tools(calls: list[dict]) -> list[StructuredTool]:
+def build_tools(calls: list[dict], question: str = "") -> list[StructuredTool]:
     """이번 요청 전용 Tool 목록. 호출 기록을 calls에 남깁니다."""
 
     def wrap(name, func):
         def runner(**kwargs):
+            # CART_SIGNAL_PRODUCT_ID_GUARD_V1
+            if name == "analyze_product_sales" and not (
+                kwargs.get("article_ids") or kwargs.get("product_codes")
+            ):
+                # 판매 Tool이 ID 없이 호출되면, 사용자의 검색 조건으로 상품을 먼저 찾습니다.
+                import re
+                # LLM이 만든 판매 조회 조건이 아니라 원래 사용자 질문을 사용합니다.
+                terms = []
+                for word in ("여성", "남성", "니트", "셔츠", "재킷", "코트", "원피스",
+                             "바지", "스커트", "패딩", "브라운", "블랙", "화이트",
+                             "블루", "그린", "퍼플", "하프집업", "케이블"):
+                    if word in question:
+                        terms.append(word)
+                search_query = " ".join(terms) or question.strip()
+                if search_query:
+                    found, search_record = run_logged_tool(
+                        AGENT_NAME, "search_products", T.search_products,
+                        {"query": search_query, "limit": 5},
+                    )
+                    calls.append(search_record)
+                    if found.get("available"):
+                        rows = (found.get("data") or {}).get("rows") or []
+                        ids = list(dict.fromkeys(
+                            str(row["article_id"]) for row in rows
+                            if isinstance(row, dict) and row.get("article_id")
+                        ))
+                        if ids:
+                            kwargs["article_ids"] = ids
             # 공통 Tool 로그: 호출 인자·결과(성공/사용 불가/오류)·시간 (agent_system/common_tools/tool_call_log.py)
             result, record = run_logged_tool(AGENT_NAME, name, func, kwargs)
             calls.append(record)
@@ -220,7 +248,7 @@ def run(request) -> dict:
     try:
         agent = create_agent(
             model=get_product_model(request.llm_config),
-            tools=build_tools(calls),
+            tools=build_tools(calls, request.question),
             system_prompt=build_system_prompt(getattr(request, "campaign", None)),
         )
         output = agent.invoke({"messages": [HumanMessage(content=build_user_input(request))]},

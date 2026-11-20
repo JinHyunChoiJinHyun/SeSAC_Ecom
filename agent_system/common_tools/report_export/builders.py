@@ -68,13 +68,13 @@ def _answer_blocks(text: str) -> list:
     return blocks
 
 
-def _table_block(entry: dict) -> Table | None:
-    df = analysis_log.load_table(entry)
+def _table_block(entry: dict, extra: dict | None = None) -> Table | None:
+    df = analysis_log.load_table(entry, extra.get("path") if extra else None)
     if df is None or df.empty:
         return None
     columns = list(df.columns)[:TABLE_COLUMNS]
     rows = df[columns].head(TABLE_ROWS).values.tolist()
-    total = int(entry.get("table_rows") or len(df))
+    total = int((extra or entry).get("rows" if extra else "table_rows") or len(df))
     notes = []
     if total > len(rows):
         notes.append(f"전체 {total:,}행 중 앞 {len(rows)}행")
@@ -95,7 +95,14 @@ def entry_section(entry: dict, number: int, heading: str = "") -> Section:
     blocks += _answer_blocks(entry.get("answer", ""))
     table = _table_block(entry)
     if table is not None:
+        if entry.get("table_title") and entry.get("extra_tables"):
+            blocks.append(Paragraph(f"표 1. {entry['table_title']}", "muted"))
         blocks.append(table)
+    for number_, extra in enumerate(entry.get("extra_tables") or [], start=2):
+        block = _table_block(entry, extra)
+        if block is not None:
+            blocks.append(Paragraph(f"표 {number_}. {extra.get('title') or ''}".strip(), "muted"))
+            blocks.append(block)
     if entry.get("chart_path"):
         blocks.append(Image(entry["chart_path"], entry.get("chart_title") or "그래프"))
     images = [(i["path"], i.get("label") or i.get("article_id", "")) for i in entry.get("images") or [] if i.get("path")]

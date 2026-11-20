@@ -12,7 +12,7 @@ Orchestrator Tool (멘토 조언 5개 기능)
     1. Checkpointer가 thread_id로 이전 상태(messages · last_analysis · campaign · pending_approval)를 넣어 줌
     2. 기억 정리 · 12시간 자동 리셋                                        context
     3. 워크플로 명령('워크플로 취소/계속/상태')이면 규칙으로 바로 처리     manage_workflow
-       보고서 요청('보고서 만들어줘')이면 PDF·Word 2부 생성                tools/report.py
+       보고서 요청('보고서 만들어줘')이면 ⑥ Reporting Agent가 Word 초안 작성  tools/report.py
     4. 대화 판단 (LLM): chitchat / analysis / decision / workflow         manage_context + route_request
     5. decision이면 승인 요청(pending_approval) 작성                     check_approval 준비
        analysis이면 후속 질문 재작성 → 담당 Agent 선택                    route_request
@@ -52,6 +52,9 @@ def pop_turn_result(turn_id: str):
 
 def orchestrator_node(state) -> dict:
 
+    # CART_SIGNAL_PROGRESS_V1
+    from agent_system.orchestrator.tools.progress_status import emit_progress
+    emit_progress("🧭 요청 분석 및 담당 Agent 선택 중...")
     print("[Orchestrator]")
 
     messages = list(state.get("messages") or [])
@@ -96,6 +99,7 @@ def orchestrator_node(state) -> dict:
     # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
     report_kind = report.detect(question)
     if report_kind:
+        emit_progress("📄 Word 보고서 초안 작성 중...")
         made = report.handle_report_request(report_kind, [] if was_reset else state.get("analysis_log"),
                                             campaign, run)
         store_turn_result(state["turn_id"], {"turn_type": "report", "final_answer": made["reply"],
@@ -197,6 +201,9 @@ def make_agent_node(spec):
 
     def agent_node(state) -> dict:
 
+        # 등록만 된 미구현 Agent는 라우팅되지 않으므로 상태도 표시되지 않습니다.
+        from agent_system.orchestrator.tools.progress_status import emit_progress, agent_progress
+        emit_progress(agent_progress(spec.name))
         print(f"[{spec.label} Agent] {spec.name} 실행")
 
         question = state.get("standalone_question") or state.get("user_question") or ""

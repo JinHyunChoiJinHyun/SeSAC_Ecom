@@ -56,6 +56,16 @@ STATUS_COMMAND = re.compile(
 )
 
 
+# 답변에서 버튼을 가리키는 표시 (이 표시가 있는 답변에는 워크플로 버튼을 붙임, graph.run_turn)
+BUTTON_LABELS = ("[다시 시도]", "[진행 상황]", "[워크플로 취소]")
+
+
+def is_workflow_command(message: str) -> bool:
+    """'워크플로 계속/취소/상태' 명령인지 (Slack 버튼을 붙일지 판단할 때도 사용)."""
+    text = str(message or "")
+    return bool(CANCEL_COMMAND.search(text) or CONTINUE_COMMAND.search(text) or STATUS_COMMAND.search(text))
+
+
 # ---------------------------------------------------------------- 조건부 엣지
 def after_orchestrator(state) -> str:
     if state.get("turn_type") == "workflow" and base.is_active(state.get("workflow_run")):
@@ -121,7 +131,7 @@ def run_status_text(run: dict | None, campaign: dict | None = None) -> str:
         return (f"{head} — 선택 대기 중. {base.render(step.instruction, run, campaign)}\n"
                 f"(값을 말씀하시면 확정값 '{step.selects}'로 승인받은 뒤 다음 단계로 진행합니다)")
     if run.get("status") == "blocked":
-        return f"{head} — 멈춤: {run.get('blocked_reason', '')} ('워크플로 계속'으로 다시 시도, '워크플로 취소'로 종료)"
+        return f"{head} — 멈춤: {run.get('blocked_reason', '')} (아래 [다시 시도] 버튼으로 다시 시도, [워크플로 취소]로 종료)"
     return f"{head} — 진행 중"
 
 
@@ -210,7 +220,7 @@ def run_workflow_node(state) -> dict:
                 continue
             run.update(status="blocked", blocked_reason=f"{name} Agent 구현 전")
             sections.append(f"{label}\n{name} Agent가 아직 구현되지 않아 여기서 멈춥니다. "
-                            "구현 후 '워크플로 계속'이라고 하면 이 단계부터 이어서 진행합니다.")
+                            "구현 후 아래 [다시 시도] 버튼을 누르면 이 단계부터 이어서 진행합니다.")
             run = base.record_run_event(run, "blocked", step=step.no, reason="agent_not_implemented")
             break
 
@@ -233,7 +243,7 @@ def run_workflow_node(state) -> dict:
         if result.get("error"):
             run.update(status="blocked", blocked_reason=f"{step.no}단계 실패: {result['error']}")
             run["history"] = _history(run, step, "failed", str(result["error"]))
-            sections.append("이 단계에서 멈춥니다. '워크플로 계속'이라고 하면 다시 시도합니다.")
+            sections.append("이 단계에서 멈춥니다. 아래 [다시 시도] 버튼으로 다시 시도할 수 있습니다.")
             break
         results.append(result)
         last_spec, last_question = spec, base.render(step.instruction, run, campaign)
@@ -295,7 +305,7 @@ def start_run(workflow_name: str, request: str, campaign: dict | None, previous_
         return {}, f"등록되지 않은 워크플로입니다: {workflow_name}"
     if base.is_active(previous_run):
         return {}, ("이미 진행 중인 워크플로가 있습니다.\n" + run_status_text(previous_run, campaign)
-                    + "\n새로 시작하려면 먼저 '워크플로 취소'라고 말씀해 주세요.")
+                    + "\n새로 시작하려면 먼저 아래 [워크플로 취소] 버튼으로 진행 중인 워크플로를 끝내 주세요.")
     missing = [k for k in workflow.requires if not ((campaign or {}).get("values") or {}).get(k)]
     if missing:
         return {}, (f"'{workflow.title}'을(를) 시작하려면 먼저 확정값이 필요합니다: {', '.join(missing)}\n"

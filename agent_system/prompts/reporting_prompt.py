@@ -10,7 +10,8 @@ REPORTING_PROMPT = f"""
 
 [Tool 사용]
 - visualize_analysis_results(트렌드·상품 비교·타깃 그래프), generate_campaign_report(메인: 실행 계획 보고서),
-  generate_photography_brief(서브: 한 장짜리 촬영 요청서), export_report_pdf(보고서·요청서 PDF).
+  generate_photography_brief(서브: 한 장짜리 촬영 요청서), export_report_pdf(보고서·요청서 PDF),
+  generate_analysis_report(대화 중 분석을 묶은 일반 분석 보고서).
 [작성 규칙]
 - 보고서·요청서의 수치와 문구는 근거(분석 스냅샷·확정값)가 있는 것만 씁니다. content_hash·model_version이 있으면 함께 표기하십시오.
 
