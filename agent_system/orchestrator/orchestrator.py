@@ -11,10 +11,13 @@ Orchestrator Tool (멘토 조언 5개 기능)
 한 턴의 처리 (orchestrator_node)
     1. Checkpointer가 thread_id로 이전 상태(messages · last_analysis · campaign · pending_approval)를 넣어 줌
     2. 기억 정리 · 12시간 자동 리셋                                        context
-    3. 대화 판단 (LLM): chitchat / analysis / decision                    manage_context + route_request
-    4. decision이면 승인 요청(pending_approval) 작성                     check_approval 준비
+    3. 워크플로 명령('워크플로 취소/계속/상태')이면 규칙으로 바로 처리     manage_workflow
+       보고서 요청('보고서 만들어줘')이면 ⑥ Reporting Agent가 Word 초안 작성  tools/report.py
+    4. 대화 판단 (LLM): chitchat / analysis / decision / workflow         manage_context + route_request
+    5. decision이면 승인 요청(pending_approval) 작성                     check_approval 준비
        analysis이면 후속 질문 재작성 → 담당 Agent 선택                    route_request
-    5. 다음 노드는 조건부 엣지가 결정                                     manage_workflow
+       workflow이면 워크플로 run 시작 → workflow 노드                     manage_workflow (agent_system/workflows/)
+    6. 다음 노드는 조건부 엣지가 결정                                     manage_workflow
 """
 
 from threading import Lock
@@ -23,7 +26,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from agent_system.orchestrator import settings
 from agent_system.orchestrator.registry import AgentRequest, normalize_agent_result
-from agent_system.orchestrator.tools import approval, context, intent, routing
+from agent_system.common_tools.report_export import analysis_log as report_log
+from agent_system.orchestrator.tools import approval, context, intent, report, routing, workflow
 from agent_system.orchestrator.tools.conversation_state import normalize_updates, update_conversation_state
 
 # 이번 턴의 Agent 결과 전체(DataFrame 포함). 기억(checkpoint)에는 넣지 않고
@@ -48,6 +52,9 @@ def pop_turn_result(turn_id: str):
 
 def orchestrator_node(state) -> dict:
 
+    # CART_SIGNAL_PROGRESS_V1
+    from agent_system.orchestrator.tools.progress_status import emit_progress
+    emit_progress("🧭 요청 분석 및 담당 Agent 선택 중...")
     print("[Orchestrator]")
 
     messages = list(state.get("messages") or [])
@@ -56,6 +63,7 @@ def orchestrator_node(state) -> dict:
     last_analysis = state.get("last_analysis") or {}
     campaign = state.get("campaign") or {}
     pending = state.get("pending_approval") or {}
+    run = state.get("workflow_run") or {}
     now = context._now()
 
     # ── 기억 정리 · 자동 리셋 (확정값 campaign은 settings.KEEP_CAMPAIGN_ON_RESET이면 유지)
@@ -67,15 +75,47 @@ def orchestrator_node(state) -> dict:
         trim = context.remove_all(history)
         history, last_analysis = [], {}
         common["last_analysis"] = {}
+        report_log.remove_files(state.get("analysis_log") or [])
+        common["analysis_log"] = []          # 보고서 재료도 새 대화에서 다시 모음
         if not getattr(settings, "KEEP_CAMPAIGN_ON_RESET", True):
             campaign, pending = {}, {}
             common.update(campaign={}, pending_approval={})
+
+    # ── manage_workflow: 진행 중인 워크플로 명령 (규칙, LLM 없음)
+    if getattr(settings, "ENABLE_WORKFLOWS", True):
+        text, changed_run, resume = workflow.handle_command(question, run, campaign)
+        if resume:
+            return {**common, "turn_type": "workflow", "reply": "", "standalone_question": "", "route": "",
+                    "route_reason": "", "conversation_reason": "워크플로 계속", "is_followup": False,
+                    "workflow_run": changed_run, "messages": trim}
+        if text:
+            update = {**common, "turn_type": "chitchat", "reply": text, "standalone_question": "", "route": "",
+                      "route_reason": "", "conversation_reason": "워크플로 명령", "is_followup": False,
+                      "messages": trim + [AIMessage(content=text, name="orchestrator")]}
+            if changed_run is not None:
+                update["workflow_run"] = changed_run
+            return update
+
+    # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
+    report_kind = report.detect(question)
+    if report_kind:
+        emit_progress("📄 Word 보고서 초안 작성 중...")
+        made = report.handle_report_request(report_kind, [] if was_reset else state.get("analysis_log"),
+                                            campaign, run)
+        store_turn_result(state["turn_id"], {"turn_type": "report", "final_answer": made["reply"],
+                                             "attachments": made["attachments"], "report_kind": report_kind,
+                                             "report_errors": made["errors"]})
+        return {**common, "turn_type": "report", "reply": made["reply"], "standalone_question": "", "route": "",
+                "route_reason": "", "conversation_reason": f"보고서 요청 ({report_kind})", "is_followup": False,
+                "messages": trim + [AIMessage(content=made["reply"], name="orchestrator")]}
 
     # ── manage_context + route_request(1): 대화 판단 (LLM)
     try:
         result = intent.get_intent_agent(state.get("llm_config")).invoke(
             {"messages": [HumanMessage(content=context.manage_context(question, history, last_analysis,
-                                                                     campaign, pending))]},
+                                                                     campaign, pending, now=now,
+                                                                     workflow_status=workflow.run_status_text(
+                                                                         run, campaign)))]},
             config={"recursion_limit": 10},
         )
         decision = result.get("structured_response")
@@ -87,15 +127,19 @@ def orchestrator_node(state) -> dict:
         is_followup = bool(decision.is_followup)
         reason = decision.reason
         updates = normalize_updates(getattr(decision, "updates", []) or [])
+        workflow_name = str(getattr(decision, "workflow", "") or "").strip()
     except Exception as exc:
         # 대화 판단에 실패해도 요청은 원문 그대로 처리합니다.
         print(f"[대화 판단 오류] {exc!r} → 원문으로 분석 진행")
         intent_name, reply, standalone, is_followup, updates = "analysis", "", question, False, {}
+        workflow_name = ""
         reason = f"대화 판단 실패: {type(exc).__name__}"
 
     if intent_name == "decision" and not updates:
         intent_name = "chitchat" if reply else "analysis"
     if intent_name == "chitchat" and not reply:
+        intent_name = "analysis"
+    if intent_name == "workflow" and not getattr(settings, "ENABLE_WORKFLOWS", True):
         intent_name = "analysis"
 
     print(f"intent = {intent_name} / reason = {reason}")
@@ -113,14 +157,29 @@ def orchestrator_node(state) -> dict:
             }
         campaign = update_conversation_state(campaign, updates, source="user")
         text = "확정값을 저장했습니다.\n" + "\n".join(f"- {k}: {v}" for k, v in updates.items())
-        return {**base, "turn_type": "chitchat", "reply": text, "standalone_question": "", "campaign": campaign,
+        # 워크플로가 이 값을 기다리고 있었으면 다음 단계로 진행
+        turn_type = "workflow" if workflow.waiting_value_confirmed(run, campaign) else "chitchat"
+        return {**base, "turn_type": turn_type, "reply": text, "standalone_question": "", "campaign": campaign,
                 "messages": trim + [AIMessage(content=text, name="orchestrator")]}
+
+    # ── workflow: 업무 흐름 시작 (워크플로가 단계 순서를 고정)
+    if intent_name == "workflow":
+        new_run, problem = workflow.start_run(workflow_name, question, campaign, run)
+        if problem:
+            return {**base, "turn_type": "chitchat", "reply": problem, "standalone_question": "",
+                    "messages": trim + [AIMessage(content=problem, name="orchestrator")]}
+        print(f"[워크플로 시작] {workflow_name} run={new_run['run_id']}")
+        return {**base, "turn_type": "workflow", "reply": "", "standalone_question": "", "workflow_run": new_run,
+                "messages": trim}
 
     if intent_name == "chitchat":
         return {**base, "turn_type": "chitchat", "reply": reply, "standalone_question": "",
                 "messages": trim + [AIMessage(content=reply, name="orchestrator")]}
 
     # ── analysis: 후속 질문 보정 → route_request(2): 담당 Agent 선택
+    standalone, dropped = context.drop_inherited_conditions(question, standalone, is_followup, campaign)
+    if dropped:
+        print(f"[조건 검사] {dropped}")
     standalone = context.keep_previous_chart_type(standalone, question, last_analysis, is_followup)
     print(f"standalone_question = {standalone} / is_followup = {is_followup}")
     route = routing.route_request(
@@ -142,6 +201,9 @@ def make_agent_node(spec):
 
     def agent_node(state) -> dict:
 
+        # 등록만 된 미구현 Agent는 라우팅되지 않으므로 상태도 표시되지 않습니다.
+        from agent_system.orchestrator.tools.progress_status import emit_progress, agent_progress
+        emit_progress(agent_progress(spec.name))
         print(f"[{spec.label} Agent] {spec.name} 실행")
 
         question = state.get("standalone_question") or state.get("user_question") or ""
@@ -162,7 +224,11 @@ def make_agent_node(spec):
         result.update(turn_type="analysis", standalone_question=question, route=spec.name, route_label=spec.label)
         store_turn_result(state["turn_id"], result)
 
+        entry = report_log.make_entry(result, entry_id=state["turn_id"], question=question,
+                                      user_question=state.get("user_question") or question,
+                                      route=spec.name, route_label=spec.label)
         update = {
+            "analysis_log": report_log.append(state.get("analysis_log"), entry),   # 보고서 재료
             "last_analysis": context.summarize_analysis(question, result, spec),
             "messages": [AIMessage(content=context.memory_answer(result.get("final_answer", "")), name=spec.name)],
         }

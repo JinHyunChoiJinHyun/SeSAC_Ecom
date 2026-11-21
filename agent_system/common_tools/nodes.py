@@ -793,7 +793,8 @@ def data_node(
             state.get("data_retry_feedback", "") or ""
         ).strip()
 
-        agent_input = question
+        from agent_system.common_tools.sql_semantic_rules import guidance
+        agent_input = guidance(question)
 
         # 멀티턴 후속 요청: 직전 분석 SQL을 참고로 넘겨 같은 조건을 유지하게 합니다.
         previous_sql = str(
@@ -1319,14 +1320,28 @@ def sql_executor_node(
     # -------------------------------------------------
     # 필터 값 오타(예: 존재하지 않는 'Ladies')로 0행이 나오는 경우가 많아
     # WHERE에 쓰인 범주형 컬럼의 실제 값 목록을 함께 전달합니다.
+    from agent_system.common_tools.sql_semantic_rules import semantic_issue
+
+    issue = semantic_issue(
+        state.get("question", ""),
+        sql_query,
+        len(df) if df is not None else -1,
+    )
+
     needs_retry = (
-        (df is None and error and "SQL 실행 오류" in str(error))
+        bool(issue)
+        or (df is None and error and "SQL 실행 오류" in str(error))
         or (df is not None and len(df) == 0)
     )
 
     if needs_retry and retry_count < MAX_DATA_RETRY:
 
-        if df is None:
+        if issue:
+            feedback = (
+                f"이전 SQL:\n{sql_query}\n\n"
+                f"집계 단위 검증 실패: {issue}"
+            )
+        elif df is None:
             feedback = (
                 f"이전 SQL:\n{sql_query}\n\n"
                 f"실행 오류: {error}\n"

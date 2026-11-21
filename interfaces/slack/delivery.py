@@ -617,32 +617,43 @@ def split_slack_message(
 # Slack 메시지 전송
 # =========================================================
 
+
+
+# CART_SIGNAL_STRUCTURED_TABLE_V1
+def _structured_table_payload(result):
+    """Agent의 원본 DataFrame을 Slack 표로 표시. CSV 원본은 변경하지 않습니다."""
+    from interfaces.slack.table_formatter import _table_payload, MAX_TABLE_ROWS
+    import pandas as pd
+
+    frame = result.get("dataframe")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    frame = frame.head(MAX_TABLE_ROWS).copy()
+    # 열 이름은 출력 포맷터의 라벨 매핑에 전달합니다.
+    columns = [str(col) for col in frame.columns]
+    rows = [["" if pd.isna(value) else str(value) for value in row]
+            for row in frame.itertuples(index=False, name=None)]
+    if not columns or not rows:
+        return None
+    return _table_payload(columns, rows)
+
+
+
+
 def post_slack_message(
     client,
     channel_id: str,
     text: str,
     thread_ts: str | None = None,
+    dataframe_result: dict | None = None,
 ):
-    """
-    final_answer를 Slack에 전송합니다.
+    """실제 DataFrame 표를 본문 표 위치에 배치합니다."""
+    import re
 
-    긴 메시지는 여러 개로 나눠 전송합니다.
-    """
-
+    # CART_SIGNAL_TABLE_LAYOUT_V4
     responses = []
 
-    # pandas의 공백 정렬 출력은 Slack에서 흐트러지므로 표 블록으로 전달합니다.
-    # 원문에 표가 없다면 기존 텍스트 전송 동작을 유지합니다.
-    for kind, payload in split_text_and_tables(text):
-        if kind == "text":
-            for chunk in split_slack_message(payload):
-                responses.append(client.chat_postMessage(
-                    channel=channel_id, text=chunk, thread_ts=thread_ts,
-                ))
-            continue
-
-        # Slack table 블록은 메시지당 1개만 허용되므로 각각 전송합니다.
-        # API에서 표를 지원하지 않는 환경에서는 내용 손실 없이 텍스트로 대체합니다.
+    def send_table(payload):
         try:
             responses.append(client.chat_postMessage(
                 channel=channel_id,
@@ -651,13 +662,182 @@ def post_slack_message(
                 thread_ts=thread_ts,
             ))
         except Exception as exc:
-            LOGGER.warning("Slack 표 블록 전송 실패, 텍스트로 대체 (%s)", type(exc).__name__)
-            plain = "\n".join(" | ".join(c["text"] for c in row) for row in payload["rows"])
-            for chunk in split_slack_message("```\n" + plain + "\n```"):
+            LOGGER.warning(
+                "Slack 표 전송 실패: %s", type(exc).__name__
+            )
+            plain = "\n".join(
+                " | ".join(cell["text"] for cell in row)
+                for row in payload["rows"]
+            )
+            send_plain("```\n" + plain + "\n```")
+
+    def send_plain(value):
+        for chunk in split_slack_message(value):
+            if chunk.strip():
                 responses.append(client.chat_postMessage(
-                    channel=channel_id, text=chunk, thread_ts=thread_ts,
+                    channel=channel_id,
+                    text=chunk,
+                    thread_ts=thread_ts,
                 ))
 
+    def send_text(value):
+        if not value.strip():
+            return
+        for kind, payload in split_text_and_tables(value):
+            if kind == "table":
+                send_table(payload)
+            else:
+                send_plain(payload)
+
+    table = None
+
+    if dataframe_result is not None:
+        try:
+            table = _structured_table_payload(dataframe_result)
+        except Exception as exc:
+            LOGGER.warning(
+                "DataFrame 표 생성 실패: %s",
+                type(exc).__name__,
+            )
+
+    if table is None:
+        send_text(text)
+        return responses
+
+    is_product = bool(
+        dataframe_result.get("product_result")
+    )
+
+    if not is_product:
+        # 상품 분석 이외의 기존 메시지 처리는 유지
+        send_text(text)
+        send_table(table)
+        return responses
+
+    # 상품 ID로 만들어낸 H&M 이미지 URL만 제거
+    image_url = re.compile(
+        r"https?://www2\.hm\.com/content/dam/[^\s)]+"
+    )
+    markdown_image = re.compile(
+        r"!\[[^\]]*\]\(" + image_url.pattern + r"\)"
+    )
+
+    text = markdown_image.sub("", text)
+
+    lines = text.splitlines()
+    cleaned = []
+
+    for line in lines:
+        if image_url.search(line):
+            continue
+        if line.strip() in ("- ![이미지]", "![이미지]"):
+            continue
+        cleaned.append(line)
+
+    lines = cleaned
+
+    # Markdown 파이프 표 판별
+    def is_pipe_row(line):
+        value = line.strip()
+        return (
+            value.startswith("|")
+            and value.endswith("|")
+            and value.count("|") >= 3
+        )
+
+    def is_separator(line):
+        if not is_pipe_row(line):
+            return False
+        cells = line.strip().strip("|").split("|")
+        return all(
+            re.fullmatch(r"\s*:?-{3,}:?\s*", cell)
+            for cell in cells
+        )
+
+    # Markdown 표를 실제 Slack 표로 교체
+    found = None
+
+    for i in range(len(lines) - 2):
+        if not is_pipe_row(lines[i]):
+            continue
+        if not is_separator(lines[i + 1]):
+            continue
+
+        j = i + 2
+        while j < len(lines) and is_pipe_row(lines[j]):
+            j += 1
+
+        if j > i + 2:
+            found = (i, j)
+            break
+
+    if found:
+        first, last = found
+
+        prefix = "\n".join(lines[:first]).strip()
+        suffix = "\n".join(lines[last:]).strip()
+
+        send_text(prefix)
+        send_table(table)
+        send_text(suffix)
+
+        return responses
+
+    # 상품별 단순 나열도 표로 대체
+    field_pattern = re.compile(
+        r"^\s*[-*]\s*"
+        r"(?:\*\*)?"
+        r"(?:상품\s*ID|상품명|색상)"
+        r"(?:\*\*)?\s*[:：]"
+    )
+
+    first = next(
+        (
+            i for i, line in enumerate(lines)
+            if field_pattern.match(line)
+        ),
+        None,
+    )
+
+    if first is not None:
+        j = first
+
+        while j < len(lines):
+            line = lines[j]
+            if not line.strip() or field_pattern.match(line):
+                j += 1
+            else:
+                break
+
+        prefix = "\n".join(lines[:first]).strip()
+        suffix = "\n".join(lines[j:]).strip()
+
+        send_text(prefix)
+        send_table(table)
+        send_text(suffix)
+
+        return responses
+
+    # 중복 가능한 표가 없으면 출처·CSV 안내 전에 삽입
+    separator = re.search(
+        r"(?m)^---\s*$|"
+        r"^근거 출처[·ㆍ]데이터 상태|"
+        r"^상세 데이터:",
+        "\n".join(lines),
+    )
+
+    cleaned_text = "\n".join(lines)
+
+    if separator:
+        prefix = cleaned_text[:separator.start()].strip()
+        suffix = cleaned_text[separator.start():].strip()
+
+        send_text(prefix)
+        send_table(table)
+        send_text(suffix)
+    else:
+        send_text(cleaned_text)
+        send_table(table)
 
     return responses
 
@@ -740,12 +920,18 @@ def deliver_to_slack(
     # 결과 CSV (공통 Tool: output_tools.prepare_result_csv)
     # =====================================================
 
-    csv_status = prepare_result_csv(result)
+    # 그래프만 요청한 후속 질문(delivery_mode="chart_only")은 직전과 같은 데이터라 CSV를 다시 보내지 않습니다.
+    if result.get("delivery_mode") == "chart_only":
+        csv_status = {"result_type": "chart_only", "path": None, "error": "", "skipped_reason": ""}
+    else:
+        csv_status = prepare_result_csv(result)
     result_type = csv_status["result_type"]
     csv_path = csv_status["path"]
     csv_error = csv_status["error"]
     csv_skipped_reason = csv_status["skipped_reason"]
     attachment_errors = []
+    chart_only = result.get("delivery_mode") == "chart_only"
+    full_answer = str(result.get("final_answer") or "")
 
     if csv_path is not None:
         print("[Slack Delivery CSV]")
@@ -845,6 +1031,19 @@ def deliver_to_slack(
 
 
     # =====================================================
+    # 추가 첨부 (보고서 PDF·Word 등: result["attachments"])
+    # 프로젝트 안의 실제 파일만 올립니다 (resolve_project_file)
+    # =====================================================
+
+    for raw_attachment in result.get("attachments") or []:
+        try:
+            file_paths.append(resolve_project_file(raw_attachment, base_dir))
+        except Exception as exc:
+            print(f"[Slack Delivery 첨부 제외] {raw_attachment}: {exc}")
+            attachment_errors.append({"type": "attachment", "error": repr(exc)})
+
+
+    # =====================================================
     # 중복 첨부파일 제거
     # =====================================================
 
@@ -906,6 +1105,17 @@ def deliver_to_slack(
     # 최종 Slack 메시지 생성
     # =====================================================
 
+    # 그래프 파일을 확인하지 못했다면 요약 대신 전체 분석 내용을 전달
+    if chart_only and any(
+        error.get("type") == "visualization"
+        for error in attachment_errors
+    ):
+        result = {
+            **result,
+            "final_answer": full_answer,
+            "delivery_mode": "text_fallback",
+        }
+
     slack_message = (
         build_slack_message(
             result=
@@ -917,6 +1127,47 @@ def deliver_to_slack(
         )
     )
 
+
+
+    # CART_SIGNAL_SEARCH_ONLY_CLEAN_V1
+    # 상품 검색만 실행한 경우 LLM의 중복 목록 대신 원본 DataFrame 표 사용
+    product_info = result.get("product_result")
+    frame = result.get("dataframe")
+
+    if (
+        isinstance(product_info, dict)
+        and hasattr(frame, "empty")
+        and not frame.empty
+        and result.get("delivery_mode") != "chart_only"
+    ):
+        tool_records = product_info.get("tools") or []
+        used_tools = {
+            item.get("name")
+            for item in tool_records
+            if isinstance(item, dict)
+        }
+
+        search_succeeded = any(
+            isinstance(item, dict)
+            and item.get("name") == "search_products"
+            and item.get("available") is True
+            for item in tool_records
+        )
+
+        if used_tools == {"search_products"} and search_succeeded:
+            count = len(frame)
+
+            slack_message = (
+                f"H&M 상품 후보 {count}개를 조회했습니다.\n\n"
+                "---\n"
+                "근거 출처·데이터 상태\n"
+                "- H&M 자사 상품 데이터 (실제 조회 결과)\n\n"
+                "상세 데이터: 첨부 CSV에서 확인할 수 있습니다."
+            )
+            print(
+                "[Slack Delivery] 상품 검색 중복 본문 제거, "
+                "DataFrame 표 사용"
+            )
 
     # =====================================================
     # 최종 답변 전송
@@ -934,6 +1185,9 @@ def deliver_to_slack(
 
                 text=
                     slack_message,
+
+                dataframe_result=
+                    result if not chart_only else None,
 
                 thread_ts=
                     thread_ts,
@@ -1092,6 +1346,31 @@ def deliver_to_slack(
                 }
             )
 
+
+    # 그래프 업로드에 실패했으면 전체 분석 본문을 추가로 전달
+    chart_upload_failed = chart_only and any(
+        not item.get("success")
+        and str(item.get("file_path", "")).lower().endswith(".png")
+        for item in upload_results
+    )
+
+    if chart_upload_failed and full_answer.strip():
+        try:
+            post_slack_message(
+                client=client,
+                channel_id=channel_id,
+                text=full_answer,
+                thread_ts=thread_ts,
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "그래프 업로드 실패 후 본문 재전송 실패 (%s)",
+                type(exc).__name__,
+            )
+            attachment_errors.append({
+                "type": "text_fallback",
+                "error": repr(exc),
+            })
 
     # =====================================================
     # 실패 항목 확인

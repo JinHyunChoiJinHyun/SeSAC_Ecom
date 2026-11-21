@@ -416,6 +416,15 @@ def run_slack_question(question, graph_runner):
         print("[Slack Router] 데이터 출처 일시 사용 불가 안내")
         return result
 
+    if result.get("turn_type") == "report":
+        print("[Slack Router] 보고서 전달 (PDF·Word 첨부)")
+        return result
+
+    if result.get("turn_type") == "workflow":
+        # 워크플로는 여러 단계 결과를 한 번에 전달 (그래프는 단계 결과에 있을 때만 첨부)
+        print("[Slack Router] 워크플로 단계 결과")
+        return result
+
     analysed_question = result.get("standalone_question") or question
     if _has_visualization_intent(analysed_question):
         print("[Slack Router] 시각화 요청: 차트 생성 확인")
@@ -500,6 +509,24 @@ class SlackBridge:
         # 종료가 시작되면 새로운 요청을 접수하지 않습니다.
         self.closing = False
 
+
+    def receive_report_file(self, event, body, client):
+        """수정된 Word 첨부는 일반 텍스트 질문 대신 PDF 변환 큐로 보냅니다."""
+        from interfaces.slack.report_finalize import _report_file, process_uploaded_docx
+
+        file_info = _report_file(event)
+        if file_info is None:
+            return False
+        event_key = (body.get("team_id"), event.get("channel"),
+                     body.get("event_id") or event.get("ts"))
+        with self.event_lock:
+            if event_key in self.seen:
+                return True
+            self.seen.append(event_key)
+            if self.closing:
+                return True
+            self.executor.submit(process_uploaded_docx, client, event.copy(), file_info)
+        return True
 
     # =====================================================
     # DM 수신
@@ -604,6 +631,77 @@ class SlackBridge:
             )
         )
 
+
+    # =====================================================
+    # 버튼 클릭 수신 (승인·반려·워크플로 계속 등, interfaces/slack/actions.py)
+    # =====================================================
+
+    def receive_action(self, body, client):
+        """버튼 클릭 → 요청한 사용자인지 확인 → 버튼을 선택 결과로 바꾸고 → 다른 요청처럼 순서대로 처리."""
+        from agent_system.orchestrator.tools.memory import build_slack_thread_id
+        from interfaces.slack.actions import parse_action, resolved_blocks
+
+        parsed = parse_action(body)
+        if parsed is None:
+            return None
+        event = parsed["event"]
+        # CART_SIGNAL_BUTTON_ID_DIAGNOSTIC_V1
+        LOGGER.info(
+            "[버튼 권한 진단] clicked_user=%s channel=%s "
+            "clicked_thread=%s original_thread=%s "
+            "thread_ts=%s message_ts=%s",
+            event.get("user"),
+            event.get("channel"),
+            build_slack_thread_id(event),
+            parsed["thread_id"],
+            event.get("thread_ts"),
+            parsed.get("message_ts"),
+        )
+        if build_slack_thread_id(event) != parsed["thread_id"]:
+            # 다른 사용자가 누른 버튼: 처리하지 않고 누른 사람에게만 안내
+            try:
+                client.chat_postEphemeral(channel=event["channel"], user=event["user"],
+                                          thread_ts=event.get("thread_ts"),
+                                          text="이 버튼은 요청한 사용자만 누를 수 있습니다.")
+            except Exception as exc:
+                LOGGER.error("버튼 안내 전송 실패 (%s)", type(exc).__name__)
+            return None
+        try:
+            client.chat_update(channel=event["channel"], ts=parsed["message_ts"],
+                               text=f"선택: {parsed['label']}",
+                               blocks=resolved_blocks(parsed["blocks"], parsed["label"], event["user"]))
+        except Exception as exc:  # 버튼을 못 지워도 처리는 계속 (같은 버튼 두 번째 클릭은 아래에서 차단)
+            LOGGER.error("버튼 메시지 수정 실패 (%s)", type(exc).__name__)
+        event = {**event, "cart_signal_action": parsed["action"]}
+        return self._enqueue(
+            event=event,
+            body={"team_id": parsed["team_id"], "event_id": f"action:{parsed['message_ts']}"},
+            client=client,
+            question=f"[버튼] {parsed['label']}",
+        )
+
+    # =====================================================
+    # 사용자 확인 버튼 게시
+    # =====================================================
+
+    def _post_actions(self, client, event, result):
+        """결과가 사용자 확인(승인·워크플로)을 기다리면 버튼 메시지를 붙입니다."""
+        from interfaces.slack.actions import build_action_blocks
+
+        try:
+            blocks = build_action_blocks(result.get("actions"), result.get("thread_id", ""))
+        except Exception as exc:
+            LOGGER.error("버튼 만들기 실패 (%s)", type(exc).__name__)
+            return False
+        if not blocks:
+            return False
+        try:
+            client.chat_postMessage(channel=event["channel"], thread_ts=event.get("thread_ts"),
+                                    text="버튼으로 선택해 주세요.", blocks=blocks)
+            return True
+        except Exception as exc:  # 버튼을 못 붙여도 글자로 답할 수 있음
+            LOGGER.error("버튼 메시지 전송 실패 (%s)", type(exc).__name__)
+            return False
 
     # =====================================================
     # 요청 Queue 등록
@@ -813,14 +911,17 @@ class SlackBridge:
         # 처리 시작 상태와 경과 시간 기록
         # =================================================
         started = time.perf_counter()
-        self._set_status(client, event, status_ts, STATUS_RUNNING)
+        self._set_status(client, event, status_ts, "🧭 요청 분석 및 담당 Agent 선택 중...")
 
         # =================================================
         # Multi Agent 실행
         # =================================================
         try:
             # 대화 기억(멀티턴)을 위해 Slack 이벤트도 함께 넘깁니다.
-            result = self.runner(question, event)
+            # CART_SIGNAL_PROGRESS_V1: 같은 작업 스레드에서 Agent 단계별 Slack 상태 갱신
+            from agent_system.orchestrator.tools.progress_status import progress_scope
+            with progress_scope(lambda text: self._set_status(client, event, status_ts, text)):
+                result = self.runner(question, event)
             # 예외 없이 오류 State가 반환된 경우도 실패로 처리합니다.
             # 단, 출처 일시 사용 불가처럼 사용자에게 안내할 오류는 답변으로 전달합니다.
             if result.get("error") and not _is_user_facing_error(result):
@@ -962,6 +1063,23 @@ class SlackBridge:
 
 
             return
+
+
+        # 승인 대기·워크플로 멈춤이면 확인 버튼을 붙입니다 (글자로 '승인'을 쓰지 않아도 됨)
+        self._post_actions(client, event, result)
+        # CART_SIGNAL_TOPIC_BUTTONS_V1
+        if isinstance(result, dict) and result.get("topic_confirmation"):
+            from interfaces.slack.topic_confirmation_buttons import build_blocks
+            from agent_system.orchestrator.tools.memory import build_slack_thread_id
+            try:
+                blocks = build_blocks(build_slack_thread_id(event))
+                if blocks:
+                    client.chat_postMessage(channel=event["channel"],
+                                            thread_ts=event.get("thread_ts"),
+                                            text="새 분석 세션으로 분리할까요?",
+                                            blocks=blocks)
+            except Exception as exc:
+                LOGGER.error("주제 전환 버튼 게시 실패 (%s)", type(exc).__name__)
 
 
         # =================================================
@@ -1199,14 +1317,58 @@ def main():
         # 업무 요청은 이전 대화를 반영해 다시 쓴 질문으로 특화 Agent(현재 General Analysis)에 넘깁니다.
         from env.model_settings import get_request_config
 
-        thread_id = build_slack_thread_id(event)
-        return run_slack_question(
+        # CART_SIGNAL_ANALYSIS_SESSION_ROUTING_V1
+        from agent_system.orchestrator.tools.analysis_sessions import current, parse_start_command, start, switch_allowed
+        base_thread_id = build_slack_thread_id(event)
+        thread_id = current(base_thread_id)
+        from agent_system.orchestrator.tools.analysis_topic_guard import before_turn, remember, reset, abandon_pending
+        # CART_SIGNAL_TOPIC_GUARD_V1
+        next_question = parse_start_command(question)
+        if next_question is not None:
+            allowed, reason = switch_allowed(conversation_graph, thread_id)
+            if not allowed:
+                return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+            thread_id = start(base_thread_id)
+            reset(base_thread_id)
+            if not next_question:
+                return {
+                    "turn_type": "chitchat",
+                    "final_answer": "새 분석 세션을 시작했습니다. 이전 분석·보고서는 보존됩니다. 새 주제의 분석을 요청해 주세요.",
+                    "completed_steps": [],
+                }
+            question = next_question
+        else:
+            action, proposed_question = before_turn(base_thread_id, question)
+            if action == "ask":
+                allowed, reason = switch_allowed(conversation_graph, thread_id)
+                if not allowed:
+                    abandon_pending(base_thread_id)
+                    return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+                return {
+                    "turn_type": "chitchat",
+                    "topic_confirmation": True,
+                    "final_answer": "분석 주제가 바뀐 것 같아요. 새 분석 세션으로 분리할까요?\n"
+                                    "아래 버튼으로 선택해 주세요\n"
+                                    f"대기 중인 요청: {proposed_question}",
+                    "completed_steps": [],
+                }
+            if action == "switch":
+                allowed, reason = switch_allowed(conversation_graph, thread_id)
+                if not allowed:
+                    return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+                thread_id = start(base_thread_id)
+                reset(base_thread_id)
+                question = proposed_question
+            elif action == "stay":
+                question = proposed_question
+        result = run_slack_question(
             question=question,
             graph_runner=lambda q: run_conversation_turn(
                 question=q,
                 thread_id=thread_id,
                 llm_config=get_request_config().public(),
                 graph=conversation_graph,
+                action=event.get("cart_signal_action"),   # Slack 버튼이면 버튼 값 그대로 처리
                 metadata={
                     "source": "slack",
                     "slack_channel": event.get("channel", ""),
@@ -1214,6 +1376,9 @@ def main():
                 },
             ),
         )
+        if isinstance(result, dict) and result.get("turn_type") == "analysis":
+            remember(base_thread_id, question)
+        return result
 
 
     # =====================================================
@@ -1262,6 +1427,9 @@ def main():
             client,
         ):
 
+            if bridge.receive_report_file(event, body, client):
+                return
+
             bridge.receive(
                 event=
                     event,
@@ -1277,6 +1445,62 @@ def main():
         # =================================================
         # Channel Mention Event
         # =================================================
+
+        # CART_SIGNAL_FILE_SHARED_HANDLER_V1
+        @app.event("file_shared")
+        def handle_file_shared(event, body, client):
+            """Slack 파일 공유 이벤트를 기존 DOCX 변환 처리에 전달합니다."""
+            import logging
+
+            logger = logging.getLogger("cart_signal.file_shared")
+            file_id = event.get("file_id")
+            if not file_id:
+                logger.warning("file_shared 이벤트에 file_id가 없습니다.")
+                return
+
+            try:
+                response = client.files_info(file=file_id)
+                info = response.get("file") or {}
+                if not info:
+                    logger.warning("파일 정보를 조회하지 못했습니다: %s", file_id)
+                    return
+
+                channel = event.get("channel_id") or event.get("channel")
+                if not channel:
+                    shares = info.get("shares") or {}
+                    for entries in shares.values():
+                        for channel_id, records in entries.items():
+                            if records:
+                                channel = channel_id
+                                break
+                        if channel:
+                            break
+
+                if not channel:
+                    logger.warning("파일 공유 채널을 확인하지 못했습니다: %s", file_id)
+                    return
+
+                adapted_event = {
+                    "type": "message",
+                    "subtype": "file_share",
+                    "channel": channel,
+                    "user": event.get("user_id") or info.get("user"),
+                    "ts": event.get("event_ts") or event.get("ts"),
+                    "files": [info],
+                }
+
+                accepted = bridge.receive_report_file(
+                    adapted_event,
+                    body,
+                    client,
+                )
+                logger.info(
+                    "Word 파일 처리 연결: file_id=%s, accepted=%s",
+                    file_id,
+                    accepted,
+                )
+            except Exception:
+                logger.exception("file_shared 처리 중 오류가 발생했습니다.")
 
         @app.event(
             "app_mention"
@@ -1303,6 +1527,32 @@ def main():
                     context.get(
                         "bot_user_id"
                     ),
+            )
+
+
+        # =================================================
+        # 버튼 클릭 (승인·반려·워크플로 계속 등)
+        # Slack 앱 설정에서 Interactivity & Shortcuts를 켜야 합니다.
+        # =================================================
+
+        @app.action(re.compile("^carttopic_"))
+        def handle_topic_button(ack, body, client):
+            ack()
+            from interfaces.slack.topic_confirmation_buttons import handle_click
+            handle_click(bridge, body, client)
+
+        @app.action(
+            re.compile("^cartsignal_")
+        )
+        def handle_button(
+            ack,
+            body,
+            client,
+        ):
+            ack()   # 3초 안에 응답해야 Slack이 오류를 표시하지 않음
+            bridge.receive_action(
+                body=body,
+                client=client,
             )
 
 

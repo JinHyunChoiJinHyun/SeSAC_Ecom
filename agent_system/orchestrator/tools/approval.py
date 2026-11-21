@@ -20,6 +20,10 @@
     다른 질문 ("1위가 뭐였지?")      평소처럼 답한 뒤, 승인 질문을 다시 붙이고 계속 대기
                                     (pending_approval이 남아 있어 끝에서 다시 check_approval로 멈춤)
 
+Slack에서는 승인 질문 아래에 [승인] [반려] [승인 요청 취소] 버튼이 붙습니다 (interfaces/slack/actions.py).
+버튼은 위 글자 판단을 거치지 않고 graph.run_turn(action=...)에서 승인 요청 ID를 확인한 뒤 바로 처리합니다.
+이 파일은 안내 문구만 버튼 기준으로 바꿨고, 승인 판단 규칙은 그대로입니다 (2026-11-19 사용자 결정).
+
 approval_request 형식 (특화 Agent가 결과에 넣을 때)
     {"title": "카테고리 확정", "question": "...저장할까요?", "updates": {"category": "니트"}}
 """
@@ -71,14 +75,14 @@ def build_approval_request(updates: dict, title: str = "확정값 저장", sourc
     lines = describe_updates(updates)
     return {
         "title": title,
-        "question": f"[승인 요청] 아래 내용을 기획전 확정값으로 저장할까요?\n{lines}\n→ '승인' / '반려' / 수정 내용(예: \"카디건으로 수정\")",
+        "question": f"[승인 요청] 아래 내용을 기획전 확정값으로 저장할까요?\n{lines}\n→ 아래 [승인] / [반려] 버튼을 눌러 주세요. 값을 바꾸려면 채팅으로 알려 주세요 (예: \"카디건으로 수정\")",
         "updates": dict(updates),
         "source": source,
     }
 
 
 def approval_prompt(request: dict) -> str:
-    return str((request or {}).get("question") or "[승인 요청] 진행할까요? ('승인' / '반려')")
+    return str((request or {}).get("question") or "[승인 요청] 진행할까요? 아래 [승인] / [반려] 버튼을 눌러 주세요.")
 
 
 def check_approval_node(state) -> dict:

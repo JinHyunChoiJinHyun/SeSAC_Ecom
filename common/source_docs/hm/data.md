@@ -92,15 +92,21 @@ Kaggle H&M Personalized Fashion Recommendations. 기간 2018-09-20 ~ 2020-09-22.
 - postal_code로 실제 지역(서울·부산 등)을 추정하지 마십시오.
 
 ----------------------------------------
-4. hm.article_images  (105,100행)
+4. hm.article_image_paths  (105,100행, db_setup.py가 이미지 폴더로 생성 — 없으면 이 테이블도 없음)
 ----------------------------------------
-한 행: 상품 이미지 경로 1개 (상품당 최대 1개)
-- article_id, image_location(파일 경로), storage_kind, source_archive
+한 행: 상품 이미지 파일 경로 1개 (상품당 최대 1개). 이미지 자체는 DB에 없습니다.
+- article_id   VARCHAR  PK, 이미지 파일명의 상품 ID → hm.articles.article_id
+- image_path   VARCHAR  이미지 폴더 기준 상대 경로 (예: '010/0108775015.jpg')
+- file_bytes   BIGINT   파일 크기(바이트)
+
+주의
+- 이미지가 없는 상품이 442개 있습니다. "이미지 있는 상품" 조건은 이 테이블과 JOIN(또는 EXISTS)으로 거십시오.
+- 이 테이블로 알 수 있는 것은 이미지 유무뿐입니다. 이미지 내용(색·모양)은 알 수 없습니다.
 
 관계
 - hm.transactions.customer_id → hm.customers.customer_id (N:1)
 - hm.transactions.article_id  → hm.articles.article_id   (N:1)
-- hm.article_images.article_id → hm.articles.article_id  (0..1:1)
+- hm.article_image_paths.article_id → hm.articles.article_id  (0..1:1)
 
 H&M 대용량·JOIN 규칙
 - hm.transactions(약 3,179만 행)의 원본 행을 그대로 반환하지 마십시오.
