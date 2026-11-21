@@ -61,27 +61,31 @@ def local_addresses():
 # =========================================================
 
 def load_admin_env(project):
-    """프로젝트의 env/.env에서 관리자 아이디와 비밀번호 설정만 읽습니다."""
-    path = project / "env" / ".env"
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8-sig").splitlines():
-        match = re.match(r"^\s*(?:export\s+)?(ECOM_ADMIN_USER|ECOM_ADMIN_PASSWORD)\s*=\s*(.*)$", line)
-        if not match:
+    """프로젝트의 .env에서 관리자 아이디와 비밀번호 설정만 읽습니다.
+
+    .env는 프로젝트 루트(WORKS 바로 아래)로 옮겼습니다. 루트에 없으면 예전 위치(env/.env)를 읽습니다.
+    """
+    # 기존 환경변수 > 루트 .env > env/.env 순서
+    for path in (project / ".env", project / "env" / ".env"):
+        if not path.is_file():
             continue
-        key, value = match.groups()
-        value = value.strip()
-        # 따옴표로 감싼 값과 값 뒤에 붙은 주석을 구분합니다.
-        if value.startswith(("'", '"')):
-            quote = value[0]
-            end = value.find(quote, 1)
-            if end < 0 or (value[end + 1:].strip() and not value[end + 1:].strip().startswith("#")):
-                raise ValueError(".env 관리자 설정의 따옴표를 확인해 주세요.")
-            value = value[1:end]
-        else:
-            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-        # 이미 지정된 환경변수를 .env 파일의 값으로 덮어쓰지 않습니다.
-        os.environ.setdefault(key, value)
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            match = re.match(r"^\s*(?:export\s+)?(ECOM_ADMIN_USER|ECOM_ADMIN_PASSWORD)\s*=\s*(.*)$", line)
+            if not match:
+                continue
+            key, value = match.groups()
+            value = value.strip()
+            # 따옴표로 감싼 값과 값 뒤에 붙은 주석을 구분합니다.
+            if value.startswith(("'", '"')):
+                quote = value[0]
+                end = value.find(quote, 1)
+                if end < 0 or (value[end + 1:].strip() and not value[end + 1:].strip().startswith("#")):
+                    raise ValueError(".env 관리자 설정의 따옴표를 확인해 주세요.")
+                value = value[1:end]
+            else:
+                value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+            # 이미 지정된 환경변수를 .env 파일의 값으로 덮어쓰지 않습니다.
+            os.environ.setdefault(key, value)
 
 
 # =========================================================

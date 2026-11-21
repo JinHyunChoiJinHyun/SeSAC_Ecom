@@ -317,6 +317,20 @@ def execute_sql_to_dataframe(sql: str):
     if not is_valid:
         return (None, message)
 
+    # H&M 단일 출처 SQL은 명시적으로 설정한 경우 백엔드 API 우선 조회
+    # 다른 출처 또는 출처 간 JOIN은 기존 로컬 DuckDB 경로 유지
+    from agent_system.common_tools.execution_tools import hm_api
+
+    if hm_api.enabled() and _uses_source(sql, "hm") and not any(
+        _uses_source(sql, key) for key in source_keys(available_only=False) if key != "hm"
+    ):
+        frame, api_error, use_local = hm_api.query(sql)
+        if api_error is None:
+            return frame, None
+        if not use_local:
+            return None, f"H&M 백엔드 조회 오류: {api_error}"
+        print(f"[H&M API] {api_error} → 로컬 DuckDB 대체 조회")
+
     try:
         con, skipped = open_duckdb_connection()
     except Exception as e:

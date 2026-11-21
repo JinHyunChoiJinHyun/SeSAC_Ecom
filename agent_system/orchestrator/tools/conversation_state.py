@@ -25,7 +25,15 @@ CAMPAIGN_KEYS = {
     "target": "타깃",
     "schedule": "기획전 일정",
     "theme": "기획전 주제",
+    "subtype": "주력 세부 유형",
+    "colors": "기획전 색상",
     "note": "메모",
+    # 워크플로 마케터 선택 단계에서 쓰는 확정값 (agent_system/workflows/)
+    "selling_points": "공통 소구점·가격·혜택",
+    "page": "페이지 틀",
+    "report": "실행 계획 보고서 확인",
+    "page_url": "기획전 페이지 URL",
+    "first_screen": "첫 화면 상품",
 }
 MAX_LOG = 30
 

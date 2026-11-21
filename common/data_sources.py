@@ -132,6 +132,7 @@ DATA_SOURCES: list[DataSource] = [
             "purchase_count": "구매 건수", "buyer_count": "구매 고객 수",
             "avg_price_index": "평균 가격지수",
             "age": "나이", "age_band": "연령대", "club_member_status": "회원 상태",
+            "image_path": "이미지 경로", "image_available": "이미지", "file_bytes": "파일 크기",
         },
         decimal_metrics=("avg_price_index",),
         column_priority={

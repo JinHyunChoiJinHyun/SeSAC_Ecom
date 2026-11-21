@@ -59,7 +59,12 @@ def environment_value(name, project=PROJECT_ROOT):
     """기존 환경변수를 우선하고 지정 프로젝트의 .env를 읽습니다. 값은 공개하지 않습니다."""
     if name in os.environ:
         return os.environ[name]
-    return dotenv_values(Path(project) / "env" / ".env").get(name) or ""
+    # .env는 프로젝트 루트(WORKS 바로 아래)로 옮겼습니다. 예전 위치(env/.env)도 남아 있으면 읽습니다.
+    for path in (Path(project) / ".env", Path(project) / "env" / ".env"):
+        value = dotenv_values(path).get(name) if path.is_file() else None
+        if value:
+            return value
+    return ""
 
 
 def require_api_key(config, project=PROJECT_ROOT):
