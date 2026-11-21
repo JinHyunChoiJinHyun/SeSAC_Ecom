@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 import pandas as pd
-from market_category_recommendation import summarize_naver, musinsa_ranking_evidence, recommend_with_evidence
-from run_market_category_compare import KEYWORD_CATEGORY, CATEGORY_ALIASES, combine_rows, save_charts
-from run_market_category_compare_v2 import save_recent_chart
+from shared_analysis.market.category_recommendation import summarize_naver, musinsa_ranking_evidence, recommend_with_evidence
+from shared_analysis.market.category_comparison import KEYWORD_CATEGORY, CATEGORY_ALIASES, combine_rows, save_charts
+from shared_analysis.market.category_comparison_v2 import save_recent_chart
 
 
 def parse_scope(request: str) -> dict:
@@ -66,7 +66,7 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3) 
         import shutil
         # 파일 이름만 사용해 경로 이탈을 막고, 실행별 결과가 섞이지 않도록 구분합니다.
         run_key = hashlib.sha256(str(output.resolve()).encode('utf-8')).hexdigest()[:16]
-        allowed_root = (Path(__file__).resolve().parent / 'visualization_output').resolve()
+        allowed_root = (Path(__file__).resolve().parents[4] / 'visualization_output').resolve()
         target_dir = (allowed_root / run_key).resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = (target_dir / chart.name).resolve()

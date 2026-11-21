@@ -16,7 +16,7 @@ def purchase_candidates(articles: pd.DataFrame, purchases: pd.DataFrame, categor
         raise ValueError(f"상품 컬럼 누락: {sorted(required - set(articles.columns))}")
     products = articles.loc[category_masks(articles)[category] & articles["index_group_name"].isin(["Ladieswear", "Divided"])].copy()
     if subtype:
-        from category_subtype_selection import subtype_mask
+        from agent_system.orchestrator.tools.category_planning.subtype_selection import subtype_mask
         products = products.loc[subtype_mask(products, subtype)].copy()
     if colors:
         products = products.loc[products['colour_group_name'].isin(colors)].copy()

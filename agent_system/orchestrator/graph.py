@@ -304,9 +304,9 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     result = _run_turn(question, thread_id, llm_config, graph, metadata, action)
     # 대분류 확정 턴은 워크플로 실행이 아닌 대화 응답으로 종료하므로,
     # 저장된 분석 증거에서 표·그래프를 이 시점에 별도 첨부한다.
-    from category_confirmation_report import enrich_confirmation_result
+    from agent_system.orchestrator.tools.category_planning.confirmation_report import enrich_confirmation_result
     if result.get("turn_type") == "chitchat":
-        from category_review_selection import parse_category_confirmation
+        from agent_system.orchestrator.tools.category_planning.review_selection import parse_category_confirmation
         if (action or {}).get("type") == "category_confirm":
             snapshot = _snapshot(graph, thread_id)
             run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}

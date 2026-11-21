@@ -40,7 +40,7 @@ def verify_requested_updates(run, updates):
 # CART_SIGNAL_NATURAL_CATEGORY_APPROVAL_V1
 def selected_category(text):
     """명시적인 카테고리 확정 요청만 인식합니다."""
-    from category_review_selection import CATEGORIES
+    from agent_system.orchestrator.tools.category_planning.review_selection import CATEGORIES
 
     s = str(text or "").strip().rstrip(".!?~ ")
 

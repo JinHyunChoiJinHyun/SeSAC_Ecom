@@ -109,7 +109,7 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
 def load_ranked_evidence(category: str, subtype: str) -> dict:
     """현재 프로젝트의 카테고리별 CSV를 직접 읽는다(원본 수정 없음)."""
     from agent_system.common_tools.external_data import musinsa_sample
-    from run_market_category_compare import normalize_category
+    from shared_analysis.market.category_comparison import normalize_category
     sets = [(key, value) for key, value in musinsa_sample.file_sets().items()
             if normalize_category(key) == category]
     if len(sets) != 1:

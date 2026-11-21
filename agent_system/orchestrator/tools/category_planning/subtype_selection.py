@@ -42,7 +42,7 @@ def ranked_keywords(metrics):
 
 def build_inventory(category, articles, purchases):
     """5단계 상품 조회 결과를 유형별 구매량·색상 집계로 축소한다."""
-    from category_verified_products import purchase_candidates
+    from agent_system.orchestrator.tools.category_planning.verified_products import purchase_candidates
     inventory = {}
     for key in PATTERNS:
         rows = purchase_candidates(articles, purchases, category, subtype=key)

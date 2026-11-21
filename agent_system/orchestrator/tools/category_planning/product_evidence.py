@@ -18,7 +18,7 @@ def _naver_available(category: str):
     """수집된 키워드만 보고; 매핑 불명 키워드는 임의 귀속하지 않는다."""
     try:
         from agent_system.common_tools.external_data import trend_files
-        from run_market_category_compare import KEYWORD_CATEGORY
+        from shared_analysis.market.category_comparison import KEYWORD_CATEGORY
         frame = trend_files.load_naver()
         if frame is None or frame.empty or 'keyword' not in frame:
             return [], '네이버 배치에 분석 가능한 키워드가 없습니다.'
@@ -90,7 +90,7 @@ def enrich_verified_result(result: dict, category: str, run_id: str, *, include_
     updated['product_result'] = {'search_products': {'rows': frame.to_dict(orient='records')}}
     if not include_chart:
         return updated
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[4]
     chart = root / 'visualization_output' / 'category_product_evidence' / str(run_id) / f'{category}_winter_purchases.png'
     try:
         updated['visualization_path'] = _chart(frame, chart)

@@ -118,7 +118,7 @@ def orchestrator_node(state) -> dict:
             and run.get("waiting_key") == "products"):
         from agent_system.orchestrator.tools.workflow import current_step
         from agent_system.orchestrator.tools.category_approval import selected_ids, validated_updates, selected_category
-        from category_review_selection import CATEGORIES
+        from agent_system.orchestrator.tools.category_planning.review_selection import CATEGORIES
         _, _, current = current_step(run)
         chosen = selected_category(question)
         ids = selected_ids(question)

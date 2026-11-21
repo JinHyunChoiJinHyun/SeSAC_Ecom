@@ -178,7 +178,7 @@ def render_market(market, step):
 
 def product_summary(rows, category, run_id):
     """8단계 검증 후보의 저장된 값으로 표와 그래프, 실제 이미지 모음 작성."""
-    from category_product_evidence import _chart as purchase_chart
+    from agent_system.orchestrator.tools.category_planning.product_evidence import _chart as purchase_chart
     frame = pd.DataFrame(rows)
     if frame.empty: raise ValueError('8단계 저장 후보 없음')
     safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(run_id))

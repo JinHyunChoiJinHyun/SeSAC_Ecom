@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 import pandas as pd
-from market_category_recommendation import summarize_naver, musinsa_ranking_evidence, recommend_with_evidence
-from run_market_category_compare import KEYWORD_CATEGORY, CATEGORY_ALIASES, combine_rows, save_charts
+from shared_analysis.market.category_recommendation import summarize_naver, musinsa_ranking_evidence, recommend_with_evidence
+from shared_analysis.market.category_comparison import KEYWORD_CATEGORY, CATEGORY_ALIASES, combine_rows, save_charts
 
 
 def save_recent_chart(naver, metrics, output):

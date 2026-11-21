@@ -1,8 +1,8 @@
 """카테고리 단위 시장 근거: 상품명 필터 없이 수집 표본 분석."""
 from __future__ import annotations
 import pandas as pd
-from run_market_category_compare import normalize_category, KEYWORD_CATEGORY
-from market_category_recommendation import summarize_naver
+from shared_analysis.market.category_comparison import normalize_category, KEYWORD_CATEGORY
+from shared_analysis.market.category_recommendation import summarize_naver
 from shared_analysis.market import review_analysis, selling_points
 
 
@@ -19,7 +19,7 @@ def analyze_category(category, products, reviews, naver, collected_at=None):
     keys = sorted(set(naver['keyword'].dropna().astype(str))) if naver is not None and not naver.empty else []
     mapped = [k for k in keys if KEYWORD_CATEGORY.get(k) == category]
     metrics = summarize_naver(naver, [{'naver_keywords': mapped}], KEYWORD_CATEGORY)
-    from category_subtype_selection import ranked_keywords
+    from agent_system.orchestrator.tools.category_planning.subtype_selection import ranked_keywords
     positive = ranked_keywords(metrics)
     theme = positive[0] if positive else None
     lines = [f'■ 무신사 {category} 전체 랭킹·리뷰 표본', f'수집 상품 {len(p):,}개 / 연결된 리뷰 {len(r):,}건 / 수집 기준: {collected_at or "미확인"}', '상품명 키워드 필터 없음. 랭킹 스냅샷이며 실제 판매량이나 시장 전체 순위가 아닙니다.']

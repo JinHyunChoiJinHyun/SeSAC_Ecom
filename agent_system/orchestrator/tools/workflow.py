@@ -144,7 +144,7 @@ def run_status_text(run: dict | None, campaign: dict | None = None) -> str:
             category = run.get("review_category") or "선택한 카테고리"
             return f"{category} 대분류 승인 대기 중. [{category} 승인] 버튼을 눌러야 세부 유형 추천이 진행됩니다."
         if run.get("waiting_key") == "subtype_colors":
-            from category_subtype_selection import guide, color_guide
+            from agent_system.orchestrator.tools.category_planning.subtype_selection import guide, color_guide
             options = run.get("subtype_options") or []
             selected = next((o for o in options if o["keyword"] == run.get("selected_subtype")), None)
             return ("세부 유형·색상 선택 대기 중. "
@@ -229,7 +229,7 @@ def run_workflow_node(state) -> dict:
                 and step.no == 2 and index == 0
                 and "겨울" in str(run.get("request", ""))):
             from pathlib import Path
-            from category_workflow_bridge import build_category_result
+            from agent_system.orchestrator.tools.category_planning.workflow_bridge import build_category_result
             try:
                 safe_run_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(run["run_id"]))
                 output = Path("audit_output/slack_category_bridge") / safe_run_id
@@ -322,7 +322,7 @@ def run_workflow_node(state) -> dict:
                 # 8~9단계 상품 ID 검증 후 같은 턴에서 승인 요청을 생성한다.
                 # 실패할 경우 승인 버튼을 만들지 않고 검증 오류를 안내한다.
                 try:
-                    from category_step10_confirmation import build_step10_request
+                    from agent_system.orchestrator.tools.category_planning.step10_confirmation import build_step10_request
                     step10_approval_request = build_step10_request(run)
                     # 승인 요청 본문과 Slack 버튼이 이미 표시되므로 중복 텍스트를 추가하지 않는다.
                 except ValueError as exc:
@@ -407,8 +407,8 @@ def run_workflow_node(state) -> dict:
                                                 run.get("category_market"), state["turn_id"])
                 run["category_synthesis"] = result["category_synthesis"]
                 if run.get("subtype_flow"):
-                    from category_subtype_selection import rank_options, guide
-                    from category_subtype_selection import review_options
+                    from agent_system.orchestrator.tools.category_planning.subtype_selection import rank_options, guide
+                    from agent_system.orchestrator.tools.category_planning.subtype_selection import review_options
                     options = review_options(run["review_category"], (run.get("category_market") or {}).get("naver_metrics") or {}, run.get("subtype_inventory") or {})
                     run["subtype_options"] = options
                     run["category_synthesis"]["subtype_options"] = options
@@ -432,7 +432,7 @@ def run_workflow_node(state) -> dict:
                 result = {"final_answer": "9단계 상품 정리 실패", "error": f"{type(exc).__name__}: {exc}"}
         elif step.no == 8 and stage.key == "s1_product_selection":
             # LLM의 상품 조회 여부와 무관하게 실제 H&M DB 조회로 8단계 후보 생성
-            from category_verified_products import build_verified_step8
+            from agent_system.orchestrator.tools.category_planning.verified_products import build_verified_step8
             try:
                 reviewed_category = str(run.get("review_category") or run.get("current_review_category") or
                                         (campaign.get("values") or {}).get("category") or "").strip()
@@ -443,7 +443,7 @@ def run_workflow_node(state) -> dict:
                 else:
                     result = build_verified_step8(reviewed_category)
                 # CART_SIGNAL_PRODUCT_EVIDENCE_V1
-                from category_product_evidence import enrich_verified_result
+                from agent_system.orchestrator.tools.category_planning.product_evidence import enrich_verified_result
                 result = enrich_verified_result(result, reviewed_category, str(run.get("run_id", "unknown")), include_chart=False, include_naver=False)
             except Exception as exc:
                 result = {"final_answer": "8단계 H&M 상품 조회에 실패했습니다.",
@@ -453,7 +453,7 @@ def run_workflow_node(state) -> dict:
         # CART_SIGNAL_CANDIDATE_GATE_V1
         # 8단계가 실제 Tool 응답에 나온 H&M 상품 ID를 반환했는지 검증
         if step.no == 8 and stage.key == "s1_product_selection":
-            from category_candidate_gate import gate_result
+            from agent_system.orchestrator.tools.category_planning.candidate_gate import gate_result
             valid, candidate_ids = gate_result(result)
             if not valid:
                 run.update(status="blocked", blocked_reason="8단계: 검증된 실제 H&M 상품 후보 없음")
@@ -538,8 +538,8 @@ def run_workflow_node(state) -> dict:
                     sections.append(f"5단계 구조화 집계 미확인 ({type(exc).__name__}). 7단계에서 추정하지 않습니다.")
             run["hm_category_snapshot"] = snapshot
             if run.get("subtype_flow"):
-                from category_subtype_selection import build_inventory
-                from category_verified_products import load_purchase_inputs
+                from agent_system.orchestrator.tools.category_planning.subtype_selection import build_inventory
+                from agent_system.orchestrator.tools.category_planning.verified_products import load_purchase_inputs
                 try:
                     articles, purchases = load_purchase_inputs()
                     run["subtype_inventory"] = build_inventory(run["review_category"], articles, purchases)
@@ -705,8 +705,8 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             and 4 <= step.no <= 10
             and run.get("status") in ("waiting_input", "blocked", "paused")
             and not base.confirmed_since(campaign, "products", run.get("started_at", ""))):
-        from category_review_selection import parse_category_review, parse_category_confirmation
-        from category_review_selection import CATEGORIES
+        from agent_system.orchestrator.tools.category_planning.review_selection import parse_category_review, parse_category_confirmation
+        from agent_system.orchestrator.tools.category_planning.review_selection import CATEGORIES
         confirmation = parse_category_confirmation(message)
         category = parse_category_review(message)
         # 대분류 확정은 분석 요청과 별개다. 동일 카테고리 분석 결과가 있으면 재조회하지 않는다.
@@ -721,7 +721,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             revised = dict(run, category_confirmed=True, blocked_reason="")
             revised = base.record_run_event(revised, "category_confirmed", category=confirmation)
             if revised.get("subtype_flow"):
-                from category_subtype_selection import guide
+                from agent_system.orchestrator.tools.category_planning.subtype_selection import guide
                 revised.update(status="waiting_input", waiting_key="subtype_colors")
                 options = revised.get("subtype_options") or []
                 return (f"■ 대분류 승인 완료: {confirmation}\n"
@@ -737,7 +737,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
         # 이미 대분류가 확정됐으면 동일 카테고리 결정 문구로 분석을 반복하지 않는다.
         if (confirmation and confirmation == run.get("review_category")
                 and run.get("category_confirmed") and run.get("waiting_key") == "subtype_colors"):
-            from category_subtype_selection import guide
+            from agent_system.orchestrator.tools.category_planning.subtype_selection import guide
             return "이미 대분류가 확정되었습니다.\n" + guide(run.get("subtype_options") or []), None, False
         # 10단계는 대분류 결정이 아니라 상품 목록 승인 단계다.
         if step.no == 10 and run.get("status") == "waiting_input":
@@ -766,7 +766,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             return "", revised, True
     if (run.get("waiting_key") == "subtype_colors" and run.get("status") == "waiting_input"
             and not (CANCEL_COMMAND.search(message) or STATUS_COMMAND.search(message) or CONTINUE_COMMAND.search(message))):
-        from category_subtype_selection import parse_selection, guide, color_guide
+        from agent_system.orchestrator.tools.category_planning.subtype_selection import parse_selection, guide, color_guide
         options = run.get("subtype_options") or []
         proposal = message
         if run.get("selected_subtype") and not any(o["keyword"] in message for o in options) and not re.search(r"유형\s*:", message):

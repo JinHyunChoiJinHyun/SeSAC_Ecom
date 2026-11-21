@@ -87,7 +87,7 @@ def enrich_confirmation_result(result, run):
     if not frame.empty:
         out['dataframe'] = frame
         safe = re.sub(r'[^A-Za-z0-9_-]', '_', str(run.get('run_id') or 'unknown'))
-        path = Path(__file__).resolve().parent / 'visualization_output' / 'category_confirmation' / safe / 'subtype_evidence.png'
+        path = Path(__file__).resolve().parents[4] / 'visualization_output' / 'category_confirmation' / safe / 'subtype_evidence.png'
         try:
             out['visualization_path'] = build_confirmation_chart(run, path)
         except Exception as exc:
