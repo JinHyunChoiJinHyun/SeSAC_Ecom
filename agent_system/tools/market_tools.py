@@ -142,6 +142,22 @@ def analyze_trend_sustainability(keywords: list[str], base_keyword: str | None =
                                  campaign_start: str | None = None, campaign_end: str | None = None) -> dict:
     """관심 상승률 및 기획전 기간까지의 지속 가능성 분석. base_keyword: 비교 기준어(예: 니트), 기간은 YYYY-MM-DD."""
     keywords = clean_words(keywords)
+    # CART_SIGNAL_CAMPAIGN_DATE_VALIDATION_V1
+    # LLM이 잘못 생성한 날짜를 Tool 성공으로 간주하지 않습니다.
+    from datetime import date
+    if campaign_start is not None or campaign_end is not None:
+        if not (campaign_start and campaign_end):
+            raise ValueError("기획전 시작일과 종료일을 함께 입력해 주세요.")
+        try:
+            start_day = date.fromisoformat(campaign_start)
+            end_day = date.fromisoformat(campaign_end)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("기획전 날짜는 YYYY-MM-DD 형식이어야 합니다.") from exc
+        if end_day <= start_day:
+            raise ValueError(
+                f"기획전 기간 오류: 시작 {campaign_start}, 종료 {campaign_end}. "
+                "종료일은 시작일보다 늦어야 합니다. 원래 마케터 요청의 날짜를 확인하세요."
+            )
     if backend_client.enabled():
         return backend_client.call("POST", "/market/trend-sustainability", source=SOURCES["naver"], body={
             "keywords": keywords, "base_keyword": base_keyword,

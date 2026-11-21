@@ -144,6 +144,11 @@ def pending_actions(graph, thread_id: str) -> list[dict]:
         return [{"type": "approval", "token": str(getattr(interrupts[0], "id", "") or ""),
                  "title": str(value.get("title", ""))}]
     run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+    if run.get("status") == "waiting_input" and run.get("run_id"):
+        if run.get("waiting_key") == "category_decision" and run.get("review_category"):
+            return [{"type": "category_confirm", "run_id": run["run_id"],
+                     "category": run["review_category"]}]
+        # 세부 유형·색상은 반드시 마케터의 자연어 입력으로 선택한다.
     if run.get("status") in ACTIVE_WORKFLOW_STATUS and run.get("run_id"):
         return [{"type": "workflow", "run_id": run["run_id"], "status": run["status"]}]
     return []
@@ -276,7 +281,36 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     """
 
     graph = graph or get_graph()
+    # CART_SIGNAL_CATEGORY_CONTEXT_V1: 직전 카테고리 비교는 H&M 상품 검색으로 라우팅하지 않음
+    if action is None:
+        from agent_system.orchestrator.tools.category_comparison import (
+            is_category_followup, build_category_comparison,
+        )
+        if is_category_followup(question):
+            snapshot = _snapshot(graph, thread_id)
+            values = getattr(snapshot, "values", {}) or {}
+            # 현재 스레드의 이전 AI 답변만 확인. 다른 세션 내용은 섞지 않는다.
+            from langchain_core.messages import AIMessage
+            messages = values.get("messages") or []
+            previous_answers = "\n".join(
+                str(m.content) for m in messages[-10:] if isinstance(m, AIMessage)
+            )
+            comparison = build_category_comparison(question, previous_answers)
+            comparison.update(turn_type="analysis", thread_id=thread_id,
+                              route="market_analysis", standalone_question=question)
+            comparison["actions"] = []
+            print("[카테고리 비교] 네이버 근거 기반 응답; H&M 상품 분석 호출하지 않음", flush=True)
+            return comparison
     result = _run_turn(question, thread_id, llm_config, graph, metadata, action)
+    # 대분류 확정 턴은 워크플로 실행이 아닌 대화 응답으로 종료하므로,
+    # 저장된 분석 증거에서 표·그래프를 이 시점에 별도 첨부한다.
+    from category_confirmation_report import enrich_confirmation_result
+    if result.get("turn_type") == "chitchat":
+        from category_review_selection import parse_category_confirmation
+        if (action or {}).get("type") == "category_confirm":
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+            result = enrich_confirmation_result(result, run)
     actions = pending_actions(graph, thread_id)
     # 워크플로 버튼은 워크플로 결과·워크플로 명령 답변에만 붙임 (대기 중 다른 질문마다 버튼이 쌓이지 않게)
     if actions and actions[0]["type"] == "workflow":
@@ -344,7 +378,28 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
             print(f"[버튼] 승인 요청 → {decision}")
             return _resume_approval(graph, config, turn_id, thread_id, decision,
                                     f"[버튼] {APPROVAL_BUTTON_LABELS[decision]}")
-        if kind == "workflow":
+        if kind in {"category_confirm", "subtype_suggestion"}:
+            # Slack 버튼은 현재 Run·대기 키·추천 후보와 완전히 일치할 때만 허용한다.
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+            if run.get("status") != "waiting_input" or not run.get("run_id") or run["run_id"] != action.get("run_id"):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            if kind == "category_confirm":
+                if (run.get("waiting_key") != "category_decision" or
+                        run.get("review_category") != action.get("category")):
+                    return _notice(thread_id, STALE_ACTION_REPLY)
+                question = f"{run['review_category']} 확정 승인"
+            else:
+                options = run.get("subtype_options") or []
+                if run.get("waiting_key") != "subtype_colors" or not options:
+                    return _notice(thread_id, STALE_ACTION_REPLY)
+                top = options[0]
+                colors = [c["name"] for c in top.get("colors") or []][:2]
+                if top.get("keyword") != action.get("subtype") or colors != action.get("colors") or not colors:
+                    return _notice(thread_id, STALE_ACTION_REPLY)
+                question = "유형: 1, 색상: " + ", ".join(colors)
+            skip_approval_check = True
+        elif kind == "workflow":
             command = action.get("command")
             snapshot = _snapshot(graph, thread_id)
             run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}

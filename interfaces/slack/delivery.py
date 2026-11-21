@@ -481,6 +481,12 @@ def build_slack_message(
 
     slack_message = simplify_slack_lines(converted_lines)
 
+    # 업무 진행 번호는 내부 history/step_index에 그대로 두고 Slack에서만 숨깁니다.
+    # 일반 분석 질문에서 단계 번호를 설명할 때는 변경하지 않습니다.
+    if result.get("workflow_run") or result.get("turn_type") in ("workflow", "approval"):
+        from interfaces.slack.message_policy import hide_workflow_stage_labels
+        slack_message = hide_workflow_stage_labels(slack_message)
+
     # CSV 파일이 실제로 생성된 경우에만 상세 데이터 안내를 추가합니다.
     if csv_available and "첨부 CSV" not in slack_message and "첨부된 CSV" not in slack_message:
         slack_message += "\n\n상세 데이터: 첨부 CSV에서 확인할 수 있습니다."
@@ -885,6 +891,64 @@ def upload_slack_file(
 # Delivery Agent
 # =========================================================
 
+# CART_SIGNAL_DELIVERY_ORDER_V1
+
+def _file_ids(response):
+    """Slack SDK 업로드 응답에서 실제 파일 ID를 추출합니다."""
+    files = response.get("files") or []
+    if not files and response.get("file"):
+        files = [response.get("file")]
+    return list(dict.fromkeys(f["id"] for f in files
+                             if isinstance(f, dict) and f.get("id")))
+
+
+def _wait_for_file_shares(client, channel_id, thread_ts, file_ids, timeout=6):
+    """업로드 API 반환과 공유 게시를 구분합니다. 제한 시간 내 확인만 수행합니다."""
+    import time
+    pending = set(file_ids)
+    deadline = time.monotonic() + timeout
+    while pending:
+        for file_id in sorted(pending):
+            try:
+                info = client.files_info(file=file_id).get("file") or {}
+                shares = info.get("shares") or {}
+                entries = [entry for group in shares.values()
+                           if isinstance(group, dict)
+                           for entry in group.get(channel_id, [])
+                           if isinstance(entry, dict)]
+                # 스레드 정보가 반환되는 경우 반드시 일치해야 합니다.
+                if any(entry.get("ts") and
+                       (not thread_ts or not entry.get("thread_ts") or
+                        entry.get("thread_ts") == thread_ts) for entry in entries):
+                    pending.discard(file_id)
+            except Exception as exc:
+                # files:read 미설정, API 오류 등을 무한 재시도하지 않습니다.
+                LOGGER.warning("[Delivery 공유 확인 불가] %s", type(exc).__name__)
+                return False
+        if not pending:
+            return True
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+    return not pending
+
+
+def _ordered_workflow_files(paths):
+    """단계별 결과 PNG부터 보내고 CSV는 마지막에 배치합니다."""
+    def priority(path):
+        name = path.name.lower()
+        if name.endswith("_evidence.png"):
+            return 0
+        if name.endswith("_winter_purchases.png"):
+            return 1
+        if name.endswith("_products.png"):
+            return 2
+        if name.endswith(".csv"):
+            return 4
+        return 3
+    return sorted(paths, key=priority)
+
+
 def deliver_to_slack(
     result: dict,
     client,
@@ -1080,6 +1144,9 @@ def deliver_to_slack(
     )
 
 
+    if result.get("turn_type") == "workflow":
+        file_paths = _ordered_workflow_files(file_paths)
+
     print(
         "[Delivery 최종 첨부파일]"
     )
@@ -1255,6 +1322,8 @@ def deliver_to_slack(
     # =====================================================
 
     upload_results = []
+    shared_file_ids = []
+    share_confirmation = None
 
 
     for file_path in (
@@ -1263,7 +1332,7 @@ def deliver_to_slack(
 
         try:
 
-            upload_slack_file(
+            upload_response = upload_slack_file(
                 client=
                     client,
 
@@ -1277,6 +1346,9 @@ def deliver_to_slack(
                     thread_ts,
             )
 
+
+            if result.get("actions"):
+                shared_file_ids.extend(_file_ids(upload_response))
 
             upload_results.append(
                 {
@@ -1346,6 +1418,16 @@ def deliver_to_slack(
                 }
             )
 
+
+    # 버튼이 있는 응답은 파일 공유 게시를 확인한 후 반환합니다.
+    if result.get("actions") and upload_results:
+        successful_count = sum(bool(item.get("success")) for item in upload_results)
+        if successful_count:
+            share_confirmation = (
+                len(set(shared_file_ids)) >= successful_count
+                and _wait_for_file_shares(client, channel_id, thread_ts, shared_file_ids)
+            )
+            LOGGER.info("[Delivery 파일 공유 확인] confirmed=%s", share_confirmation)
 
     # 그래프 업로드에 실패했으면 전체 분석 본문을 추가로 전달
     chart_upload_failed = chart_only and any(
@@ -1464,6 +1546,8 @@ def deliver_to_slack(
 
         "uploaded_files":
             upload_results,
+
+        "share_confirmation": share_confirmation,
 
         "attachment_errors":
             attachment_errors,

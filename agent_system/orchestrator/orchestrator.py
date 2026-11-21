@@ -20,6 +20,7 @@ Orchestrator Tool (멘토 조언 5개 기능)
     6. 다음 노드는 조건부 엣지가 결정                                     manage_workflow
 """
 
+import re
 from threading import Lock
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -83,7 +84,21 @@ def orchestrator_node(state) -> dict:
 
     # ── manage_workflow: 진행 중인 워크플로 명령 (규칙, LLM 없음)
     if getattr(settings, "ENABLE_WORKFLOWS", True):
-        text, changed_run, resume = workflow.handle_command(question, run, campaign)
+        # CART_SIGNAL_NATURAL_CATEGORY_APPROVAL_V1
+        from agent_system.orchestrator.tools.category_approval import selected_category
+
+        # 10단계 확정 요청이 재분석 처리로 넘어가지 않도록 분리
+        if (
+            run.get("workflow") == "trend_planning"
+            and run.get("status") == "waiting_input"
+            and run.get("waiting_key") == "products"
+            and selected_category(question) is not None
+        ):
+            text, changed_run, resume = "", None, False
+        else:
+            text, changed_run, resume = workflow.handle_command(
+                question, run, campaign
+            )
         if resume:
             return {**common, "turn_type": "workflow", "reply": "", "standalone_question": "", "route": "",
                     "route_reason": "", "conversation_reason": "워크플로 계속", "is_followup": False,
@@ -95,6 +110,80 @@ def orchestrator_node(state) -> dict:
             if changed_run is not None:
                 update["workflow_run"] = changed_run
             return update
+
+    # CART_SIGNAL_STEP10_VERIFIED_APPROVAL_V1: 현재 검증 후보만 승인 제안
+    if (getattr(settings, "ENABLE_WORKFLOWS", True)
+            and run.get("workflow") == "trend_planning"
+            and run.get("status") == "waiting_input"
+            and run.get("waiting_key") == "products"):
+        from agent_system.orchestrator.tools.workflow import current_step
+        from agent_system.orchestrator.tools.category_approval import selected_ids, validated_updates, selected_category
+        from category_review_selection import CATEGORIES
+        _, _, current = current_step(run)
+        chosen = selected_category(question)
+        ids = selected_ids(question)
+        if run.get("subtype_flow") and re.fullmatch(r"(?:좋아[,.]?\s*)?추천\s*상품(?:으?로|대로)\s*(?:할게|갈게|확정할게|선택할게)[.! ]*", question.strip()):
+            chosen = run.get("review_category")
+        if current is not None and current.no == 10 and (chosen in CATEGORIES or ids is not None):
+            category = chosen if chosen in CATEGORIES else str(run.get("review_category") or "")
+            try:
+                updates = validated_updates(run, category, ids)
+            except ValueError as exc:
+                notice = str(exc)
+                return {**common, "turn_type": "chitchat", "reply": notice, "standalone_question": "",
+                        "route": "", "route_reason": "", "is_followup": False,
+                        "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
+            request = approval.build_approval_request(updates, title=f"{category} 카테고리 및 주력 상품 승인", source="user")
+            request["question"] = (
+                f"[10단계 확정 제안] 카테고리: {category}\n"
+                f"8단계 검증 상품 ID: {updates['products']}\n"
+                f"기획전 테마 제안: {updates['theme']}\n" +
+                (f"선택 유형: {updates.get('subtype')} / 색상: {updates.get('colors')} (상품 설명 규칙 매칭, 성능 미검증)\n" if run.get("subtype_flow") else "과거 겨울 온라인 구매 기록 기반 후보이며 테마의 실제 상품 여부는 미검증입니다.\n") +
+                "확정하려면 [승인], 아니면 [반려]를 눌러 주세요."
+            )
+            return {**common, "turn_type": "approval_request", "reply": request["question"],
+                    "standalone_question": "", "route": "", "route_reason": "", "is_followup": False,
+                    "pending_approval": request,
+                    "messages": trim + [AIMessage(content=request["question"], name="orchestrator")]}
+
+    # 13단계 입력은 구조화된 검증 경로만 사용 (일반 LLM 결정 저장 우회 방지).
+    if (run.get("workflow") == "trend_planning" and run.get("status") == "waiting_input"
+            and run.get("waiting_key") == "selling_points"):
+        from agent_system.orchestrator.tools.campaign_selection import guide, updates as selection_updates
+        summary = run.get("campaign_summary")
+        try:
+            if pending: raise ValueError("기존 승인 요청을 먼저 취소해 주세요.")
+            if not summary: raise ValueError("워크플로 12단계 재실행을 입력하세요.")
+            selected = selection_updates(question, summary)
+        except ValueError as exc:
+            notice = str(exc) + ("\n" + guide(summary) if summary else "")
+            return {**common, "turn_type": "chitchat", "reply": notice, "standalone_question": "", "route": "",
+                    "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
+        request = approval.build_approval_request(selected, title="13단계 기획전 구성 승인", source="user")
+        from agent_system.orchestrator.tools.campaign_copy import approval_brief
+        request["question"] = approval_brief(summary, selected["selling_points"], campaign, run.get("category_market"))
+        request["step13_input"] = question
+        return {**common, "turn_type": "approval_request", "reply": request["question"], "standalone_question": "", "route": "",
+                "pending_approval": request, "messages": trim + [AIMessage(content=request["question"], name="orchestrator")]}
+
+    # 16단계: 자연어로 대표 문구 하나를 선택하고, 검증된 후보에 한해 승인 요청.
+    if (run.get("workflow") == "trend_planning" and run.get("status") == "waiting_input"
+            and run.get("waiting_key") == "page"):
+        from agent_system.orchestrator.tools.campaign_copy import parse_copy_choice, selected_copy_value
+        package = run.get("copy_package") or {}
+        choice = parse_copy_choice(question, package)
+        if not choice:
+            notice = "대표 문구 1개를 선택해 주세요. 예: '3번으로 할게' 또는 '첫 번째가 좋아'"
+            return {**common, "turn_type": "chitchat", "reply": notice, "standalone_question": "", "route": "",
+                    "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
+        selected = {"page": selected_copy_value(choice, package)}
+        request = approval.build_approval_request(selected, title="16단계 대표 문구 확정", source="user")
+        request["copy_choice"] = choice["number"]
+        request["question"] = (f"선택한 대표 문구: {choice['headline']}\n"
+                               "이 문구를 기획전 페이지 초안에 반영할까요?")
+        return {**common, "turn_type": "approval_request", "reply": request["question"], "standalone_question": "",
+                "route": "", "pending_approval": request,
+                "messages": trim + [AIMessage(content=request["question"], name="orchestrator")]}
 
     # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
     report_kind = report.detect(question)
@@ -148,6 +237,11 @@ def orchestrator_node(state) -> dict:
 
     # ── decision: 확정값 저장 요청 → 승인 필요 (check_approval) 또는 바로 반영
     if intent_name == "decision":
+        if (run.get("workflow") == "trend_planning" and run.get("status") == "waiting_input"
+                and run.get("waiting_key") == "products" and {"category", "products", "theme", "subtype", "colors"}.intersection(updates)):
+            notice = "10단계에서는 현재 검토한 카테고리명 또는 검증 상품 ID를 명시해 주세요. 예: 아우터 / 주력 상품은 0700144001로 확정"
+            return {**base, "turn_type": "chitchat", "reply": notice, "standalone_question": "",
+                    "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
         if getattr(settings, "REQUIRE_APPROVAL_FOR_DECISIONS", True):
             request = approval.build_approval_request(updates, title="확정값 저장", source="user")
             return {

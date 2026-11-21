@@ -55,3 +55,37 @@ def simplify_slack_lines(lines):
     result = "\n".join(cleaned)
     # 기술 문구를 생략하면서 빈 줄만 과도하게 남지 않도록 정리합니다.
     return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+
+# 업무 흐름의 단계 번호는 실행 이력에 남기되 Slack 사용자 본문에서는 숨깁니다.
+_WORKFLOW_STAGE_LABEL = re.compile(
+    r"(?<![\w\d])(?:\d{1,2}\s*[~～–-]\s*)?\d{1,2}\s*단계"
+)
+
+def hide_workflow_stage_labels(text: str) -> str:
+    """워크플로 응답의 기술적 단계 번호를 제거하고 의미 있는 제목과 근거는 유지합니다."""
+    if not isinstance(text, str):
+        return text
+    transformed = []
+    in_code = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_code = not in_code
+        if in_code:
+            transformed.append(line)
+            continue
+
+        def replace_stage(match):
+            # 실제 업무 단계(1~29)만 숨깁니다. 일반 숫자·상품 ID·통계는 보존합니다.
+            numbers = [int(v) for v in re.findall(r"\d+", match.group(0))]
+            return "" if numbers and all(1 <= n <= 29 for n in numbers) else match.group(0)
+
+        cleaned = _WORKFLOW_STAGE_LABEL.sub(replace_stage, line)
+        # 문장 중간 단계 번호가 생략되더라도 자연스럽게 읽히도록 조사만 정리합니다.
+        cleaned = re.sub(r"(?<=\s)에서(?=\s)", "이후", cleaned) if cleaned != line else cleaned
+        cleaned = re.sub(r"^([ \t]*[■*-]?[ \t]*)[—–:-][ \t]*", r"\1", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+        if cleaned.strip() in {"", "■", "-"} and line.strip():
+            continue
+        transformed.append(cleaned)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(transformed)).strip()

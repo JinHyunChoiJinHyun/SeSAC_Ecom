@@ -426,6 +426,10 @@ def run_slack_question(question, graph_runner):
         return result
 
     analysed_question = result.get("standalone_question") or question
+    if result.get("comparison_status"):
+        # 비교 가능 데이터 부족은 오류가 아니라 근거 부족이라는 분석 결과임
+        print(f"[Slack Router] 카테고리 비교 결과: {result['comparison_status']}", flush=True)
+        return result
     if _has_visualization_intent(analysed_question):
         print("[Slack Router] 시각화 요청: 차트 생성 확인")
         _ensure_graph_success(result, "시각화", require_visualization=True)
@@ -657,12 +661,17 @@ class SlackBridge:
             event.get("thread_ts"),
             parsed.get("message_ts"),
         )
-        if build_slack_thread_id(event) != parsed["thread_id"]:
-            # 다른 사용자가 누른 버튼: 처리하지 않고 누른 사람에게만 안내
+        # CART_SIGNAL_BUTTON_OWNER_CHECK_V2
+        # 세션 ID와 기본 Slack 대화 ID는 다를 수 있으므로 요청자 ID로 권한 검사합니다.
+        owner = parsed.get("requester_user_id", "")
+        LOGGER.info("[버튼 요청자 확인] clicked_user=%s owner=%s", event.get("user"), owner)
+        if not owner or event.get("user") != owner:
+            # 다른 사용자 또는 이전 버전 버튼: 처리하지 않고 안내
             try:
                 client.chat_postEphemeral(channel=event["channel"], user=event["user"],
                                           thread_ts=event.get("thread_ts"),
-                                          text="이 버튼은 요청한 사용자만 누를 수 있습니다.")
+                                          text=("이전 버전 버튼입니다. 새 승인 요청 버튼을 사용해 주세요."
+                                                if not owner else "이 버튼은 요청한 사용자만 누를 수 있습니다."))
             except Exception as exc:
                 LOGGER.error("버튼 안내 전송 실패 (%s)", type(exc).__name__)
             return None
@@ -689,7 +698,10 @@ class SlackBridge:
         from interfaces.slack.actions import build_action_blocks
 
         try:
-            blocks = build_action_blocks(result.get("actions"), result.get("thread_id", ""))
+            blocks = build_action_blocks(
+                result.get("actions"), result.get("thread_id", ""),
+                requester_user_id=event.get("user", ""),
+            )
         except Exception as exc:
             LOGGER.error("버튼 만들기 실패 (%s)", type(exc).__name__)
             return False
@@ -1065,23 +1077,6 @@ class SlackBridge:
             return
 
 
-        # 승인 대기·워크플로 멈춤이면 확인 버튼을 붙입니다 (글자로 '승인'을 쓰지 않아도 됨)
-        self._post_actions(client, event, result)
-        # CART_SIGNAL_TOPIC_BUTTONS_V1
-        if isinstance(result, dict) and result.get("topic_confirmation"):
-            from interfaces.slack.topic_confirmation_buttons import build_blocks
-            from agent_system.orchestrator.tools.memory import build_slack_thread_id
-            try:
-                blocks = build_blocks(build_slack_thread_id(event))
-                if blocks:
-                    client.chat_postMessage(channel=event["channel"],
-                                            thread_ts=event.get("thread_ts"),
-                                            text="새 분석 세션으로 분리할까요?",
-                                            blocks=blocks)
-            except Exception as exc:
-                LOGGER.error("주제 전환 버튼 게시 실패 (%s)", type(exc).__name__)
-
-
         # =================================================
         # 일부 첨부 실패
         # =================================================
@@ -1111,6 +1106,28 @@ class SlackBridge:
                     "일부 결과 파일을 첨부하지 못했습니다. "
                     "다시 요청해 주시고, 문제가 계속되면 담당자에게 문의해 주세요.",
             )
+
+
+        # CART_SIGNAL_DELIVERY_ORDER_V1: 실패 안내와 파일 공유 확인 이후 버튼 게시
+        if delivery_result.get("share_confirmation") is False:
+            self._notify(client, event, "파일 업로드는 완료됐지만 Slack 공유 게시를 확인하지 못했습니다. 첨부파일이 모두 보이는지 확인한 뒤 선택해 주세요.")
+
+        # 승인 대기·워크플로 멈춤이면 확인 버튼을 붙입니다 (글자로 '승인'을 쓰지 않아도 됨)
+        self._post_actions(client, event, result)
+        # CART_SIGNAL_TOPIC_BUTTONS_V1
+        if isinstance(result, dict) and result.get("topic_confirmation"):
+            from interfaces.slack.topic_confirmation_buttons import build_blocks
+            from agent_system.orchestrator.tools.memory import build_slack_thread_id
+            try:
+                blocks = build_blocks(build_slack_thread_id(event))
+                if blocks:
+                    client.chat_postMessage(channel=event["channel"],
+                                            thread_ts=event.get("thread_ts"),
+                                            text="새 분석 세션으로 분리할까요?",
+                                            blocks=blocks)
+            except Exception as exc:
+                LOGGER.error("주제 전환 버튼 게시 실패 (%s)", type(exc).__name__)
+        LOGGER.info("[Slack 선택 안내 게시 완료 시도]")
 
 
     # =====================================================
