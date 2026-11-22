@@ -18,7 +18,7 @@ STAGE = Stage(
         Step(12, "주제·소구점 후보와 빠진 상품 정보", owner="reporting", instruction=(
             "주제·소구점 후보와, 상품별 detail_desc와 대조해 빠진 정보, 상품 노출 순서를 정리해 주세요.\n{previous}")),
         Step(13, "공통 소구점·가격·혜택 입력", kind="select", owner="marketer", selects="selling_points", instruction=(
-            "공통 소구점 2~3개를 골라 주시고 상품별 실제 값(가격·할인율·기간)과 노출 순서를 알려 주세요. "
+            "검증된 소구점 중 원하는 개수를 골라 주시고 (2~3개 권장, 상품별 한정 특성은 해당 상품에만 적용) 상품별 실제 값(가격·할인율·기간)과 노출 순서를 알려 주세요. "
             "12단계 추천 번호와 항목별 입력 형식을 사용하세요.")),
         Step(14, "대표 문구·상품 카드·페이지 틀 후보", owner="content_generation", instruction=(
             "확정 내용(소구점 '{selling_points}', 주력 상품 '{products}')만으로 대표 문구 후보 2~3개와 상품 카드 문구를 쓰고 "

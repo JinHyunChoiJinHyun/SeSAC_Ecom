@@ -79,10 +79,10 @@ def create_report(kind: str, analysis_log: list | None, campaign: dict | None, r
         return {"reply": status or "보고서를 만들지 못했습니다.", "attachments": [], "errors": {}, "tool_result": result}
     lines = [f"{data.get('label', '보고서')} Word 초안을 만들었습니다.",
              "내용을 검토하고 Word에서 수정한 뒤 Slack에 다시 첨부해 주세요.",
-             "최종 PDF는 수정본을 기준으로 생성합니다."]
+             "수정한 Word 파일을 다시 첨부하면 PDF로 자동 변환됩니다."]
     if kind == "analysis":
         lines += [f"- {i}. {q}" for i, q in enumerate(data.get("entries") or [], start=1)]
-    elif data.get("note"):
+    elif data.get("note") and not str(data["note"]).startswith("백엔드 보고서 기능 연결 전"):
         lines.append(data["note"])
     return {"reply": "\n".join(lines), "attachments": files, "errors": {}, "tool_result": result}
 

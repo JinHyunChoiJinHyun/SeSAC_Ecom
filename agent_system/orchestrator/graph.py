@@ -144,10 +144,21 @@ def pending_actions(graph, thread_id: str) -> list[dict]:
         return [{"type": "approval", "token": str(getattr(interrupts[0], "id", "") or ""),
                  "title": str(value.get("title", ""))}]
     run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+    if (run.get('status') == 'waiting_input' and run.get('waiting_key') == 'page'
+            and (run.get('copy_package') or {}).get('status') == 'verified' and run.get('run_id')):
+        return [{'type': 'copy_revision_review', 'run_id': run['run_id'],
+                 'revision': int(run['copy_package'].get('revision') or 0),
+                 'phase': 'review'}]
+    draft = run.get('report_draft') or {}
+    if (run.get('run_id') and draft.get('status') == 'review'
+            and run.get('status') == 'paused'):
+        return [{'type':'report_draft_review', 'run_id':run['run_id'],
+                 'revision':int(draft.get('revision') or 1)}]
     if run.get("status") == "waiting_input" and run.get("run_id"):
         if run.get("waiting_key") == "category_decision" and run.get("review_category"):
             return [{"type": "category_confirm", "run_id": run["run_id"],
-                     "category": run["review_category"]}]
+                     "category": run["review_category"],
+                     **({"token": run["category_decision_token"]} if run.get("category_decision_token") else {})}]
         # 세부 유형·색상은 반드시 마케터의 자연어 입력으로 선택한다.
     if run.get("status") in ACTIVE_WORKFLOW_STATUS and run.get("run_id"):
         return [{"type": "workflow", "run_id": run["run_id"], "status": run["status"]}]
@@ -313,6 +324,12 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
             result = enrich_confirmation_result(result, run)
     actions = pending_actions(graph, thread_id)
     # 워크플로 버튼은 워크플로 결과·워크플로 명령 답변에만 붙임 (대기 중 다른 질문마다 버튼이 쌓이지 않게)
+    if actions and actions[0]['type'] == 'copy_revision_review':
+        if (action or {}).get('type') != 'copy_revision_review' and not (
+                result.get('turn_type') == 'chitchat'
+                and ('다시 작성했습니다' in str(result.get('final_answer',''))
+                     or '카피 수정' in str(result.get('final_answer','')))):
+            actions = []
     if actions and actions[0]["type"] == "workflow":
         workflow_turn = (result.get("turn_type") == "workflow" or (action or {}).get("type") == "workflow"
                          or workflow.is_workflow_command(question)
@@ -378,7 +395,32 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
             print(f"[버튼] 승인 요청 → {decision}")
             return _resume_approval(graph, config, turn_id, thread_id, decision,
                                     f"[버튼] {APPROVAL_BUTTON_LABELS[decision]}")
-        if kind in {"category_confirm", "subtype_suggestion"}:
+        if kind == 'copy_revision_review':
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, 'values', None) or {}) if snapshot is not None else {}).get('workflow_run') or {}
+            if (run.get('status') != 'waiting_input' or run.get('waiting_key') != 'page'
+                    or run.get('run_id') != action.get('run_id')
+                    or action.get('phase') != 'review'
+                    or int((run.get('copy_package') or {}).get('revision') or 0) != action.get('revision')):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            command = action.get('command')
+            if command not in ('edit','undo','choose1','choose2','choose3'):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            question = '__cart_copy_review__:' + command
+            skip_approval_check = True
+        elif kind == 'report_draft_review':
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, 'values', None) or {}) if snapshot is not None else {}).get('workflow_run') or {}
+            draft = run.get('report_draft') or {}
+            if (run.get('run_id') != action.get('run_id')
+                    or draft.get('status') != 'review'
+                    or int(draft.get('revision') or 0) != action.get('revision')):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            if action.get('command') not in ('approve','edit','cancel'):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            question = '__cart_report_review__:' + action['command']
+            skip_approval_check = True
+        elif kind in {"category_confirm", "subtype_suggestion"}:
             # Slack 버튼은 현재 Run·대기 키·추천 후보와 완전히 일치할 때만 허용한다.
             snapshot = _snapshot(graph, thread_id)
             run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
@@ -386,9 +428,14 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
                 return _notice(thread_id, STALE_ACTION_REPLY)
             if kind == "category_confirm":
                 if (run.get("waiting_key") != "category_decision" or
-                        run.get("review_category") != action.get("category")):
+                        run.get("review_category") != action.get("category") or
+                        (run.get("category_decision_token") or "") != (action.get("token") or "")):
                     return _notice(thread_id, STALE_ACTION_REPLY)
-                question = f"{run['review_category']} 확정 승인"
+                decision = action.get("decision", "approve")
+                if decision not in {"approve", "reject", "cancel"}:
+                    return _notice(thread_id, STALE_ACTION_REPLY)
+                question = (f"{run['review_category']} 확정 승인" if decision == "approve"
+                            else f"{run['review_category']} 대분류 승인 요청 {decision}")
             else:
                 options = run.get("subtype_options") or []
                 if run.get("waiting_key") != "subtype_colors" or not options:

@@ -75,7 +75,7 @@ def build_approval_request(updates: dict, title: str = "확정값 저장", sourc
     lines = describe_updates(updates)
     return {
         "title": title,
-        "question": f"[승인 요청] 아래 내용을 기획전 확정값으로 저장할까요?\n{lines}\n→ 아래 [승인] / [반려] 버튼을 눌러 주세요. 값을 바꾸려면 채팅으로 알려 주세요 (예: \"카디건으로 수정\")",
+        "question": f"[승인 요청] 아래 내용을 기획전 확정값으로 저장할까요?\n{lines}\n→ 아래 [승인] / [반려] 버튼을 눌러 주세요. 변경할 내용은 채팅으로 알려 주세요.",
         "updates": dict(updates),
         "source": source,
     }
@@ -103,6 +103,14 @@ def check_approval_node(state) -> dict:
     # 10단계의 실제 저장 직전에도 검증된 후보·카테고리·테마를 다시 확인한다.
     review_run = state.get("workflow_run") or {}
     requested = dict(request.get("updates") or {})
+    if (kind == "approve" and review_run.get("period_plan") and "schedule" in requested
+            and review_run.get("status") not in ("done", "cancelled")):
+        from agent_system.orchestrator.tools.category_planning.period_context import schedule_matches
+        if not schedule_matches(review_run, requested["schedule"]):
+            reply = "승인하지 않았습니다: 운영 일정 변경은 새 분석에서만 가능합니다."
+            return {"campaign": campaign, "pending_approval": {},
+                    "approval_result": {"kind": "reject", "text": reply}, "turn_type": "approval",
+                    "reply": reply, "messages": [AIMessage(content=reply, name="orchestrator")]}
     if (kind == "approve" and review_run.get("workflow") == "trend_planning"
             and review_run.get("status") == "waiting_input" and review_run.get("waiting_key") == "products"
             and {"category", "products", "theme", "subtype", "colors"}.intersection(requested)):
@@ -140,6 +148,10 @@ def check_approval_node(state) -> dict:
         try:
             valid = validate_candidates({**package, "status": "draft"},
                                         review_run.get("campaign_summary") or {}, campaign)
+            from agent_system.validation.semantic_campaign_validator import review_campaign_copy
+            # 외부 LLM 호출은 명시적으로 required 설정된 경우에만 수행한다.
+            # 오프라인에서도 생성 코드와 분리된 근거 검사는 반드시 적용한다.
+            review_campaign_copy(package, review_run.get("campaign_summary") or {}, campaign)
         except (ValueError, TypeError, KeyError):
             valid = None
         if (package.get("status") != "verified" or chosen is None or valid != package
@@ -158,18 +170,17 @@ def check_approval_node(state) -> dict:
             updates["category"] = review_run["review_category"]
         campaign = update_conversation_state(campaign, updates, source=request.get("source", "user"))
         if "selling_points" in updates and review_run.get("campaign_summary"):
-            from agent_system.orchestrator.tools.campaign_copy import selection_brief
-            reply = ("소구점을 확정했습니다.\n\n" + selection_brief(
-                review_run["campaign_summary"], updates["selling_points"], campaign,
-                review_run.get("category_market"))
-                + "\n\n선택한 근거를 바탕으로 대표 문구 3안을 작성하고 검증합니다.")
+            from agent_system.orchestrator.tools.campaign_copy import _selected
+            points = _selected(updates["selling_points"]).get("points") or []
+            reply = ("소구점을 확정했습니다.\n\n확정 소구점: " + " / ".join(points)
+                     + "\n\n선택한 근거를 바탕으로 대표 문구 3안을 작성하고 검증합니다.")
         elif "page" in updates and review_run.get("copy_package"):
             reply = "대표 문구를 확정했습니다. 페이지 초안에 반영할 선택값을 저장했습니다."
         else:
             reply = f"승인했습니다. 확정값을 저장했습니다.\n{describe_updates(request.get('updates') or {})}"
     elif kind == "revise":
         reply = (f"수정 요청을 받았습니다: \"{text}\"\n"
-                 "바꿀 값을 확정해 달라고 다시 말씀해 주시면 (예: \"카테고리는 카디건으로 확정\") 다시 확인받겠습니다.")
+                 "변경할 값을 알려 주시면 다시 확인하겠습니다.")
         log = list(campaign.get("log") or []) + [{"key": "_approval", "value": f"수정 요청: {text}",
                                                  "previous": request.get("title", ""), "source": "user"}]
         campaign = {**campaign, "log": log[-30:]}

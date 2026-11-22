@@ -135,6 +135,9 @@ def run_status_text(run: dict | None, campaign: dict | None = None) -> str:
         return ""
     head = f"{step.title}"
     if run.get("status") == "waiting_input":
+        if run.get("waiting_key") == "campaign_period":
+            from agent_system.orchestrator.tools.category_planning.period_context import date_prompt
+            return date_prompt(run)
         if run.get("waiting_key") == "category_confirmation":
             category = run.get("review_category") or "선택한 카테고리"
             return (f"{category} 분석 완료 — 대분류 미확정.\n"
@@ -150,13 +153,13 @@ def run_status_text(run: dict | None, campaign: dict | None = None) -> str:
             return ("세부 유형·색상 선택 대기 중. "
                     + (color_guide(selected) if selected else "소분류 1개와 색상 1~3개를 선택하세요. 예: 경량패딩으로 하고 블랙이랑 그린 카키로 갈게"))
         if step.no == 10 and run.get("subtype_flow"):
-            return f"{head} — 주력상품 최종 승인 대기 중. 유형: {run.get('selected_subtype')} / 색상: {', '.join(run.get('selected_colors') or [])}. [승인] 또는 [반려] 버튼을 선택해 주세요."
+            return f"{head} — 과거 상품 사례 확인·기획전 유형 및 색상 방향 승인 대기 중. 유형: {run.get('selected_subtype')} / 색상: {', '.join(run.get('selected_colors') or [])}. [승인] 또는 [반려] 버튼을 선택해 주세요."
         if step.no == 16 and workflow.name == "trend_planning":
             return "대표 문구 3안 중 하나를 자연어로 선택해 주세요. 예: 3번으로 할게"
         if step.no == 13 and workflow.name == "trend_planning":
             from agent_system.orchestrator.tools.campaign_selection import guide
             summary = run.get("campaign_summary")
-            return f"{head} — 소구점 2~3개 선택 대기 중." if summary else "워크플로 12단계 재실행이 필요합니다."
+            return f"{head} — 소구점 선택 대기 중 (2~3개 권장, 후보 범위 내 자유 선택)." if summary else "워크플로 12단계 재실행이 필요합니다."
         return (f"{head} — 선택 대기 중. {base.render(step.instruction, run, campaign)}\n"
                 f"(값을 말씀하시면 확정값 '{step.selects}'로 승인받은 뒤 다음 단계로 진행합니다)")
     if run.get("status") == "paused":
@@ -193,6 +196,46 @@ def _run_agent_step(step, run: dict, state) -> dict:
         return {"final_answer": f"{spec.label} Agent 실행에 실패했습니다.", "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _campaign_topic_from_request(request: str) -> str:
+    """최초 요청의 '기획전' 앞에 명시된 주제를 추출한다 (추측하거나 고정 제목을 선택하지 않음)."""
+    request = re.sub(r"\s+", " ", str(request or "")).strip()
+    # '기획전'이 여러 번 등장해도 첫 요청의 제목 표현을 우선한다.
+    match = re.search(r"기획전", request)
+    if not match:
+        return ""
+
+    prefix = request[:match.start()]
+    # 기간 표현을 숫자만 지우지 않고 조사까지 한 덩어리로 제거한다.
+    # 예: '3주 뒤부터 한 달간' -> '' ('뒤부터 간'이 남지 않도록).
+    prefix = re.sub(
+        r"(?:\d+\s*주\s*뒤부터|\d+\s*주\s*후부터|다음\s*달부터|이번\s*달부터)"
+        r"\s*(?:(?:한|두|세|\d+)\s*(?:달|개월|주)\s*(?:간|동안)?(?:\s*까지)?(?:\s*의)?|\d+\s*일\s*(?:간|동안)?)?",
+        " ", prefix,
+    )
+    # 기간·타깃 조건을 제목으로 오인하지 않도록 가장 마지막 주제 구간을 사용한다.
+    prefix = re.split(r"대상으로|대상으로는|위한|위해서|목적으로|[,，.!?。]", prefix)[-1]
+    prefix = re.sub(r"(?:온라인|오프라인|온\s*·\s*오프라인|비대면)\s*", "", prefix)
+    prefix = re.sub(r"(?:\d{1,2}\s*[~-]\s*\d{1,2}대|\d{1,2}대|\d{4}년|\d+주|\d+개월|한\s*달|두\s*달)\s*", "", prefix)
+    prefix = re.sub(r"(?:고객|회원|대상|타깃|타겟|진행|상품을|제품을)\s*", "", prefix)
+    prefix = re.sub(r"[^0-9A-Za-z가-힣\s·&/-]", " ", prefix)
+    tokens = prefix.split()
+    if not tokens:
+        return ""
+    # 주제가 길거나 정형화되지 않은 입력은 임의 축약 대신 안전한 일반 제목으로 처리한다.
+    topic = " ".join(tokens)
+    if len(tokens) > 7 or len(topic) > 36:
+        return ""
+    return topic
+
+
+def _public_workflow_heading(workflow, run: dict) -> str:
+    """최초 요청에 명시된 주제로 제목을 만든다. 내부 run_id는 출력하지 않는다."""
+    if workflow.name != "trend_planning":
+        return f"■ {workflow.title} 진행 안내"
+    topic = _campaign_topic_from_request(run.get("request") or "")
+    return f"■ {topic} 기획전 분석" if topic else "■ 기획전 분석 결과"
+
+
 def run_workflow_node(state) -> dict:
     """현재 run을 다음 멈출 지점(마케터 선택·구현 전 Agent·gate·완료)까지 실행합니다."""
     from agent_system.orchestrator.orchestrator import store_turn_result
@@ -224,16 +267,37 @@ def run_workflow_node(state) -> dict:
             run["stage"] = stage.key
             run = base.record_run_event(run, "stage_transition", stage=stage.key)
 
+        if run.get("period_required") and index > 0 and not run.get("period_plan"):
+            run.update(status="blocked", blocked_reason="검증된 공통 분석 기간 없음")
+            sections.append("공통 분석 기간이 없어 과거 구매 분석을 진행할 수 없습니다. 새 분석을 시작하세요.")
+            break
         # CART_SIGNAL_CATEGORY_BRIDGE_V1: 2~3단계를 하나의 검증된 분석으로 실행, 4단계 선택에서 정지
         if (workflow.name == "trend_planning" and stage.key == "s1_product_selection"
                 and step.no == 2 and index == 0
-                and "겨울" in str(run.get("request", ""))):
+                and (run.get("period_required") or run.get("period_plan") or "겨울" in str(run.get("request", "")))):
             from pathlib import Path
             from agent_system.orchestrator.tools.category_planning.workflow_bridge import build_category_result
             try:
                 safe_run_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(run["run_id"]))
                 output = Path("audit_output/slack_category_bridge") / safe_run_id
-                result = build_category_result(run.get("request", ""), output)
+                if run.get("period_required") and not run.get("period_plan"):
+                    from agent_system.orchestrator.tools.category_planning.period_context import date_prompt
+                    if not run.get("campaign_dates"):
+                        run.update(status="waiting_input", waiting_key="campaign_period")
+                        run = base.record_run_event(run, "waiting_input", key="campaign_period", step=1)
+                        sections.append(date_prompt(run))
+                        break
+                    from agent_system.common_tools.local_data.campaign_period import load_period_plan
+                    plan = load_period_plan(**run["campaign_dates"], buffer_months=1, after_months=0)
+                    interpretation = run.get("schedule_interpretation") or {}
+                    if interpretation.get("precision") in ("month", "calculated"):
+                        plan = {**plan, "schedule_interpretation": dict(interpretation)}
+                    run["period_plan"] = plan
+                if run.get("period_plan") is not None:
+                    result = build_category_result(run.get("request", ""), output, period_plan=run["period_plan"])
+                    run["category_period_rows"] = result["rows"]
+                else:
+                    result = build_category_result(run.get("request", ""), output)
             except Exception as exc:
                 run.update(status="blocked", blocked_reason=f"카테고리 통합 분석 실패: {type(exc).__name__}: {exc}")
                 sections.append("■ 카테고리 비교 실패\n" + run["blocked_reason"])
@@ -249,6 +313,14 @@ def run_workflow_node(state) -> dict:
             run = base.record_run_event(run, "waiting_input", step=4, key="category")
             break
 
+        # 예정 일정은 분석/초안에만 사용한다. 운영 확정 전 외부 실행은 금지한다.
+        if workflow.name == "trend_planning" and step.no >= 24 and run.get("period_plan"):
+            from agent_system.orchestrator.tools.category_planning.period_context import execution_schedule_ready
+            if not execution_schedule_ready(run["period_plan"]):
+                run.update(status="paused", blocked_reason="실제 운영 일자 미확정")
+                sections.append("예상 일정으로 분석과 보고서 작성은 가능하지만 승인 요청·발송은 할 수 없습니다. "
+                                "실제 시작일·종료일을 포함한 새 분석에서 운영 일정을 확정해 주세요.")
+                break
         label = f"■ {step.title}"
         # CART_SIGNAL_CATEGORY_REVIEW_LOOP_V1: 4단계는 검토 카테고리 선택, 최종 확정은 10단계
         if (workflow.name == "trend_planning" and step.no == 4
@@ -267,7 +339,7 @@ def run_workflow_node(state) -> dict:
                 run["category_review_evidence"] = evidence
             if not base.confirmed_since(campaign, "products", run.get("started_at", "")):
                 sections.append("■ 다른 카테고리도 분석하려면 '니트·스웨터 분석해줘'처럼 입력하세요. "
-                                "주력 상품 ID를 승인하기 전에는 다음 단계로 넘어가지 않습니다.")
+                                "과거 H&M 참고 사례와 유형·색상 방향을 승인하기 전에는 다음 단계로 넘어가지 않습니다.")
         if workflow.name == "trend_planning" and step.no == 16:
             package = run.get("copy_package") or {}
             if not package or package.get("status") != "verified":
@@ -327,7 +399,7 @@ def run_workflow_node(state) -> dict:
                     # 승인 요청 본문과 Slack 버튼이 이미 표시되므로 중복 텍스트를 추가하지 않는다.
                 except ValueError as exc:
                     run.update(status="blocked", blocked_reason=f"10단계 상품 검증 실패: {exc}")
-                    sections.append(f"{label}\n주력상품 승인을 요청할 수 없습니다: {exc}")
+                    sections.append(f"{label}\n과거 사례·편성 방향 승인을 요청할 수 없습니다: {exc}")
             else:
                 sections.append(f"{label}\n{base.render(step.instruction, run, campaign)}")
             run = base.record_run_event(run, "waiting_input" if step10_approval_request or run["status"] == "waiting_input" else "blocked", step=step.no, key=step.selects)
@@ -361,7 +433,21 @@ def run_workflow_node(state) -> dict:
             break
 
         # CART_SIGNAL_VERIFIED_PRODUCT_SEARCH_V1
-        if workflow.name == "trend_planning" and step.no in (6, 11):
+        if (workflow.name == "trend_planning" and step.no == 5 and run.get("review_category")
+                and run.get("period_plan")):
+            from agent_system.orchestrator.tools.category_planning.period_context import build_period_product_result
+            try:
+                result = build_period_product_result(run["review_category"], run["period_plan"], bool(run.get("subtype_flow")))
+                expected = next((r['hm_purchases'] for r in run.get('category_period_rows', [])
+                                 if r['category'] == run['review_category']), None)
+                expected_before = next((r.get('hm_before_purchases') for r in run.get('category_period_rows', [])
+                                        if r['category'] == run['review_category']), None)
+                if (expected is None or result['period_comparison']['core_purchases'] != expected
+                        or result['period_comparison']['before_purchases'] != expected_before):
+                    raise ValueError('대분류 집계와 상품 구매 집계가 불일치합니다. 새 분석을 시작하세요.')
+            except Exception as exc:
+                result = {"final_answer": "월 단위 상품 분석 실패", "error": f"{type(exc).__name__}: {exc}"}
+        elif workflow.name == "trend_planning" and step.no in (6, 11):
             from agent_system.common_tools.external_data.category_market import build_category_market
             from agent_system.orchestrator.tools.category_synthesis import market_view, render_market
             try:
@@ -384,7 +470,7 @@ def run_workflow_node(state) -> dict:
                 summary = run.get("campaign_summary") or {}
                 if step.no == 14:
                     run["copy_package"] = generate_candidates(summary, campaign)
-                    result = {"final_answer": "확정 소구점과 실제 상품을 기준으로 대표 문구 3안을 작성했습니다. 15단계에서 근거를 검사합니다.",
+                    result = {"final_answer": "검토한 기획전 유형·색상·디자인 특징을 기준으로 대표 문구 3안을 작성했습니다. 15단계에서 근거를 검사합니다.",
                               "data_sources": ["hm", "musinsa"]}
                 else:
                     package = validate_candidates(run.get("copy_package") or {}, summary, campaign)
@@ -406,10 +492,20 @@ def run_workflow_node(state) -> dict:
                 result = build_category_summary(run["review_category"], run.get("hm_category_snapshot"),
                                                 run.get("category_market"), state["turn_id"])
                 run["category_synthesis"] = result["category_synthesis"]
+                if run.get("period_plan"):
+                    from agent_system.orchestrator.tools.category_planning.period_context import period_note, period_table_note
+                    comparison = run["hm_period_comparison"]
+                    result["final_answer"] += "\n" + period_note(run["period_plan"]) + "\n" + period_table_note(
+                        run["period_plan"], comparison["core_purchases"], comparison["before_purchases"])
+                    run["category_synthesis"]["period_comparison"] = comparison
                 if run.get("subtype_flow"):
                     from agent_system.orchestrator.tools.category_planning.subtype_selection import rank_options, guide
                     from agent_system.orchestrator.tools.category_planning.subtype_selection import review_options
-                    options = review_options(run["review_category"], (run.get("category_market") or {}).get("naver_metrics") or {}, run.get("subtype_inventory") or {})
+                    from agent_system.orchestrator.tools.category_planning.subtype_selection import collect_musinsa_subtype_evidence
+                    inventory = run.get("subtype_inventory") or {}
+                    market_evidence = collect_musinsa_subtype_evidence(run["review_category"], inventory.keys())
+                    run["musinsa_subtype_evidence"] = market_evidence
+                    options = review_options(run["review_category"], (run.get("category_market") or {}).get("naver_metrics") or {}, inventory, market_evidence)
                     run["subtype_options"] = options
                     run["category_synthesis"]["subtype_options"] = options
                     run["category_synthesis"]["theme_candidate"] = options[0]["keyword"] if options and options[0].get("growth") is not None else None
@@ -439,9 +535,12 @@ def run_workflow_node(state) -> dict:
                 if run.get("subtype_flow") and not (run.get("selected_subtype") and run.get("selected_colors")):
                     raise ValueError("세부 유형과 색상을 먼저 선택하세요.")
                 if run.get("subtype_flow"):
-                    result = build_verified_step8(reviewed_category, subtype=run["selected_subtype"], colors=run["selected_colors"])
+                    selection = {"subtype": run["selected_subtype"], "colors": run["selected_colors"]}
                 else:
-                    result = build_verified_step8(reviewed_category)
+                    selection = {}
+                if run.get("period_plan"):
+                    selection["period_plan"] = run["period_plan"]
+                result = build_verified_step8(reviewed_category, **selection)
                 # CART_SIGNAL_PRODUCT_EVIDENCE_V1
                 from agent_system.orchestrator.tools.category_planning.product_evidence import enrich_verified_result
                 result = enrich_verified_result(result, reviewed_category, str(run.get("run_id", "unknown")), include_chart=False, include_naver=False)
@@ -527,7 +626,12 @@ def run_workflow_node(state) -> dict:
             run["history"] = _history(run, step, "failed", str(result["error"]))
             sections.append("이 단계에서 멈춥니다. 아래 [다시 시도] 버튼으로 다시 시도할 수 있습니다.")
             break
-        if workflow.name == "trend_planning" and step.no == 5 and run.get("review_category"):
+        if workflow.name == "trend_planning" and step.no == 5 and run.get("review_category") and run.get("period_plan"):
+            from agent_system.orchestrator.tools.category_synthesis import capture_hm
+            run["hm_category_snapshot"] = capture_hm(result, run["review_category"])
+            run["hm_period_comparison"] = result["period_comparison"]
+            run["subtype_inventory"] = result["subtype_inventory"]
+        elif workflow.name == "trend_planning" and step.no == 5 and run.get("review_category"):
             from agent_system.orchestrator.tools.category_synthesis import capture_hm, _fallback_hm
             snapshot = capture_hm(result, run["review_category"])
             if not (snapshot.get("colour_counts") or snapshot.get("style_tag_counts")):
@@ -598,7 +702,7 @@ def run_workflow_node(state) -> dict:
         run = base.record_run_event(run, "done")
 
     prefix = str(state.get("reply") or "").strip() if state.get("turn_type") in ("approval", "workflow") else ""
-    header = f"[{workflow.title} 워크플로 · run {run['run_id']}]"
+    header = _public_workflow_heading(workflow, run)
     final_answer = "\n\n".join(([prefix] if prefix else []) + [header] + sections)
     turn_result = {
         "final_answer": final_answer,
@@ -659,6 +763,15 @@ def start_run(workflow_name: str, request: str, campaign: dict | None, previous_
                     "메인 기획전 워크플로에서 주력 상품을 확정한 뒤 다시 요청해 주세요.")
     parent = (previous_run or {}).get("run_id", "") if (previous_run or {}).get("workflow") == workflow.parent else ""
     run = base.record_run_event(base.new_run(workflow, request, parent_run_id=parent), "run_started")
+    if workflow_name == "trend_planning":
+        from agent_system.orchestrator.tools.category_planning.period_context import interpret_schedule
+        run["period_required"] = True
+        try:
+            interpreted = interpret_schedule(request)
+        except ValueError:
+            interpreted = None
+        run["campaign_dates"] = interpreted["dates"] if interpreted else None
+        run["schedule_interpretation"] = interpreted
     return run, ""
 
 
@@ -668,6 +781,40 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
         if CANCEL_COMMAND.search(message) or CONTINUE_COMMAND.search(message) or STATUS_COMMAND.search(message):
             return "진행 중인 워크플로가 없습니다.", None, False
         return "", None, False
+    if (run.get("period_required") and run.get("waiting_key") == "campaign_period"
+            and not (CANCEL_COMMAND.search(message) or CONTINUE_COMMAND.search(message) or STATUS_COMMAND.search(message))):
+        from agent_system.orchestrator.tools.category_planning.period_context import date_prompt, interpret_schedule
+        try:
+            interpreted = interpret_schedule(message)
+            # 이전 버전의 일정 확인 대기 Run도 재개할 수 있다.
+            if message.strip() == "일정 확정" and run.get("period_proposal"):
+                interpreted = {"dates": run["period_proposal"], "precision": "exact"}
+        except ValueError as exc:
+            return str(exc) + "\n" + date_prompt(run), None, False
+        if not interpreted:
+            return date_prompt(run), None, False
+        dates = interpreted["dates"]
+        revised = dict(run, campaign_dates=dates, schedule_interpretation=interpreted,
+                       period_proposal=None, status="running", waiting_key="", blocked_reason="")
+        return "", base.record_run_event(revised, "campaign_period_resolved", **dates, precision=interpreted["precision"]), True
+    # 기간 변경으로 승인 근거를 조용히 바꾸지 않는다.
+    if run.get("period_plan") and re.search(r"(?:기획전|운영)\s*(?:일정|기간)", message) and re.search(r"변경|수정|다시", message):
+        return "현재 분석의 운영 일정은 고정되어 있습니다. 날짜를 변경하려면 워크플로 취소 후 새 분석을 시작하세요.", None, False
+    # 보고서 검토 버튼은 별도 단계 실행을 발생시키지 않는다.
+    if message.startswith('__cart_report_review__:'):
+        command = message.split(':', 1)[1]
+        draft = run.get('report_draft') or {}
+        if draft.get('status') != 'review':
+            return '검토 중인 보고서 초안이 없습니다.', None, False
+        if command == 'edit':
+            return '보고서 수정 요청을 채팅으로 입력해 주세요. 예: 보고서에 네이버 관심도 근거를 추가해줘.', None, False
+        if command == 'cancel':
+            revised = dict(run, report_draft={**draft, 'status':'cancelled'})
+            return '보고서 초안 검토를 취소했습니다. 분석·카피 승인값은 유지됩니다.', revised, False
+        if command == 'approve':
+            revised = dict(run, report_draft={**draft, 'status':'approved'})
+            return '보고서 초안을 승인했습니다. 이는 문서 검토 승인일 뿐 고객 선정·발송이나 Word 파일 생성 완료를 의미하지 않습니다.', revised, False
+        return '지원하지 않는 보고서 검토 버튼입니다.', None, False
     # 타깃 모델 연결 전 임시 보고서. 실제 17~29단계를 완료 처리하지 않는다.
     if message.strip() in ("기획전 보고서 초안 작성해줘", "기획전 보고서 초안 만들어줘", "보고서 초안 작성해줘"):
         workflow, _, step = current_step(run)
@@ -679,7 +826,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             report = build_draft(run, campaign)
         except ValueError as exc:
             return str(exc), None, False
-        revised = dict(run, report_draft={"status": "draft_only", "text": report, "target_verified": False})
+        revised = dict(run, report_draft={"status": "review", "revision": 1, "text": report, "target_verified": False, "history": []})
         return report, base.record_run_event(revised, "provisional_report_drafted", target_verified=False), False
     # 보고서 수정은 새 SQL 조회가 아닌 현재 Run의 확정 근거만 사용한다.
     from agent_system.orchestrator.tools.provisional_report import is_report_revision, revise_draft
@@ -692,8 +839,11 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             report = revise_draft(run, campaign, message)
         except ValueError as exc:
             return str(exc), None, False
-        revised = dict(run, report_draft={"status": "draft_only", "text": report,
-                                          "target_verified": False})
+        previous = run.get('report_draft') or {}
+        history = list(previous.get('history') or []) + [previous.get('text')]
+        revised = dict(run, report_draft={"status": "review", "revision": int(previous.get('revision') or 0)+1,
+                                          "text": report, "target_verified": False,
+                                          "history": history[-20:]})
         return report, base.record_run_event(revised, "provisional_report_revised",
                                              target_verified=False), False
     # 기존 13단계 승인 요청을 취소한 뒤, 11~12단계의 새 랭킹 분석만 다시 수행한다.
@@ -724,16 +874,25 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
         from agent_system.orchestrator.tools.category_planning.review_selection import CATEGORIES
         confirmation = parse_category_confirmation(message)
         category = parse_category_review(message)
+        if run.get("waiting_key") == "category_decision" and message.strip() in (
+                f"{run.get('review_category')} 대분류 승인 요청 reject",
+                f"{run.get('review_category')} 대분류 승인 요청 cancel"):
+            revised = dict(run, status="waiting_input", waiting_key="category_confirmation", category_confirmed=False,
+                           category_decision_token="")
+            revised = base.record_run_event(revised, "category_approval_withdrawn")
+            return "대분류 승인 요청을 종료했습니다. 기존 분석 결과는 유지됩니다. 다른 카테고리를 분석하거나 다시 확정해 주세요.", revised, False
         # 대분류 확정은 분석 요청과 별개다. 동일 카테고리 분석 결과가 있으면 재조회하지 않는다.
         if confirmation and run.get("waiting_key") == "category_confirmation" and confirmation == run.get("review_category"):
-            revised = dict(run, status="waiting_input", waiting_key="category_decision", blocked_reason="")
+            from uuid import uuid4
+            revised = dict(run, status="waiting_input", waiting_key="category_decision", blocked_reason="",
+                           category_decision_token=uuid4().hex)
             revised = base.record_run_event(revised, "category_approval_requested", category=confirmation)
             return (f"대분류를 {confirmation}(으)로 확정하시겠습니까?\n"
                     f"아래 [{confirmation} 승인] 버튼을 눌러 주세요. 승인 전에는 세부 유형 분석 결과를 확정하지 않습니다."), revised, False
         if (message.strip() == f"{run.get('review_category')} 확정 승인"
                 and run.get("waiting_key") == "category_decision"):
             confirmation = run["review_category"]
-            revised = dict(run, category_confirmed=True, blocked_reason="")
+            revised = dict(run, category_confirmed=True, blocked_reason="", category_decision_token="")
             revised = base.record_run_event(revised, "category_confirmed", category=confirmation)
             if revised.get("subtype_flow"):
                 from agent_system.orchestrator.tools.category_planning.subtype_selection import guide
@@ -768,6 +927,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             revised["subtype_flow"] = category == "아우터"
             revised["subtype_options"] = []
             revised["subtype_inventory"] = {}
+            revised["musinsa_subtype_evidence"] = {}
             revised["selected_subtype"] = ""
             revised["selected_colors"] = []
             revised["review_buffer"] = {}
@@ -775,6 +935,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             revised["verified_candidate_rows"] = []
             revised["category_market"] = {}
             revised["hm_category_snapshot"] = {}
+            revised.pop("hm_period_comparison", None)
             revised["category_synthesis"] = {}
             revised["blocked_reason"] = ""
             revised = base.record_run_event(revised, "category_review_started", category=category)

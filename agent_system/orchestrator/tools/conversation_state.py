@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 # 확정값 항목과 한글 이름 (프롬프트·안내 문구에 사용)
 CAMPAIGN_KEYS = {
     "category": "카테고리",
-    "products": "주력 상품",
+    "products": "H&M 과거 판매 참고 상품 ID",
     "target": "타깃",
     "schedule": "기획전 일정",
     "theme": "기획전 주제",

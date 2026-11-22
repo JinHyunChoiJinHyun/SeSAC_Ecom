@@ -483,9 +483,12 @@ def build_slack_message(
 
     # 업무 진행 번호는 내부 history/step_index에 그대로 두고 Slack에서만 숨깁니다.
     # 일반 분석 질문에서 단계 번호를 설명할 때는 변경하지 않습니다.
-    if result.get("workflow_run") or result.get("turn_type") in ("workflow", "approval"):
+    if (result.get("workflow_display") or result.get("workflow_run")
+            or result.get("conversation_reason") == "워크플로 명령"
+            or result.get("turn_type") in ("workflow", "approval", "approval_request")):
         from interfaces.slack.message_policy import hide_workflow_stage_labels
-        slack_message = hide_workflow_stage_labels(slack_message)
+        from interfaces.slack.message_policy import format_workflow_text
+        slack_message = format_workflow_text(hide_workflow_stage_labels(slack_message))
 
     # CSV 파일이 실제로 생성된 경우에만 상세 데이터 안내를 추가합니다.
     if csv_available and "첨부 CSV" not in slack_message and "첨부된 CSV" not in slack_message:
@@ -652,6 +655,7 @@ def post_slack_message(
     text: str,
     thread_ts: str | None = None,
     dataframe_result: dict | None = None,
+    workflow_layout: bool = False,
 ):
     """실제 DataFrame 표를 본문 표 위치에 배치합니다."""
     import re
@@ -680,10 +684,13 @@ def post_slack_message(
     def send_plain(value):
         for chunk in split_slack_message(value):
             if chunk.strip():
+                from interfaces.slack.message_policy import workflow_section_blocks
+                blocks = workflow_section_blocks(chunk) if workflow_layout else []
                 responses.append(client.chat_postMessage(
                     channel=channel_id,
                     text=chunk,
                     thread_ts=thread_ts,
+                    **({"blocks": blocks} if blocks else {}),
                 ))
 
     def send_text(value):
@@ -939,7 +946,7 @@ def _ordered_workflow_files(paths):
         name = path.name.lower()
         if name.endswith("_evidence.png"):
             return 0
-        if name.endswith("_winter_purchases.png"):
+        if name.endswith(("_winter_purchases.png", "_core_purchases.png")):
             return 1
         if name.endswith("_products.png"):
             return 2
@@ -1240,6 +1247,11 @@ def deliver_to_slack(
     # 최종 답변 전송
     # =====================================================
 
+    # 후보·근거가 본문에 이미 정리된 기획전 결과는 긴 중복 데이터 표 대신 CSV를 제공한다.
+    # CSV를 만들지 못한 경우와 다른 분석 요청은 기존 표 전송을 유지한다.
+    from interfaces.slack.message_policy import use_csv_only_preview
+    preview_result = None if chart_only or use_csv_only_preview(result, slack_message, csv_path is not None) else result
+
     try:
 
         message_responses = (
@@ -1253,8 +1265,10 @@ def deliver_to_slack(
                 text=
                     slack_message,
 
-                dataframe_result=
-                    result if not chart_only else None,
+                dataframe_result=preview_result,
+                workflow_layout=bool(result.get("workflow_display") or result.get("workflow_run")
+                    or result.get("conversation_reason") == "워크플로 명령"
+                    or result.get("turn_type") in ("workflow", "approval", "approval_request")),
 
                 thread_ts=
                     thread_ts,
@@ -1418,6 +1432,17 @@ def deliver_to_slack(
                 }
             )
 
+
+    # 본문 표를 생략했는데 CSV 업로드가 실패하면 기존 표를 복구한다.
+    if not chart_only and preview_result is None and csv_path and not any(
+        item.get("success") and str(item.get("file_path")) == str(csv_path) for item in upload_results
+    ):
+        try:
+            post_slack_message(client, channel_id, "CSV 첨부에 실패했습니다. 주요 결과 표를 다시 제공합니다.",
+                               thread_ts=thread_ts, dataframe_result=result)
+        except Exception as exc:
+            LOGGER.warning("CSV 실패 후 표 전송 실패: %s", type(exc).__name__)
+            attachment_errors.append({"type": "csv_preview_fallback", "error": type(exc).__name__})
 
     # 버튼이 있는 응답은 파일 공유 게시를 확인한 후 반환합니다.
     if result.get("actions") and upload_results:

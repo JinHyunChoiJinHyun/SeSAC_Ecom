@@ -80,13 +80,14 @@ def summarize(category, hm, market):
     theme = market.get('theme_candidate')
     classes = market.get('keyword_classes') or {}
     if theme not in metrics: theme = None
-    lines = [f'분석 범위: {category} / 5·6단계 저장 결과 정리 (새로운 추천·조회 없음)',
-             f'6단계 테마 검토 후보: {theme or "보류 (근거 미확인)"}']
+    lines = [f'분석 범위: {category} / 저장 결과 정리 (새로운 추천·조회 없음)',
+             '■ 네이버 관심도 근거', f'테마 검토 후보: {theme or "보류 (근거 미확인)"}']
     if not metrics: lines.append('네이버 해당 카테고리 매핑 지표 미수집 또는 미확인. 관심 부족을 뜻하지 않습니다.')
     for k,v in metrics.items():
         g = _num(v.get('growth_percent'))
         lines.append(f"- {classes.get(k, '분류 미확인')} | 네이버 {k}: {v.get('prior_mean')} → {v.get('recent_mean')} / 변화 {f'{g:+.2f}%' if g is not None else '계산 불가'} / 기준 {v.get('latest_period') or '미확인'}")
     lines.append('제외: 6단계에서 확인된 제외 근거 없음. 상승의 지속 여부는 미확인.')
+    lines.append('■ H&M 상품 구성 근거')
     total = hm.get('total_articles')
     if total is not None:
         lines.append(f"H&M 상품 구성: 색상별 상품 {total:,}개 / 모델 {hm.get('total_products')}개 / 범위: {hm.get('basis','미확인')}")
@@ -94,6 +95,7 @@ def summarize(category, hm, market):
     lines.append('색상 구성 참고: '+(', '.join(f'{k} {v:,}개' for k,v in colors) or '자료 없음'))
     lines.append('스타일 구성 참고: '+(', '.join(f'{k} {v:,}개' for k,v in tags) or '자료 없음'))
     lines.append('H&M 빈도는 구매·인기 순위가 아니며 스타일 태그는 중복될 수 있습니다.')
+    lines.append("■ 무신사 표본 근거")
     lines.append(f"무신사 전체 카테고리 표본: 상품 {market.get('sample_products','미확인')}개 / 연결 리뷰 {market.get('sample_reviews','미확인')}건")
     lines.append('리뷰 상세·판매 포인트는 11단계에서 확인합니다. 테마와 H&M 실제 상품의 직접 일치는 미검증입니다.')
     records = [{'source':'hm_colour','metric':k,'value':v,'unit':'article_count'} for k,v in colors]
@@ -184,11 +186,11 @@ def product_summary(rows, category, run_id):
     safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(run_id))
     cat = re.sub(r'[^\w·-]', '_', str(category))
     folder = Path(__file__).resolve().parents[3]/'visualization_output'/'category_product_evidence'/safe
-    lines = ['8단계 검증 후보 비교 (구매 기록 순, 재검색·재추천 없음).', '상품명·설명 기준 유형 매칭; 실제 기능 검증 아님.' if frame.get('keyword_match_verified', pd.Series(False,index=frame.index)).all() else '테마 직접 일치 검증은 수행하지 않았습니다.']
+    lines = ['과거 H&M 판매 참고 사례 비교 (구매 기록 순, 실제 판매 상품 편성 아님).', '상품명·설명 기준 유형 매칭; 실제 기능 검증 아님.' if frame.get('keyword_match_verified', pd.Series(False,index=frame.index)).all() else '테마 직접 일치 검증은 수행하지 않았습니다.']
     for row in rows:
         lines.append(f"- {row['article_id']} | {row['prod_name']} | 구매 {row['winter_online_purchases']:,}건 | 스타일 {row.get('style_tags','미확인')} | 색상 {row.get('colour_group_name','미확인')} | 유형 {'규칙 매칭' if row.get('keyword_match_verified') else '미검증'}")
     result = {'final_answer':'\n'.join(lines),'dataframe':frame,'data_sources':['hm'],'data_purpose':f'{category} 8단계 후보 시각화'}
-    try: result['visualization_path'] = purchase_chart(frame, folder/f'{cat}_winter_purchases.png')
+    try: result['visualization_path'] = purchase_chart(frame, folder/f'{cat}_historical_reference_purchases.png')
     except Exception as exc: result['final_answer'] += f'\n구매 그래프 생성 실패 ({type(exc).__name__})'
     try:
         image_path = product_image_sheet(rows, folder/f'{cat}_products.png')

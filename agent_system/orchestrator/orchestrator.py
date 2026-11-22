@@ -82,6 +82,40 @@ def orchestrator_node(state) -> dict:
             campaign, pending = {}, {}
             common.update(campaign={}, pending_approval={})
 
+    # 최종 승인 이후에도 동일 Run의 분석/소구점은 남기고 카피 단계만 재진입.
+    if str(question).strip() in ('대표 문구 단계로 되돌리기', '카피 단계로 되돌리기'):
+        from copy import deepcopy
+        from agent_system.workflows.registry import get_workflow
+        from agent_system.orchestrator.tools.campaign_copy import generate_candidates, validate_candidates, render_options
+        from agent_system.workflows import base
+        if run.get('workflow') != 'trend_planning' or not (campaign.get('values') or {}).get('selling_points'):
+            notice = '소구점이 확정된 기획전 Run에서만 카피 단계로 돌아갈 수 있습니다.'
+        elif pending:
+            notice = '진행 중인 승인 요청을 먼저 취소해 주세요.'
+        else:
+            try:
+                summary = run.get('campaign_summary') or {}
+                clean = validate_candidates(generate_candidates(summary, campaign), summary, campaign)
+                wf = get_workflow('trend_planning')
+                step16 = next(i for i, (_, item) in enumerate(wf.steps()) if item.no == 16)
+                new_run = deepcopy(run)
+                new_run.update(step_index=step16, status='waiting_input', waiting_key='page',
+                               copy_package=clean, copy_review_phase='', report_draft={})
+                new_campaign = deepcopy(campaign)
+                new_campaign['values'].pop('page', None)
+                new_campaign['values'].pop('report', None)
+                new_campaign['log'] = [entry for entry in new_campaign.get('log', [])
+                                       if entry.get('key') not in ('page','report')]
+                notice = ('대표 문구 승인과 보고서 초안을 초기화했습니다. 이전 분석·소구점은 유지됩니다.\n\n'
+                          + render_options(clean))
+                return {**common, 'turn_type':'chitchat', 'reply':notice, 'standalone_question':'',
+                        'route':'', 'campaign':new_campaign, 'workflow_run':new_run,
+                        'messages':trim+[AIMessage(content=notice,name='orchestrator')]}
+            except (ValueError, TypeError, KeyError, StopIteration) as exc:
+                notice = f'카피 단계로 돌아가지 못했습니다: {exc}'
+        return {**common, 'turn_type':'chitchat', 'reply':notice, 'standalone_question':'',
+                'route':'', 'messages':trim+[AIMessage(content=notice,name='orchestrator')]}
+
     # ── manage_workflow: 진행 중인 워크플로 명령 (규칙, LLM 없음)
     if getattr(settings, "ENABLE_WORKFLOWS", True):
         # CART_SIGNAL_NATURAL_CATEGORY_APPROVAL_V1
@@ -138,7 +172,8 @@ def orchestrator_node(state) -> dict:
                 f"[10단계 확정 제안] 카테고리: {category}\n"
                 f"8단계 검증 상품 ID: {updates['products']}\n"
                 f"기획전 테마 제안: {updates['theme']}\n" +
-                (f"선택 유형: {updates.get('subtype')} / 색상: {updates.get('colors')} (상품 설명 규칙 매칭, 성능 미검증)\n" if run.get("subtype_flow") else "과거 겨울 온라인 구매 기록 기반 후보이며 테마의 실제 상품 여부는 미검증입니다.\n") +
+                (f"운영 일정: {updates['schedule']}\n" if updates.get("schedule") else "") +
+                (f"선택 유형: {updates.get('subtype')} / 색상: {updates.get('colors')} (상품 설명 규칙 매칭, 성능 미검증)\n" if run.get("subtype_flow") else "검증된 과거 온라인 구매 기록 기반 후보이며 테마의 실제 상품 여부는 미검증입니다.\n") +
                 "확정하려면 [승인], 아니면 [반려]를 눌러 주세요."
             )
             return {**common, "turn_type": "approval_request", "reply": request["question"],
@@ -171,19 +206,140 @@ def orchestrator_node(state) -> dict:
             and run.get("waiting_key") == "page"):
         from agent_system.orchestrator.tools.campaign_copy import parse_copy_choice, selected_copy_value
         package = run.get("copy_package") or {}
-        choice = parse_copy_choice(question, package)
+        # 과거 버전의 수정 이력과 현재 검증 규칙이 충돌하면, 사용자의 명시적 요청으로
+        # 카피만 초기 상태로 복원한다. 분석·소구점 승인 및 워크플로 Run은 유지한다.
+        from agent_system.orchestrator.tools.copy_revision import is_copy_reset_request
+        if is_copy_reset_request(question):
+            try:
+                from copy import deepcopy
+                from agent_system.orchestrator.tools.campaign_copy import (
+                    generate_candidates, validate_candidates, render_options,
+                )
+                summary = run.get('campaign_summary') or {}
+                clean = validate_candidates(generate_candidates(summary, campaign), summary, campaign)
+                new_run = deepcopy(run)
+                new_run['copy_package'] = clean
+                new_run['copy_review_phase'] = ''
+                notice = ('카피 수정 이력을 초기화했습니다. 기존 분석·소구점·기획전 주제는 유지됩니다. '
+                          '기존 카피 수정 내용만 삭제하고 최초 3안으로 복구했습니다.\n\n'
+                          + render_options(clean))
+                return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                        'standalone_question': '', 'route': '', 'workflow_run': new_run,
+                        'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+            except (ValueError, TypeError, KeyError) as exc:
+                notice = f'카피만 초기화하지 못했습니다: {exc}'
+                return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                        'standalone_question': '', 'route': '',
+                        'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+        # 단일 확정 UI: 카피 수정본을 별도로 승인하지 않고 1~3안 직접 확정한다.
+        if question.startswith('__cart_copy_review__:'):
+            from copy import deepcopy
+            from agent_system.orchestrator.tools.campaign_copy import generate_candidates, validate_candidates, render_options
+            from agent_system.orchestrator.tools.copy_revision import regenerate_copy
+            command = question.split(':', 1)[1]
+            if command == 'edit':
+                new_run = deepcopy(run)
+                new_run['copy_review_phase'] = ''
+                notice = '추가 수정할 안 번호와 원하는 문체를 입력해 주세요.'
+                return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                        'standalone_question': '', 'route': '', 'workflow_run': new_run,
+                        'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+            if command == 'undo':
+                if not package.get('revision'):
+                    notice = '되돌릴 카피 수정 이력이 없습니다.'
+                    return {**common, 'turn_type':'chitchat', 'reply':notice, 'standalone_question':'',
+                            'route':'', 'messages':trim+[AIMessage(content=notice,name='orchestrator')]}
+                try:
+                    summary = run.get('campaign_summary') or {}
+                    previous = generate_candidates(summary, campaign)
+                    for step in (package.get('revision_steps') or [])[:-1]:
+                        previous = regenerate_copy(previous, step['feedback'], int(previous.get('revision') or 0))
+                    previous = validate_candidates(previous, summary, campaign)
+                    new_run = deepcopy(run)
+                    new_run['copy_package'] = previous
+                    new_run['copy_review_phase'] = 'review' if previous.get('revision') else ''
+                    notice = '직전 카피 수정만 취소했습니다.\n\n' + render_options(previous)
+                    return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                            'standalone_question': '', 'route': '', 'workflow_run': new_run,
+                            'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+                except (ValueError, TypeError, KeyError) as exc:
+                    notice = f'카피 되돌리기 실패: {exc}'
+                    return {**common, 'turn_type':'chitchat', 'reply':notice, 'standalone_question':'',
+                            'route':'', 'messages':trim+[AIMessage(content=notice,name='orchestrator')]}
+            if command in ('choose1', 'choose2', 'choose3'):
+                question = command[-1] + '안으로 할게'
+            else:
+                notice = '사용할 수 없는 카피 버튼입니다.'
+                return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                        'standalone_question': '', 'route': '',
+                        'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+        # 수정 요청을 우선 분류한다. '3안 다듬어줘'를 기존 3안 승인으로 처리하지 않는다.
+        from agent_system.orchestrator.tools.copy_revision import parse_revision_request
+        feedback = parse_revision_request(question)
+        choice = None if feedback else parse_copy_choice(question, package)
+        # 이미 검증된 문구의 수정 요청은 새로운 3안을 만들고 같은 Run에 저장한다.
+        # 승인 요청이 없는 상태에서만 재생성하며, 확정된 상품과 소구점은 변경하지 않는다.
+        from agent_system.orchestrator.tools.copy_revision import parse_revision_request, regenerate_copy
+        if feedback:
+            try:
+                from agent_system.orchestrator.tools.campaign_copy import validate_candidates, render_options
+                from copy import deepcopy
+                summary = run.get('campaign_summary') or {}
+                revision = int(package.get('revision') or 0)
+                from agent_system.orchestrator.tools.campaign_copy import generate_candidates
+                original = package if revision else generate_candidates(summary, campaign)
+                revised = regenerate_copy(original, feedback, revision)
+                checked = validate_candidates(revised, summary, campaign)
+                new_run = deepcopy(run)
+                new_run['copy_package'] = checked
+                new_run['copy_review_phase'] = 'review'
+                targets = checked.get('revision_targets') or [1, 2, 3]
+                notice = ('요청한 표현 조건으로 ' + ', '.join(f'{n}안' for n in targets)
+                          + '을 다시 작성했습니다. 나머지 안은 유지했습니다.\n\n' + render_options(checked))
+                return {**common, 'turn_type': 'chitchat', 'reply': notice, 'standalone_question': '',
+                        'route': '', 'workflow_run': new_run,
+                        'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
+            except (ValueError, TypeError, KeyError) as exc:
+                notice = (f'문구를 재생성하지 않았습니다: {exc} 기존 3안은 유지됩니다. '
+                          '이전 수정 이력이 충돌한다면 \"카피 수정 이력 초기화\"를 입력해 카피 단계만 복구할 수 있습니다.')
+                return {**common, 'turn_type': 'chitchat', 'reply': notice, 'standalone_question': '',
+                        'route': '', 'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
         if not choice:
             notice = "대표 문구 1개를 선택해 주세요. 예: '3번으로 할게' 또는 '첫 번째가 좋아'"
             return {**common, "turn_type": "chitchat", "reply": notice, "standalone_question": "", "route": "",
                     "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
-        selected = {"page": selected_copy_value(choice, package)}
-        request = approval.build_approval_request(selected, title="16단계 대표 문구 확정", source="user")
-        request["copy_choice"] = choice["number"]
-        request["question"] = (f"선택한 대표 문구: {choice['headline']}\n"
-                               "이 문구를 기획전 페이지 초안에 반영할까요?")
-        return {**common, "turn_type": "approval_request", "reply": request["question"], "standalone_question": "",
-                "route": "", "pending_approval": request,
-                "messages": trim + [AIMessage(content=request["question"], name="orchestrator")]}
+        # 재확인 팝업 없이 선택한 완성형 카피 1안을 한 번에 확정한다.
+        # 선택 시에도 기존 approval 경로와 동일한 재현 검증 및 의미 검증을 수행한다.
+        from copy import deepcopy
+        from agent_system.orchestrator.tools.campaign_copy import validate_candidates
+        from agent_system.validation.semantic_campaign_validator import review_campaign_copy
+        try:
+            summary = run.get('campaign_summary') or {}
+            verified = validate_candidates({**package, 'status': 'draft'}, summary, campaign)
+            review_campaign_copy(package, summary, campaign)
+            if package.get('status') != 'verified' or verified != package:
+                raise ValueError('선택한 카피의 근거 검증이 완료되지 않았습니다.')
+            approved = selected_copy_value(choice, package)
+            updated_campaign = update_conversation_state(campaign, {'page': approved}, source='user')
+            from agent_system.workflows.registry import get_workflow
+            wf = get_workflow('trend_planning')
+            steps = list(wf.steps())
+            step17 = next(i for i, (_, item) in enumerate(steps) if item.no == 17)
+            new_run = deepcopy(run)
+            new_run.update(step_index=step17, status='paused', waiting_key='',
+                           copy_review_phase='', report_draft={})
+            result_text = ('완성형 카피 ' + str(choice['number']) + '안을 최종 확정했습니다.\n\n'
+                           + '\n'.join([choice['headline']] + [str(x).strip() for x in (choice.get('subcopies') or []) if str(x).strip()])
+                           + '\n\n기획전 보고서 초안을 작성하려면 "기획전 보고서 초안 작성해줘"를 입력하세요.')
+            return {**common, 'turn_type': 'chitchat', 'reply': result_text,
+                    'standalone_question': '', 'route': '', 'campaign': updated_campaign,
+                    'workflow_run': new_run,
+                    'messages': trim + [AIMessage(content=result_text, name='orchestrator')]}
+        except (ValueError, TypeError, KeyError, StopIteration) as exc:
+            notice = f'카피를 확정하지 않았습니다: {exc}'
+            return {**common, 'turn_type': 'chitchat', 'reply': notice,
+                    'standalone_question': '', 'route': '',
+                    'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
 
     # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
     report_kind = report.detect(question)
@@ -224,6 +380,12 @@ def orchestrator_node(state) -> dict:
         workflow_name = ""
         reason = f"대화 판단 실패: {type(exc).__name__}"
 
+    if intent_name == "decision" and run.get("period_plan") and "schedule" in updates and run.get("status") not in ("done", "cancelled"):
+        from agent_system.orchestrator.tools.category_planning.period_context import schedule_matches
+        if not schedule_matches(run, updates["schedule"]):
+            notice = "현재 Run의 운영 일정은 분석 근거와 함께 고정되어 있습니다. 변경하려면 워크플로를 취소하고 새 분석을 시작해 주세요."
+            return {**common, "turn_type": "chitchat", "reply": notice, "standalone_question": "", "route": "",
+                    "messages": trim + [AIMessage(content=notice, name="orchestrator")]}
     if intent_name == "decision" and not updates:
         intent_name = "chitchat" if reply else "analysis"
     if intent_name == "chitchat" and not reply:

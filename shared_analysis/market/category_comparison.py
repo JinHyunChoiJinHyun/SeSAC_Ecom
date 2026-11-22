@@ -63,7 +63,7 @@ def suggest(rows, top_n=3):
             for r in ranked[:max(1, min(int(top_n), len(ranked)))]]
 
 
-def save_charts(rows, naver, out):
+def save_charts(rows, naver, out, *, period_plan=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -79,7 +79,10 @@ def save_charts(rows, naver, out):
     ax.bar(range(len(rows)), values)
     ax.set_xticks(range(len(rows)), labels, rotation=15, ha='right')
     ax.set_ylabel('H&M historical transaction records')
-    ax.set_title('H&M past winter / online / ages 20–39 / womenswear')
+    ax.set_title('H&M historical core months / online / ages 20–39 / womenswear' if period_plan else 'H&M past winter / online / ages 20–39 / womenswear')
+    if period_plan:
+        ranges = ', '.join(f"{season['core']['start']}~{season['core']['end']}" for season in period_plan['seasons'])
+        ax.set_xlabel(ranges, fontsize=8)
     fig.tight_layout(); fig.savefig(out/'hm_category_purchases.png', dpi=160); plt.close(fig)
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(range(len(rows)), [r['musinsa_sample_reviews'] for r in rows])

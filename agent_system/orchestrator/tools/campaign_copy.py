@@ -34,8 +34,12 @@ def selection_brief(summary, selected, campaign, market=None):
     selected = _selected(selected)
     points = selected.get('points') or []
     known = {c['label'] for c in summary.get('candidates', [])}
-    if not 2 <= len(points) <= 3 or not set(points).issubset(known):
+    if not points or len(set(points)) != len(points) or not set(points).issubset(known):
         raise ValueError('12단계 추천에 없는 소구점입니다.')
+    scoped = [c for c in summary.get('candidates', []) if c.get('label') in points and c.get('scope') == 'partial']
+    scope_note = ('\n상품별 한정 소구점: ' + ', '.join(
+        f"{c['label']} ({len(c.get('matched') or {})}개 상품)" for c in scoped)
+        + '. 해당 상품 카드에만 사용하며 전체 상품의 공통 특징으로 광고하지 않습니다.\n') if scoped else ''
     values = campaign.get('values') or {}
     subtype = values.get('subtype') or values.get('category') or '선정 상품'
     colors = _colors(campaign)
@@ -65,7 +69,7 @@ def selection_brief(summary, selected, campaign, market=None):
     designs = summary.get('verified_designs') or []
     if designs:
         detail_text = ', '.join(f"{x['label']} {x['products']}개" for x in designs[:5])
-        rank_note += f'H&M 확정 상품에서 직접 확인된 형태·디테일: {detail_text}. 해당 상품에만 활용합니다.\n\n'
+        rank_note += f'H&M 과거 참고 사례에서 확인된 형태·디테일: {detail_text}. 향후 실제 상품 선정 시 검증합니다.\n\n'
     # 시장에서 관찰한 디자인과 확정 상품에서 검증한 디자인을 분리해 최종 문장에 반영한다.
     market_shapes = [x['label'] for x in ranked.get('related_shapes', [])
                      if x.get('products') and x.get('label') in ('후드형', '푸퍼형', '크롭형', '봄버형', '칼라형')]
@@ -73,7 +77,7 @@ def selection_brief(summary, selected, campaign, market=None):
                       if x.get('matched_ids') and x.get('label') in ('스탠드칼라', '셔츠형 칼라', '봄버형', '후드형')]
     if market_shapes and product_shapes:
         final_note = (f"무신사 상위 랭킹의 관련 상품에서 {'·'.join(market_shapes[:3])} 디자인이 관찰됐고, "
-                      f"선정된 H&M 상품에는 {'·'.join(product_shapes[:3])} 형태가 실제로 확인돼요. "
+                      f"과거 H&M 참고 사례에는 {'·'.join(product_shapes[:3])} 형태가 확인돼요. "
                       f"이를 참고해 {color_text} 색상 비교를 공통 콘텐츠로 구성하면서, "
                       '칼라·실루엣 등 확인된 차이를 해당 상품별로 보여주는 것을 추천합니다. '
                       '무신사 디자인의 랭킹 노출을 판매량·선호도로 해석하지 않고, '
@@ -88,9 +92,9 @@ def selection_brief(summary, selected, campaign, market=None):
     intro = (
         f'■ {subtype} 기획전 소구점 최종 정리\n'
         + market_text
-        + '이 전체 리뷰 집계는 해당 소분류만의 리뷰가 아닙니다. 선정한 H&M 상품의 직접 후기도 아닙니다.\n\n'
+        + '이 전체 리뷰 집계는 해당 소분류만의 리뷰가 아닙니다. 과거 H&M 참고 상품의 직접 후기도 아닙니다.\n\n'
         + rank_note
-        + f'선택 소구점: {" / ".join(points)}\n\n'
+        + f'선택 소구점: {" / ".join(points)}\n' + scope_note + '\n'
         f'**기획전에 적용할 때**\n{color_text} 상품을 비교하고, '
         '상품 카드마다 확인된 디자인·디테일을 구분해 안내하는 방향을 추천합니다. '
         '실제 착용 사진이나 사이즈표는 확보한 경우에만 추가합니다.\n\n'
@@ -103,21 +107,25 @@ def selection_brief(summary, selected, campaign, market=None):
 def approval_brief(summary, selected, campaign, market=None):
     """기존 JSON 승인 요청을 사람이 읽을 수 있는 선택 결과로 대체한다."""
     data = _selected(selected)
-    theme = data.get('theme') or '기획전'
+    theme = (str(summary.get('subtype') or '').strip() if summary.get('evidence_role') == 'historical_reference'
+             else data.get('theme')) or '기획전'
     points = data.get('points') or []
     return (selection_brief(summary, data, campaign, market)
             + f'\n\n기획전 주제: {theme}\n'
-            + '가격·할인·기간: 확정값 없으면 미정(광고에 사용하지 않음)\n'
+            + f"운영 일정: {(campaign.get('values') or {}).get('schedule') or '미확정'}\n"
+            + '가격·할인: 미확정 값은 광고에 사용하지 않습니다.\n'
+            + ('승인 대상은 향후 상품 유형·색상·디자인 방향이며, 과거 사례 상품 ID는 판매 확정 대상이 아닙니다.\n' if summary.get('evidence_role') == 'historical_reference' else '')
             + '\n이 구성으로 대표 문구 3안을 만들까요?')
 
 
 def generate_candidates(summary, campaign):
     """선정 색상과 검증된 공통 소구점에 기반한 3가지 표현 방향을 생성."""
     values = campaign.get('values') or {}
+    reference_mode = summary.get("evidence_role") == "historical_reference"
     selected = _selected(values.get('selling_points'))
     points = selected.get('points') or []
     available = {c['label'] for c in summary.get('candidates') or []}
-    if len(points) < 2 or not set(points).issubset(available):
+    if not points or len(set(points)) != len(points) or not set(points).issubset(available):
         raise ValueError('확정된 공통 소구점이 12단계 근거와 일치하지 않습니다.')
     ids = summary.get('ids') or []
     if not ids or set(ids) != set(re.findall(r'(?<!\d)\d{10}(?!\d)', str(values.get('products') or ''))):
@@ -143,36 +151,82 @@ def generate_candidates(summary, campaign):
                         if x.get('matched_ids') and x.get('label')]
     if verified_designs and '상품별 디자인 상세 비교' in points:
         features = '·'.join(x['label'] for x in verified_designs[:4])
-        descriptions[1] = f'확정 상품 설명에서 확인한 {features} 등을 해당 상품 카드에서 비교합니다.'
-        descriptions[2] = '색상별 선택과 확정 상품의 검증된 형태·디테일 비교를 함께 강조합니다.'
-    candidates = [{'number': i + 1, 'headline': title, 'description': descriptions[i],
-                   'basis': points[:], 'verified': True} for i, title in enumerate(titles)]
-    # 상품별 카드의 자세한 기능 정보는 이 단계에서 추정하지 않는다.
-    cards = [{'article_id': item, 'copy': f'{subtype} 상품 {item} — 색상·디자인 상세 확인'} for item in ids]
-    return {'schema_version': 1, 'category': values.get('category'), 'subtype': subtype,
-            'colors': colors, 'ids': ids, 'points': points, 'candidates': candidates, 'product_cards': cards,
-            'status': 'draft'}
+        descriptions[1] = (f'과거 H&M 사례에서 확인한 {features} 등의 디자인을 향후 상품 선정 조건으로 참고합니다.' if reference_mode else f'확정 상품 설명에서 확인한 {features} 등을 해당 상품 카드에서 비교합니다.')
+        descriptions[2] = ('색상 선택과 과거 참고 사례의 형태·디테일을 향후 기획전 구성 방향으로 제안합니다.' if reference_mode else '색상별 선택과 확정 상품의 검증된 형태·디테일 비교를 함께 강조합니다.')
+    scoped = [c for c in summary.get('candidates', []) if c.get('label') in points and c.get('scope') == 'partial']
+    if scoped:
+        note = ('일부 과거 사례의 특징은 향후 판매 상품에서도 별도 검증해야 합니다. 모든 상품에 공통 적용하지 않습니다.' if reference_mode else '상품별 한정 특성은 해당 상품 카드에서만 안내합니다. 전체 상품에 공통 적용하지 않습니다.')
+        descriptions = [d + ' ' + note for d in descriptions]
+    from agent_system.orchestrator.tools.fashion_copy import make_fashion_copy
+    creative = make_fashion_copy(subtype=subtype, colors=colors, points=points)
+    candidates = []
+    for i, row in enumerate(creative['options']):
+        # 기존 확정 상품 형태 근거와 상품별 한정 안내를 보존한다.
+        subcopies = [row['subcopies'][0] + ' ' + descriptions[i], row['subcopies'][1]]
+        candidates.append({'number': i + 1, 'headline': row['headline'],
+                           'description': subcopies[0], 'subcopies': subcopies,
+                           'tone': row['tone'], 'basis': points[:], 'verified': True})
+
+    # 기존 card 구조를 보존하되 과거 참고 사례임을 명확히 한다. 실제 상품 홍보에 사용하지 않는다.
+    cards = []
+    for item in ids:
+        details = [c['label'] for c in scoped if item in (c.get('matched') or {})]
+        explanation = (' / '.join(details) + ' (상품별 확인)') if details else '색상·디자인 상세 확인'
+        cards.append({'article_id': item, 'copy': (f'과거 참고 사례 {item} — {explanation}; 실제 판매 상품 미확정' if reference_mode else f'{subtype} 상품 {item} — {explanation}')})
+    if reference_mode:
+        # 고객 노출 카피에는 상품 검증 메모를 넣지 않는다. 근거는 별도 필드로 보관한다.
+        candidates = [dict(item, subcopies=list(creative['options'][i]['subcopies']),
+                           description=creative['options'][i]['subcopies'][0])
+                      for i, item in enumerate(candidates)]
+    review_memo = (['과거 H&M 상품 5개는 디자인 참고 사례이며 실제 판매 상품이 아닙니다.',
+                    '기획전의 판매 상품·가격·할인·재고·실제 적용 디자인 특징은 미확정입니다.',
+                    '소재·보온성·착용감·핏 등은 향후 편성 상품 근거 확인 후 광고에 반영합니다.']
+                   if reference_mode else [])
+    return {'schema_version': 1, 'reference_role': 'historical_reference' if reference_mode else 'legacy_product_selection', 'category': values.get('category'), 'subtype': subtype,
+            'colors': colors, 'ids': ids, 'saleable_article_ids': [] if reference_mode else ids, 'points': points, 'candidates': candidates, 'product_cards': cards,
+            'status': 'draft', 'keywords': creative['keywords'], 'copy_style': 'fashion_v422a', 'review_memo': review_memo}
 
 
 def validate_candidates(package, summary, campaign):
     """후보가 확정 입력으로 재현 가능한지 확인한다. 실패 시 16단계 진입 금지."""
+    from agent_system.orchestrator.tools.copy_revision import regenerate_copy, validate_copy_claims
     expected = generate_candidates(summary, campaign)
+    if package.get('revision'):
+        steps = package.get('revision_steps')
+        if steps:
+            if len(steps) != package['revision'] or steps[-1].get('feedback') != package.get('revision_feedback'):
+                raise ValueError('문구 수정 이력이 일치하지 않습니다.')
+            for step in steps:
+                expected = regenerate_copy(expected, step['feedback'], expected.get('revision', 0))
+                if step.get('targets') != expected.get('revision_targets'):
+                    raise ValueError('문구 수정 대상이 변경됐습니다.')
+        else:
+            # 이전 Run 수정 패키지와의 호환성.
+            expected = regenerate_copy(expected, package.get('revision_feedback', ''), package['revision'] - 1)
+            for legacy_field in ('revision_steps', 'revision_targets'):
+                expected.pop(legacy_field, None)
     if package != expected:
         raise ValueError('대표 문구 후보가 검증된 상품·소구점 근거와 일치하지 않습니다.')
-    if len(package.get('candidates', [])) != 3:
-        raise ValueError('대표 문구 후보는 3개여야 합니다.')
+    validate_copy_claims(package, summary)
     return {**package, 'status': 'verified'}
 
 
 def render_options(package):
-    rows = ['■ 14~15단계 — 대표 문구 3안 (근거 검사 완료)',
-            f"확정된 소구점: {', '.join(package['points'])}",
-            '미확인 보온 성능·핏·가격·할인은 문구에 사용하지 않았어요.', '']
+    rows = ['■ 기획전 캠페인 카피 3안',
+            f"{'상품 구성 검토 특징' if package.get('reference_role') == 'historical_reference' else '확정 소구점'}: {', '.join(package['points'])}",
+            ('과거 참고 상품의 특징을 편성 방향으로만 제안합니다. 실제 판매 상품·소재·디자인·가격·재고는 미확정입니다.' if package.get('reference_role') == 'historical_reference' else '실제 확인된 상품 색상·디자인만 활용하며, 미확인 보온 성능·혜택은 추정하지 않습니다.'), '']
     for item in package['candidates']:
-        rows += [f"{item['number']}안. {item['headline']}", f"  {item['description']}", '']
-    rows += ['추천: 3안 — 색상 비교와 디자인 안내 두 소구점을 함께 반영합니다.',
-             "어떤 문구로 진행할까요? 예: '3번으로 할게' 또는 '첫 번째가 좋아'",
-             '선택 후 승인하면 기획전 페이지 틀에 적용할 수 있습니다.']
+        subcopies = item.get('subcopies') or [item['description']]
+        full_text = '\n'.join([str(item['headline']).strip()] + [str(x).strip() for x in subcopies if str(x).strip()])
+        rows += [f"**{item['number']}안 · {item.get('tone') or '스타일 제안'}**", full_text]
+        rows += ['']
+    if package.get('keywords'):
+        rows += ['**배너·상세페이지 키워드**', ' · '.join(package['keywords']), '']
+    if package.get('review_memo'):
+        rows += ['**마케터 검토 메모 (고객 광고 비노출)**'] + [f'- {x}' for x in package['review_memo']] + ['']
+    rows += ['추천: 3안 — 컬렉션 분위기와 실제 상품 선택 근거를 함께 소개합니다.',
+             "카피 수정: '1안만 감성적으로', '1,3안 짧게', '1,2,3안 모두 다듬어줘'. 선택: '3안으로 할게'",
+             '각 안은 제목과 본문을 합친 하나의 완성형 카피입니다. 원하는 안을 바로 확정할 수 있습니다.']
     return '\n'.join(rows)
 
 
@@ -199,6 +253,13 @@ def parse_copy_choice(message, package):
 
 def selected_copy_value(choice, package):
     return json.dumps({'schema_version': 1, 'number': choice['number'],
-                       'headline': choice['headline'], 'article_ids': package['ids'],
-                       'subtype': package['subtype'], 'colors': package['colors']},
+                       'headline': choice['headline'],
+                       'full_copy': ' '.join([choice['headline']] + list(choice.get('subcopies') or [])),
+                       'subcopies': choice.get('subcopies') or [choice.get('description', '')],
+                       'keywords': package.get('keywords') or [],
+                       'tone': choice.get('tone', ''), 'article_ids': package['ids'],
+                       'reference_role': package.get('reference_role', 'legacy_product_selection'),
+                       'saleable_article_ids': package.get('saleable_article_ids', []),
+                       'subtype': package['subtype'], 'colors': package['colors'],
+                       'review_memo': package.get('review_memo') or []},
                       ensure_ascii=False, sort_keys=True)

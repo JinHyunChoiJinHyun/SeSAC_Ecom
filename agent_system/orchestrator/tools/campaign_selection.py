@@ -13,7 +13,7 @@ def build_summary(run, campaign, details):
     ids = ids_from(campaign)
     market = run.get("category_market") or {}
     if not ids or market.get("category") != values.get("category"):
-        raise ValueError("확정 상품 또는 동일 카테고리 시장 근거 없음")
+        raise ValueError("과거 참고 상품 ID 또는 동일 카테고리 시장 근거 없음")
     rows = {str(r.get("article_id")): r for r in (details.get("data") or {}).get("rows", []) if isinstance(r, dict)}
     if not details.get("available") or not set(ids).issubset(rows):
         raise ValueError("확정 상품 상세정보 조회 실패 또는 누락")
@@ -54,19 +54,35 @@ def build_summary(run, campaign, details):
     # 일부 상품의 특징은 전체 기획전 공통 주장으로 선택할 수 없다.
     common = [c for c in candidates if c['scope'] == 'common']
     partial = [c for c in candidates if c['scope'] == 'partial']
-    # 공통 소재가 부족해도 사실에 근거한 상품별 안내를 선택할 수 있다.
-    if len(common) < 2 and all(str(rows[i].get('detail_desc') or '').strip() for i in ids):
-        common.append({'label': '상품별 디자인 상세 비교', 'aspect': None, 'mentions': 0, 'rate': None, 'verified': True, 'scope': 'common', 'matched': {i: str(rows[i]['detail_desc']) for i in ids}})
-    if len(common) < 2: raise ValueError('공통 소구점 근거 부족: 상품 정보 추가 확인 필요')
+    # 상품별 디자인 비교는 공통 기능·소재 주장이 아니라 상품 카드의 콘텐츠 구성이다.
+    # 다른 공통점이 충분하더라도 비교 근거가 있으면 항상 후보로 제공한다.
+    if all(str(rows[i].get('detail_desc') or '').strip() for i in ids):
+        common.append({'label': '상품별 디자인 상세 비교', 'aspect': None,
+                       'mentions': 0, 'rate': None, 'verified': True,
+                       'scope': 'common', 'evidence_type': 'content_comparison',
+                       'matched': {i: str(rows[i]['detail_desc']) for i in ids}})
+    if not common and not partial:
+        raise ValueError('상품 설명에서 검증 가능한 소구점 근거가 없습니다.')
     unknown = [{'aspect': a, 'mentions': int(r['mention_reviews']), 'rate': r.get('mention_rate'), 'required': need} for a, need in [('사이즈', '실측·착용감'), ('보온성', '보온 성능·충전재 상세'), ('두께감', '실제 두께'), ('퀄리티', '품질 평가·내구성')] if (r := review.get(a))]
-    candidates = common
+    # 부분 일치 특성도 선택 가능하지만 이름부터 반드시 '상품별'이라고 한정한다.
+    # 본문/광고에서 상품 전체의 공통 기능으로 확대 해석하지 않도록 증거 범위를 저장한다.
+    scoped_partial = [dict(c, label='상품별 · ' + c['label'], evidence_type='product_only') for c in partial]
+    candidates = common + scoped_partial
+    # 제품별 검증 항목 수만큼 제시한다. 임의의 상위 3개 제한은 두지 않는다.
     purchases = {str(r.get("article_id")): r.get("winter_online_purchases") for r in run.get("verified_candidate_rows", [])}
     has_purchases = all(isinstance(purchases.get(i), (int, float)) for i in ids)
     order = sorted(ids, key=lambda i: -purchases[i]) if has_purchases else ids
     category = values['category']
-    themes = [f'겨울 {category} 컬렉션', f'나에게 맞는 {category} 스타일']
-    summary = {'schema_version': 2, 'category': category, 'ids': ids, 'themes': themes, 'candidates': candidates, 'partial_candidates': partial, 'unknown_aspects': unknown, 'order': order, 'order_basis': '과거 겨울 온라인 구매 건수' if has_purchases else '확정 순서 (구매 건수 미확인)'}
-    # 실제 확정 H&M 상품 설명에서 확인되는 디자인 특징만 연결한다.
+    from agent_system.orchestrator.tools.category_planning.period_context import purchase_label
+    plan = run.get('period_plan')
+    themes = [f'{category} 컬렉션' if plan else f'겨울 {category} 컬렉션', f'나에게 맞는 {category} 스타일']
+    # 참고 사례 Run에서는 이미 승인된 세부 유형만 기획전 주제로 제공한다.
+    if run.get('reference_product_role') == 'historical_reference':
+        themes = [str(values.get('subtype') or run.get('selected_subtype') or '').strip()]
+        if not themes[0]:
+            raise ValueError('승인된 세부 유형이 없어 기획전 주제를 정할 수 없습니다.')
+    summary = {'schema_version': 2, 'evidence_role': 'historical_reference' if run.get('reference_product_role') == 'historical_reference' else 'legacy_product_selection', 'subtype': values.get('subtype') or run.get('selected_subtype'), 'selected_colors': values.get('colors') or run.get('selected_colors') or [], 'category': category, 'ids': ids, 'themes': themes, 'candidates': candidates, 'partial_candidates': partial, 'candidate_count': len(candidates), 'unknown_aspects': unknown, 'order': order, 'order_basis': purchase_label(plan) + ' 건수 (과거 참고 사례)' if has_purchases else '참고 순서 (구매 건수 미확인)' if run.get('reference_product_role') == 'historical_reference' else '확정 순서 (구매 건수 미확인)'}
+    # 확인된 과거 H&M 참고 사례의 디자인 특징만 연결한다.
     design_patterns = (
         ('스탠드칼라', r'\bstand[- ]up collar\b'),
         ('셔츠형 칼라', r'\b(?:with a collar|shirt collar)\b'),
@@ -88,6 +104,22 @@ def build_summary(run, campaign, details):
     summary['verified_designs'] = verified_designs
     if ranked:
         summary['ranked_evidence'] = ranked
+    # 동일 관심사에 대한 교차 근거: H&M 직접 확인과 무신사 리뷰 언급을 분리한다.
+    # 무신사 언급은 H&M의 성능/만족도 보증 또는 상품 일치를 뜻하지 않는다.
+    aspect_counts = {str(a.get('label')): int(a.get('mentions') or 0)
+                     for a in ranked.get('aspects', []) if isinstance(a, dict)}
+    cross = []
+    for candidate in candidates:
+        aspect = candidate.get('aspect')
+        if not aspect or aspect not in aspect_counts or aspect_counts[aspect] <= 0:
+            continue
+        cross.append({'label': candidate['label'], 'hm_matched_ids': list(candidate['matched']),
+                      'hm_products': len(candidate['matched']), 'hm_total': len(ids),
+                      'musinsa_aspect': aspect, 'musinsa_mentions': aspect_counts[aspect],
+                      'musinsa_related_reviews': int(ranked.get('related_reviews') or 0),
+                      'scope': candidate['scope'], 'cross_verified': True,
+                      'limit': '무신사 리뷰는 긍정·부정 미구분; H&M 직접 후기 아님'})
+    summary['cross_evidence'] = cross
     # 사용자에게는 결정에 필요한 짧은 설명만 제공한다. 세부 제품 원문과 근거는
     # campaign_summary에 그대로 보존하여 13~14단계 검증에 재사용한다.
     subtype = str(values.get('subtype') or run.get('selected_subtype') or category).strip()
@@ -106,7 +138,7 @@ def build_summary(run, campaign, details):
         ranked_lines.append(
             f"무신사 랭킹에서 여성·공용 우선 비교한 '{subtype}' 관련 잠정 후보 {ranking_count}개와 "
             f"그 상품에 연결된 리뷰 {related_count}건을 별도로 분석했어요. "
-            "상품명 규칙 분류이므로 실제 경량패딩 제품인지 최종 인증한 결과는 아닙니다.")
+            f"상품명 규칙 분류이므로 실제 {subtype} 제품인지 최종 인증한 결과는 아닙니다.")
         shapes = [x for x in ranked.get('related_shapes', [])
                   if x.get('products') and x.get('label') not in ('패딩·다운 표현', '경량 표현', '코트 표현', '플리스 표현')]
         if shapes:
@@ -117,7 +149,7 @@ def build_summary(run, campaign, details):
             ranked_lines.append('관련 리뷰에서 언급된 관심사(긍정·부정 미구분): ' + ', '.join(
                 f"{x['label']} {x['mentions']}건/{related_count}건" for x in aspects_ranked[:4]) + '.')
     if verified_designs:
-        ranked_lines.append('H&M 확정 상품 설명에서 확인한 디자인: ' + ', '.join(
+        ranked_lines.append(('H&M 과거 참고 사례 설명에서 확인한 디자인: ' if summary['evidence_role'] == 'historical_reference' else 'H&M 확정 상품 설명에서 확인한 디자인: ') + ', '.join(
             f"{x['label']} {x['products']}/{len(ids)}개" for x in verified_designs[:7]) + '.')
     if ranked:
         hood = next((x['products'] for x in ranked.get('related_shapes', []) if x['label'] == '후드형'), 0)
@@ -127,29 +159,39 @@ def build_summary(run, campaign, details):
     lines = [
         f"■ {subtype} 기획전에 적용할 소구점 제안",
         f"{market_scope}에서는 {interest} 등이 자주 언급됐어요.",
-        "아우터 전체 통계는 비교 참고용이며, H&M 직접 후기나 소분류만의 평가가 아닙니다.",
+        f"{category} 전체 통계는 비교 참고용이며, H&M 직접 후기나 소분류만의 평가가 아닙니다.",
         *ranked_lines,
         "",
-        f"■ 선택한 {subtype} 상품에 적용할 때",
-        f"선택한 {len(ids)}개 상품의 색상({color_text})을 나란히 보여 주고, "
-        "각 상품 설명에서 확인된 칼라·여밈·포켓·실루엣 차이를 상품 카드에 안내하는 것을 우선 추천해요.",
+        f"■ 향후 {subtype} 기획전 상품 구성에 적용할 때",
+        f"과거 참고 사례 {len(ids)}개의 색상({color_text})과 디자인을 비교하여, 향후 판매할 상품의 편성 조건으로 검토합니다. "
+        "칼라·여밈·포켓·실루엣 차이는 과거 디자인 사례이지 실제 판매 상품의 확정 특징이 아닙니다.",
         "리뷰에서 관심이 높았던 요소와 실제 상품 정보가 모두 뒷받침되는 범위에서만 표현하는 방식입니다.",
         "",
         "■ 확인이 필요한 표현",
         "사이즈 만족도·핏, 보온 성능, 실제 두께·착용감·내구성은 경쟁 리뷰만으로 보증할 수 없어요. "
         "상품별 실측이나 검증 자료가 확보되기 전에는 광고의 확정적 표현에서 제외하는 것이 좋아요.",
         "",
-        "■ 현재 정리 — 공통 소구점 후보",
+        "■ 현재 정리 — 검증된 소구점 후보 (공통 / 상품별 한정)",
     ]
     for i, c in enumerate(candidates, 1):
-        lines.append(f"{i}. {c['label']} — H&M 확정 상품 {len(c['matched'])}/{len(ids)}개에서 확인")
+        scope_note = '상품별 한정, 전체 상품의 공통 특성 아님' if c['scope'] == 'partial' else '공통 콘텐츠 구성' if c.get('evidence_type') == 'content_comparison' else '공통 확인'
+        lines.append(f"{i}. {c['label']} — H&M 과거 참고 사례 {len(c['matched'])}/{len(ids)}개에서 확인 ({scope_note}); 향후 편성 조건 후보" if summary["evidence_role"] == "historical_reference" else f"{i}. {c['label']} — H&M 확정 상품 {len(c['matched'])}/{len(ids)}개에서 확인 ({scope_note})")
+    if cross:
+        lines.extend(['', '■ H&M × 무신사 교차 소구점 근거'])
+        for item in cross:
+            lines.append(f"{item['label']}: H&M {item['hm_products']}/{item['hm_total']}개 "
+                         f"(ID: {', '.join(item['hm_matched_ids'])}) / "
+                         f"무신사 관련 리뷰 '{item['musinsa_aspect']}' "
+                         f"{item['musinsa_mentions']}/{item['musinsa_related_reviews']}건")
+        lines.append('교차 근거는 두 데이터에서 같은 관심사를 관찰했다는 뜻이며, 품질·만족도 검증이나 상품 동일성을 뜻하지 않습니다.')
+    if summary["evidence_role"] == "historical_reference":
+        lines.append("이 단계에서 선택하는 소구점은 향후 상품 편성을 위한 검토 특징입니다. 과거 상품의 광고 문구 확정이 아닙니다.")
     if partial:
-        lines.append("일부 상품만 확인된 차별화 요소는 해당 상품 카드에만 활용할 수 있어요: "
-                     + ', '.join(c['label'] for c in partial[:3]) + '.')
+        lines.append('상품별 한정 후보는 해당 상품 카드에만 적용하며, 공통 광고 문구로 사용할 수 없습니다.')
     lines.extend([
-        "추천 기획전 주제: " + ' / '.join(f"{n+1}. {t}" for n, t in enumerate(themes)),
-        "현재 가격·할인·재고는 확인되지 않았으므로 문구에 넣지 않습니다.",
-        "공통 소구점 2~3개를 번호로 선택해 주세요.",
+        ("확정 기획전 주제(변경 없음): " if summary['evidence_role'] == 'historical_reference' else "추천 기획전 주제: ") + ' / '.join(f"{n+1}. {t}" for n, t in enumerate(themes)),
+        "과거 상품 ID는 실제 판매 상품이 아닙니다. 현재 판매 SKU·가격·할인·재고는 확인되지 않았으므로 문구에 넣지 않습니다.",
+        "원하는 소구점을 번호로 선택해 주세요 (2~3개 권장, 개수 제한 없음). 상품별 한정 후보는 해당 상품에만 적용합니다.",
     ])
     return {"final_answer": '\n'.join(lines), "campaign_summary": summary, "data_sources": ["musinsa", "hm"], "data_purpose": "12단계 추천 근거"}
 
@@ -180,10 +222,10 @@ def guide(summary):
     """13단계 선택 안내. 미정은 실제 가격이나 할인을 지어내지 않는다는 뜻."""
     labels = ' / '.join(f'{i+1}. {x["label"]}' for i,x in enumerate(summary['candidates']))
     return (f"소구점 후보: {labels}\n"
-            "공통 소구점 2~3개를 선택해 주세요. 예: 소구점: 1, 2\n"
-            "가격·할인·기간을 따로 알려주지 않으면 미정으로 저장하며 광고에 사용하지 않습니다. "
-            "기획전 주제는 1번, 상품 노출은 검증된 구매 기록 순서가 기본값입니다. "
-            "다른 주제·혜택·노출 순서를 지정하려면 기존 6개 항목 양식을 사용하세요.")
+            "소구점을 자유롭게 선택해 주세요 (2~3개 권장). 예: 소구점: 1, 2\n"
+            "가격·할인 미확정 값은 광고에 사용하지 않습니다. 운영 예정 일정은 기존 기획전 정보를 참고합니다. "
+            "승인된 세부 유형을 기획전 주제로 유지하며, 과거 참고 사례는 구매 기록순으로 표시합니다. "
+            "새로운 기획전의 실제 판매 상품·가격·혜택·노출 순서는 아직 확정하지 않습니다.")
 
 
 def parse_selection(text, summary):
@@ -191,9 +233,15 @@ def parse_selection(text, summary):
         raise ValueError("워크플로 12단계 재실행으로 추천 결과를 갱신하세요.")
     # 선택값만 보낸 경우, 확인되지 않은 상품 혜택은 미정으로 안전하게 둔다.
     # 정형 양식은 아래 기존 검증을 그대로 적용한다.
-    compact = re.fullmatch(r'\s*소구점\s*[:：]\s*([1-9][0-9]*(?:\s*[,，]\s*[1-9][0-9]*){1,2})\s*', text)
+    # 번호만 전달하는 짧은 입력: 1, 2 / 소구점 1번이랑 2번 / 1,2,3,4.
+    # 최대 개수는 후보 전체 수로 제한하고, 중복이나 확인되지 않은 범위는 거부한다.
+    compact = re.fullmatch(
+        r'\s*(?:소구점\s*[:：]?\s*)?\d+(?:번)?'
+        r'(?:\s*(?:[,，]|이랑|랑|하고|와|과|및)\s*\d+(?:번)?)*'
+        r'\s*(?:으로|로)?\s*(?:할게|선택할게|선택해줘)?[.!]?\s*', text)
     if compact:
-        text = ('주제: 1\n소구점: ' + compact.group(1).replace('，', ',')
+        numbers = re.findall(r'\d+', text)
+        text = ('주제: 1\n소구점: ' + ','.join(numbers)
                 + '\n가격: 미정\n할인: 미정\n기간: 미정\n노출순서: 추천')
     fields = {}
     for line in text.strip().splitlines():
@@ -208,9 +256,15 @@ def parse_selection(text, summary):
         n=int(value)
         if not 1 <= n <= len(options): raise ValueError("추천 번호 범위 오류")
         return options[n-1]
-    theme=choose(fields['주제'],summary['themes'])
+    # 콘텐츠 제목 후보를 선택하더라도 이미 승인된 상품 세부 유형·테마를 덮어쓰지 않는다.
+    content_concept = choose(fields['주제'], summary['themes'])
+    reference_mode = summary.get('evidence_role') == 'historical_reference'
+    theme = str(summary.get('subtype') or '').strip() if reference_mode else content_concept
+    if reference_mode and not theme:
+        raise ValueError('확정된 세부 유형·기획전 주제가 없어 선택을 진행할 수 없습니다.')
     points=[choose(v.strip(),summary['candidates'])['label'] for v in fields['소구점'].split(',')]
-    if not 2 <= len(points) <= 3 or len(set(points)) != len(points): raise ValueError("서로 다른 소구점 2~3개를 선택하세요.")
+    if not points or len(points) > len(summary["candidates"]) or len(set(points)) != len(points):
+        raise ValueError("서로 다른 소구점을 1개 이상 선택하세요 (후보 전체 수 이내).")
     ids=summary['ids']
     def offers(text, discount=False):
         if text=='미정': return {i:None for i in ids}
@@ -233,7 +287,20 @@ def parse_selection(text, summary):
         except ValueError: raise ValueError("기간 형식 또는 순서 오류") from None
     order=summary['order'] if fields['노출순서']=='추천' else [x.strip() for x in fields['노출순서'].split(',')]
     if len(order)!=len(ids) or set(order)!=set(ids): raise ValueError("확정 상품 ID 전체를 중복 없이 입력하세요.")
-    return {"theme":theme,"points":points,"prices_krw":price,"discount_percent":discount,"period":period,"display_order":order,"claim_policy":"미정 값 및 검증되지 않은 기능·품질 표현은 광고에 사용 금지"}
+    result = {"theme":theme,"points":points,"prices_krw":price,"discount_percent":discount,"period":period,"display_order":order,"claim_policy":"미정 값 및 검증되지 않은 기능·품질 표현은 광고에 사용 금지"}
+    if reference_mode:
+        # 과거 추천 주제의 표현 방향은 확정 주제와 분리한다.
+        # 짧은 자연어 입력에서는 불필요한 별도 콘텐츠 콘셉트를 만들지 않는다.
+        if not compact and content_concept != theme:
+            result['content_concept'] = content_concept
+        from agent_system.orchestrator.tools.merchandising_direction import build_direction
+        if fields['노출순서'] != '추천':
+            raise ValueError('과거 참고 상품 ID를 실제 판매 상품의 노출 순서로 확정할 수 없습니다.')
+        if fields['가격'] != '미정' or fields['할인'] != '미정':
+            raise ValueError('과거 참고 상품의 가격·할인을 미래 기획전 판매 조건으로 확정할 수 없습니다.')
+        result['merchandising_direction'] = build_direction(summary, result,
+            subtype=summary.get('subtype') or summary.get('category') or '', colors=summary.get('selected_colors'))
+    return result
 
 
 def updates(text, summary):

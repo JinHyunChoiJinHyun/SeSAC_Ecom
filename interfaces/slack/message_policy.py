@@ -71,7 +71,7 @@ def hide_workflow_stage_labels(text: str) -> str:
     for line in text.splitlines():
         if line.strip().startswith("```"):
             in_code = not in_code
-        if in_code:
+        if in_code or line.strip().startswith("```"):
             transformed.append(line)
             continue
 
@@ -80,7 +80,15 @@ def hide_workflow_stage_labels(text: str) -> str:
             numbers = [int(v) for v in re.findall(r"\d+", match.group(0))]
             return "" if numbers and all(1 <= n <= 29 for n in numbers) else match.group(0)
 
-        cleaned = _WORKFLOW_STAGE_LABEL.sub(replace_stage, line)
+        # 재실행 명령은 실제 입력 문법이므로 단계 번호를 보존한다.
+        commands = []
+        def protect_command(match):
+            commands.append(match.group(0))
+            return f"@@CART_COMMAND_{len(commands)-1}@@"
+        protected = re.sub(r"워크플로\s+\d{1,2}\s*단계\s+재실행", protect_command, line)
+        cleaned = _WORKFLOW_STAGE_LABEL.sub(replace_stage, protected)
+        for index, command in enumerate(commands):
+            cleaned = cleaned.replace(f"@@CART_COMMAND_{index}@@", command)
         # 문장 중간 단계 번호가 생략되더라도 자연스럽게 읽히도록 조사만 정리합니다.
         cleaned = re.sub(r"(?<=\s)에서(?=\s)", "이후", cleaned) if cleaned != line else cleaned
         cleaned = re.sub(r"^([ \t]*[■*-]?[ \t]*)[—–:-][ \t]*", r"\1", cleaned)
@@ -89,3 +97,80 @@ def hide_workflow_stage_labels(text: str) -> str:
             continue
         transformed.append(cleaned)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(transformed)).strip()
+
+
+_PERIOD_PREFIXES = ("운영 일정:", "H&M 핵심 분석 월:", "H&M 사전 분석 월:", "H&M 분석 기준일:")
+
+def format_workflow_text(text: str) -> str:
+    """사용자 화면에서만 제목·문단을 구분하고 동일한 기간 문장을 한 번 표시한다."""
+    out, seen = [], set()
+    in_code = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("```"):
+            in_code = not in_code
+            out.append(raw)
+            continue
+        if in_code:
+            out.append(raw)
+            continue
+        if line.startswith(_PERIOD_PREFIXES):
+            if line in seen:
+                continue
+            seen.add(line)
+        # 5·6단계처럼 기존 필터를 통과한 잔여 단계 표기만 제거
+        raw = re.sub(r"^(\s*■\s*)\d{1,2}·\s*", r"\1", raw)
+        raw = re.sub(r"(/\s*)\d{1,2}·\s*(?=저장 결과 정리)", r"\1", raw)
+        line = raw.strip()
+        if line.startswith("■ "):
+            out.extend(["", "*" + line[2:].strip() + "*", ""])
+        elif line.startswith(("[시장·내부 근거 검증]", "[내부 구매 참고]")):
+            out.extend(["", "*" + line + "*", ""])
+        elif re.match(r"^(?:추천:|선택:|주의:|확정 소구점:|선택 소구점:)", line):
+            label, rest = line.split(":", 1)
+            out.extend(["", f"*{label}:*{rest}"])
+        elif re.match(r"^\d+안\.\s", line):
+            out.extend(["", f"*{line}*"])
+        elif re.match(r"^\d+\.\s", line):
+            out.extend(["", raw])
+        else:
+            out.append(raw)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
+
+def use_csv_only_preview(result, message, csv_available):
+    """본문에서 설명된 기획전 결과에 한해 긴 중복 표를 생략한다."""
+    if not csv_available:
+        return False
+    if result.get("workflow_display"):
+        return "세부 유형 추천" in message
+    run = result.get("workflow_run") or {}
+    return run.get("workflow") == "trend_planning" and any(title in message for title in (
+        "카테고리 비교", "상품 분석", "상품 후보", "상품 속성", "경쟁 유사 상품", "소구점 후보"))
+
+
+
+def workflow_section_blocks(text):
+    """굵은 단독 제목을 Slack 섹션으로 분리한다. 코드가 있는 본문은 원문 전송으로 유지."""
+    if "```" in text:
+        return []
+    groups, current = [], []
+    for line in text.splitlines():
+        # 숫자 후보 자체와 짧은 강조 라벨은 독립 구분선으로 분리하지 않는다.
+        heading = re.fullmatch(r"\*([^*]+)\*", line.strip())
+        if heading and not re.match(r"\d+안\.", heading.group(1)):
+            if current and any(part.strip() for part in current):
+                groups.append("\n".join(current).strip())
+                current = []
+        current.append(line)
+    if current and any(part.strip() for part in current):
+        groups.append("\n".join(current).strip())
+    if len(groups) < 2 or len(groups) > 25 or any(len(g) > 3000 for g in groups):
+        return []
+    blocks = []
+    for group in groups:
+        if blocks:
+            blocks.append({"type": "divider"})
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": group}})
+    return blocks

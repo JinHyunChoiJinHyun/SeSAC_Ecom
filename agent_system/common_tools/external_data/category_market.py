@@ -4,6 +4,7 @@ import pandas as pd
 from shared_analysis.market.category_comparison import normalize_category, KEYWORD_CATEGORY
 from shared_analysis.market.category_recommendation import summarize_naver
 from shared_analysis.market import review_analysis, selling_points
+from shared_analysis.market.price_quality import analyze_metrics, render_metrics
 
 
 def analyze_category(category, products, reviews, naver, collected_at=None):
@@ -25,9 +26,8 @@ def analyze_category(category, products, reviews, naver, collected_at=None):
     lines = [f'■ 무신사 {category} 전체 랭킹·리뷰 표본', f'수집 상품 {len(p):,}개 / 연결된 리뷰 {len(r):,}건 / 수집 기준: {collected_at or "미확인"}', '상품명 키워드 필터 없음. 랭킹 스냅샷이며 실제 판매량이나 시장 전체 순위가 아닙니다.']
     if not len(p): lines.append('해당 카테고리 수집 상품 없음.')
     if not len(r): lines.append('연결된 리뷰 없음. 리뷰 비율 산출 불가.')
-    if 'price' in p:
-        price = pd.to_numeric(p['price'], errors='coerce').dropna()
-        if len(price): lines.append(f'표본 가격 중앙값 {price.median():,.0f}원 (유효 {len(price)}개, 무신사 수집 가격)')
+    market_metrics = analyze_metrics(p, r)
+    lines += ['■ 가격·할인·평점·리뷰 표본 지표', *render_metrics(market_metrics)]
     if 'brand' in p:
         lines.append('표본 브랜드 빈도: ' + ', '.join(f'{k} {v}개' for k,v in p['brand'].value_counts().head(5).items()))
     overview_lines = list(lines)
@@ -58,8 +58,9 @@ def analyze_category(category, products, reviews, naver, collected_at=None):
     rows = [{'source':'musinsa','metric':'sample_products','value':len(p)}, {'source':'musinsa','metric':'sample_reviews','value':len(r)}]
     rows += [{'source':'musinsa','metric':a['aspect'],**a} for a in review['rows']]
     rows += [{'source':'musinsa_expression','metric':a['term'],**a} for a in selling['rows']]
+    rows += [{'source':'musinsa_metric','metric':key,**metric} for key,metric in market_metrics['metrics'].items()]
     rows += [{'source':'naver','metric':k,**v} for k,v in metrics.items()]
-    return {'final_answer':'\n'.join(lines),'dataframe':pd.DataFrame(rows), 'data_sources':['musinsa','naver'], 'data_purpose':f'{category} 외부 시장 근거', 'category_market':{'category':category,'sample_products':len(p),'sample_reviews':len(r),'naver_metrics':metrics,'theme_candidate':theme, 'keyword_classes':classes, 'market_summary':'\n'.join(overview_lines + lines[trend_start:]), 'review_summary':'\n'.join(overview_lines + review_lines + ['무신사 아우터 등 카테고리 전체의 경쟁 상품 리뷰이며 H&M 상품 직접 리뷰가 아닙니다.'])}}
+    return {'final_answer':'\n'.join(lines),'dataframe':pd.DataFrame(rows), 'data_sources':['musinsa','naver'], 'data_purpose':f'{category} 외부 시장 근거', 'category_market':{'market_metrics':market_metrics,'category':category,'sample_products':len(p),'sample_reviews':len(r),'naver_metrics':metrics,'theme_candidate':theme, 'keyword_classes':classes, 'market_summary':'\n'.join(overview_lines + lines[trend_start:]), 'review_summary':'\n'.join(overview_lines + review_lines + ['무신사 아우터 등 카테고리 전체의 경쟁 상품 리뷰이며 H&M 상품 직접 리뷰가 아닙니다.'])}}
 
 
 def build_category_market(category):
@@ -74,6 +75,12 @@ def build_category_market(category):
         _, files = sets[0]
         p = pd.read_csv(files['ranking'], dtype={'item_id': str})
         r = pd.read_csv(files['review'], dtype={'item_id': str, 'review_id': str}) if 'review' in files else pd.DataFrame(columns=['item_id','satisfaction','review'])
+        if 'add_info' in files:
+            info = pd.read_csv(files['add_info'], dtype={'item_id': str})
+            if 'item_id' in info:
+                extras = [c for c in ('gender','rating','review_count') if c in info and c not in p]
+                if extras:
+                    p = p.merge(info[['item_id', *extras]].drop_duplicates('item_id'), on='item_id', how='left')
         p['category'] = category
         r['category'] = category
         stamp = datetime.fromtimestamp(files['ranking'].stat().st_mtime, tz=timezone.utc).date()

@@ -8,6 +8,7 @@ import re
 from collections import Counter
 
 import pandas as pd
+from shared_analysis.market.price_quality import analyze_metrics, render_metrics
 
 # 단어 포함 여부를 표시하는 중복 허용 특징이며, 소분류에 대한 확정 분류가 아니다.
 SHAPES = {
@@ -51,13 +52,12 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
     p['item_id'] = p['item_id'].astype(str)
     p['ranking'] = pd.to_numeric(p['ranking'], errors='coerce')
     p = p.dropna(subset=['ranking']).sort_values('ranking').drop_duplicates('item_id')
-    if not info.empty and {'item_id', 'gender'}.issubset(info.columns):
+    if not info.empty and 'item_id' in info.columns:
         extras = info.copy()
         extras['item_id'] = extras['item_id'].astype(str)
-        extras = extras[['item_id', 'gender']].drop_duplicates('item_id')
-        if 'gender' in p:
-            p = p.drop(columns='gender')
-        p = p.merge(extras, on='item_id', how='left')
+        columns = [c for c in ('gender','rating','review_count') if c in extras]
+        extras = extras[['item_id', *columns]].drop_duplicates('item_id')
+        p = p.drop(columns=[c for c in columns if c in p]).merge(extras, on='item_id', how='left')
     if 'gender' not in p:
         p['gender'] = pd.NA
     # 성별 미확인 상품은 여성·공용으로 간주하지 않는다.
@@ -98,6 +98,7 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
         'gender_scope': '여성·공용' if gender_known else '성별 미확인(전체 참고)',
         'related_products': len(related), 'lightweight_named_products': len(lightweight),
         'related_reviews': len(r),
+        'market_metrics': analyze_metrics(related, r),
         'ranked_examples': [{'rank': int(row['ranking']), 'name': str(row['name']), 'item_id': str(row['item_id'])}
                             for _, row in related.head(5).iterrows()],
         'shapes': shapes, 'related_shapes': related_shapes, 'aspects': aspects,
@@ -142,6 +143,8 @@ def render_ranked(evidence: dict) -> str:
             f"{x['label']} {x['products']}개" for x in shapes))
     lines.append(f"관련 상품에 연결된 수집 리뷰 {evidence['related_reviews']}건 기준 관심 표현:")
     relevant = [x for x in evidence['aspects'] if x['mentions'] > 0]
-    lines.append(', '.join(f"{x['label']} {x['mentions']}건" for x in relevant[:5]) if relevant else '확인 가능한 리뷰 표현 없음')
+    lines.append(', '.join(f"{x['label']} {x['mentions']}건 ({x['mentions']/x['denominator']:.1%})" for x in relevant if x['denominator']) if relevant else '확인 가능한 리뷰 표현 없음')
+    if evidence.get('market_metrics'):
+        lines.extend(['', '■ 관련 상품 가격·할인·평점·리뷰 지표', *render_metrics(evidence['market_metrics'])])
     lines.append('※ 랭킹은 매출 순위가 아니며 상품명 분류는 잠정적입니다. 리뷰 언급은 선호·긍정 평가가 아닙니다.')
     return '\n'.join(lines)

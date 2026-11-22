@@ -129,7 +129,7 @@ def write_pdf(doc: ReportDocument, path: Path) -> Path:
         story.append(P(_esc(section.heading), st["h1" if section.level == 1 else "h2"]))
         for block in section.blocks:
             if isinstance(block, Paragraph):
-                story.append(P(_esc(block.text), st.get(block.style, st["body"])))
+                story.append(P(_esc(block.text), st["h2"] if block.style == "subheading" else st.get(block.style, st["body"])))
             elif isinstance(block, Bullets):
                 story.append(ListFlowable([ListItem(P(_esc(i), st["body"]), leftIndent=10) for i in block.items],
                                           bulletType="bullet", start="•", leftIndent=10))
@@ -179,7 +179,10 @@ def write_pdf(doc: ReportDocument, path: Path) -> Path:
 def write_docx(doc: ReportDocument, path: Path) -> Path:
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_SECTION_START
     from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    import re
     from docx.shared import Mm, Pt, RGBColor
 
     word = Document()
@@ -189,6 +192,9 @@ def write_docx(doc: ReportDocument, path: Path) -> Path:
     normal.element.rPr.rFonts.set(qn("w:eastAsia"), "Malgun Gothic")
     for section in word.sections:
         section.left_margin = section.right_margin = Mm(18)
+        section.top_margin = Mm(16)
+        section.bottom_margin = Mm(16)
+        section.page_width, section.page_height = Mm(210), Mm(297)
 
     def muted(paragraph):
         for run in paragraph.runs:
@@ -209,7 +215,11 @@ def write_docx(doc: ReportDocument, path: Path) -> Path:
         word.add_heading(section.heading, level=1 if section.level == 1 else 2)
         for block in section.blocks:
             if isinstance(block, Paragraph):
-                paragraph = word.add_paragraph(block.text)
+                if block.style == 'subheading' or re.match(r'^\d+\.\d+\s', block.text):
+                    paragraph = word.add_heading(block.text, level=2)
+                    paragraph.paragraph_format.keep_with_next = True
+                else:
+                    paragraph = word.add_paragraph(block.text)
                 if block.style in ("muted", "notice"):
                     muted(paragraph)
             elif isinstance(block, Bullets):
@@ -226,9 +236,14 @@ def write_docx(doc: ReportDocument, path: Path) -> Path:
                     cells = table.add_row().cells
                     for cell, value in zip(cells, row):
                         cell.text = "" if value is None else str(value)
-                for row in table.rows:
+                for row_number, row in enumerate(table.rows):
+                    # 표 행 분할 방지: Word/LibreOffice의 페이지 변경 시 행을 찢지 않는다.
+                    tr_pr = row._tr.get_or_add_trPr()
+                    tr_pr.append(OxmlElement('w:cantSplit'))
                     for cell in row.cells:
                         for paragraph in cell.paragraphs:
+                            if len(table.rows) <= 8 and row_number < len(table.rows) - 1:
+                                paragraph.paragraph_format.keep_with_next = True
                             for run in paragraph.runs:
                                 run.font.size = Pt(8)
                 if block.note:
@@ -247,13 +262,18 @@ def write_docx(doc: ReportDocument, path: Path) -> Path:
                 cols = max(1, int(block.columns or 3))
                 grid = word.add_table(rows=0, cols=cols)
                 for row in _grid_rows(block):
-                    cells = grid.add_row().cells
+                    grid_row = grid.add_row()
+                    grid_row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+                    cells = grid_row.cells
                     for cell, (image_path, label) in zip(cells, row):
                         paragraph = cell.paragraphs[0]
                         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         if Path(image_path).is_file():
                             paragraph.add_run().add_picture(image_path, height=Mm(55))
-                            muted(cell.add_paragraph(label))
+                            paragraph.paragraph_format.keep_with_next = True
+                            caption = cell.add_paragraph(label)
+                            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            muted(caption)
                         else:
                             muted(cell.add_paragraph(f"(이미지 파일 없음) {label}"))
                 if block.caption:

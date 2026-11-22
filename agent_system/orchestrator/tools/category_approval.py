@@ -11,18 +11,26 @@ def validated_updates(run, category, ids=None):
     chosen = verified[:5] if ids is None else list(dict.fromkeys(str(x) for x in ids))
     if not chosen or len(chosen)>5 or not set(chosen).issubset(verified):
         raise ValueError('현재 카테고리에서 검증된 상품 ID만 선택할 수 있습니다.')
+    plan = run.get('period_plan')
+    period_updates = {}
+    if plan:
+        from agent_system.orchestrator.tools.category_planning.period_context import scope_text, run_schedule
+        rows_by_id = {str(r['article_id']): r for r in run.get('verified_candidate_rows') or []}
+        if any(rows_by_id.get(i, {}).get('analysis_period') != scope_text(plan) for i in chosen):
+            raise ValueError('승인 후보의 과거 분석 기간이 현재 Run과 일치하지 않습니다.')
+        period_updates['schedule'] = run_schedule(run)
     market = run.get('category_market') or {}
     theme = market.get('theme_candidate') if market.get('category') == category else None
     if run.get('subtype_flow'):
         subtype = run.get('selected_subtype')
         colors = set(run.get('selected_colors') or [])
         rows = {str(r['article_id']):r for r in run.get('verified_candidate_rows') or []}
-        if not subtype or not colors or any(i not in rows or rows[i].get('selected_subtype') != subtype or not rows[i].get('keyword_match_verified') or rows[i].get('colour_group_name') not in colors for i in chosen):
+        if not subtype or not colors or any(i not in rows or rows[i].get('selected_subtype') != subtype or not rows[i].get('keyword_match_verified') or rows[i].get('suitability_status', 'rule_matched') != 'rule_matched' or rows[i].get('colour_group_name') not in colors for i in chosen):
             raise ValueError('세부 유형·색상 근거가 검증된 상품만 확정할 수 있습니다.')
         if {rows[i]['colour_group_name'] for i in chosen} != colors:
             raise ValueError('선택한 모든 색상의 상품을 포함해야 합니다.')
-        return {'category':category,'products':', '.join(chosen),'theme':subtype,'subtype':subtype,'colors':', '.join(run['selected_colors'])}
-    return {'category':category,'products':', '.join(chosen),'theme':str(theme or '미확정 (추가 검토 필요)')}
+        return {'category':category,'products':', '.join(chosen),'theme':subtype,'subtype':subtype,'colors':', '.join(run['selected_colors']), **period_updates}
+    return {'category':category,'products':', '.join(chosen),'theme':str(theme or '미확정 (추가 검토 필요)'), **period_updates}
 
 
 def selected_ids(text):

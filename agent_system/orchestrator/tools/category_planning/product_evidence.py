@@ -46,7 +46,10 @@ def _chart(rows: pd.DataFrame, destination: Path) -> str:
     values = rows['winter_online_purchases'].astype(int).tolist()
     fig, ax = plt.subplots(figsize=(10, max(3.8, 0.65 * len(rows) + 1)))
     ax.barh(list(reversed(labels)), list(reversed(values)))
-    ax.set_xlabel('Historical winter online purchase records (2018-2020)')
+    if 'analysis_period' in rows:
+        ax.set_xlabel('Historical core-month records: ' + str(rows['analysis_period'].iloc[0]).split(' (총')[0], fontsize=8)
+    else:
+        ax.set_xlabel('Historical winter online purchase records (2018-2020)')
     ax.set_title('H&M candidate comparison: historical records, not current sales')
     for index, value in enumerate(reversed(values)):
         ax.text(value, index, f' {value:,}', va='center', fontsize=9)
@@ -76,7 +79,7 @@ def enrich_verified_result(result: dict, category: str, run_id: str, *, include_
     if 'keyword_match_verified' not in frame:
         frame['keyword_match_verified'] = False
     # 거래 기록과 스타일 태그는 검증. 외부 트렌드와의 직접 일치 여부는 미검증.
-    naver_note = _naver_available(category)[1] if include_naver else '네이버 관심도는 6~7단계의 별도 근거입니다.'
+    naver_note = _naver_available(category)[1] if include_naver else '네이버 관심도는 상품 구매 기록과 별도의 시장 참고 근거입니다.'
     lines = [result.get('final_answer', '').strip(), '', '■ 10단계 결정을 위한 추가 근거',
              'H&M 스타일 태그는 상품명·설명에서 규칙으로 추출한 속성이며 트렌드 상승 지표가 아닙니다.',
              naver_note,
@@ -91,7 +94,7 @@ def enrich_verified_result(result: dict, category: str, run_id: str, *, include_
     if not include_chart:
         return updated
     root = Path(__file__).resolve().parents[4]
-    chart = root / 'visualization_output' / 'category_product_evidence' / str(run_id) / f'{category}_winter_purchases.png'
+    chart = root / 'visualization_output' / 'category_product_evidence' / str(run_id) / f'{category}_core_purchases.png'
     try:
         updated['visualization_path'] = _chart(frame, chart)
     except (ImportError, OSError, ValueError) as exc:

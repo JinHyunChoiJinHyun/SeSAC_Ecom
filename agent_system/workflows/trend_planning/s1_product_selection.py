@@ -40,12 +40,12 @@ STAGE = Stage(
             "유튜브는 보조 근거이며 채널 수를 인기 순위라고 단정하지 마세요.")),
         Step(7, "5·6단계 시장·상품 분석 결과 정리", owner="reporting", optional=True, instruction=(
             "5단계 상품 구성과 6단계 외부 시장 근거·분류를 표와 그래프로 정리하세요. 새 판단이나 소구점 제안은 하지 마세요.")),
-        Step(8, "H&M 과거 겨울 온라인 구매 후보 찾기", owner="product_analysis", instruction=(
-            "검토 카테고리 '{category}'에서 H&M의 검증된 과거 겨울철 온라인 구매 기록을 이용해 최대 5개 후보를 비교하세요. "
+        Step(8, "H&M 과거 판매 사례 분석", owner="product_analysis", instruction=(
+            "검토 카테고리 '{category}'에서 H&M의 검증된 과거 분석 기간 온라인 구매 기록을 이용해 최대 5개 후보를 비교하세요. "
             "실제 article_id와 구매 기록·고객 수를 제시하고, 외부 테마와 상품의 직접 일치는 검증하지 않았다면 명시하세요.")),
-        Step(9, "상품 후보 시각화", owner="reporting", optional=True, instruction=(
+        Step(9, "과거 판매 참고 사례 시각화", owner="reporting", optional=True, instruction=(
             "8단계의 검증 상품 후보, 구매 기록과 스타일 태그, 실제 상품 이미지를 정리해 시각화해 주세요. 미검증 테마 일치는 명시하세요.\n{previous}")),
-        Step(10, "기획전 카테고리·주력 상품 확정", kind="select", owner="marketer", selects="products", instruction=(
+        Step(10, "기획전 카테고리·상품 구성 방향 승인", kind="select", owner="marketer", selects="products", instruction=(
             "검토한 카테고리를 입력하면 8단계에서 검증된 최대 5개 주력 상품을 승인 제안합니다. "
             "예: 아우터. 개별 상품을 고르려면 실제 article_id를 지정하세요. "
             "수집된 네이버 테마는 기획 방향 제안이며 실제 상품과의 직접 일치는 별도 확인이 필요합니다.")),

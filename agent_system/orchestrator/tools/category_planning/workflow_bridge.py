@@ -24,34 +24,58 @@ def parse_scope(request: str) -> dict:
     return {'age_min': 20, 'age_max': 39, 'channel': channel, 'winter_only': True}
 
 
-def build_category_result(request: str, output_dir: str | Path, top_n: int = 3) -> dict:
+def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, *, period_plan=None) -> dict:
     from agent_system.common_tools.local_data.category_sales import category_sales
     from agent_system.common_tools.external_data import musinsa_sample, trend_files
 
     scope = parse_scope(request)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    sales = category_sales(**scope)
+    from .period_context import complete_scope, period_note, scope_days, scope_text, period_table_note
+    if period_plan is not None and scope['channel'] != 'online':
+        raise ValueError('기간 연동 상품 선정은 온라인 채널만 지원합니다. 다른 채널로 임의 대체하지 않습니다.')
+    sales = category_sales(**scope, period_plan=period_plan) if period_plan is not None else category_sales(**scope)
+    before = {}
+    if period_plan is not None and complete_scope(period_plan, 'before'):
+        before = {r['category']: r['purchases'] for r in category_sales(**scope, period_plan=period_plan, scope='before')['rows']}
     m = musinsa_sample.load()
     naver = trend_files.load_naver()
     keywords = set(naver['keyword'].dropna().astype(str)) if not naver.empty else set()
     rows = combine_rows(sales['rows'], m['products'], m['reviews'], keywords)
     naver_metrics = summarize_naver(naver, rows, KEYWORD_CATEGORY)
     ranking = musinsa_ranking_evidence(m['products'], CATEGORY_ALIASES)
-    candidates = recommend_with_evidence(rows, naver_metrics, ranking, top_n)
+    if period_plan is not None:
+        for row in rows:
+            row['hm_before_purchases'] = before.get(row['category'])
+            row['hm_core_days'] = scope_days(period_plan, 'core')
+            row['hm_before_days'] = scope_days(period_plan, 'before')
+            row['hm_core_purchases_per_day'] = round(row['hm_purchases']/row['hm_core_days'], 2)
+            row['hm_before_purchases_per_day'] = (round(row['hm_before_purchases']/row['hm_before_days'], 2)
+                                                  if row['hm_before_purchases'] is not None else None)
+            row['analysis_period'] = scope_text(period_plan)
+    candidates = (recommend_with_evidence(rows, naver_metrics, ranking, top_n, period_plan=period_plan)
+                  if period_plan is not None else recommend_with_evidence(rows, naver_metrics, ranking, top_n))
     if not rows or not candidates:
         raise ValueError('분석 대상 카테고리/후보가 없어 결과를 생성할 수 없습니다.')
-    save_charts(rows, naver, output)
+    if period_plan is not None:
+        save_charts(rows, naver, output, period_plan=period_plan)
+    else:
+        save_charts(rows, naver, output)
     save_recent_chart(naver, naver_metrics, output)
     frame = pd.DataFrame(rows)
     lines = ['■ 5개 카테고리 비교 및 주력 후보',
              '조건: 20~39세 고객 / ' + ('온라인' if scope['channel'] == 'online' else '오프라인') +
-             ' / H&M 여성용 상품 / 과거 12~2월 거래',
+             (' / H&M 여성용 상품 / 과거 핵심 월 거래' if period_plan else ' / H&M 여성용 상품 / 과거 12~2월 거래'),
              '고객 성별은 H&M DB에서 확인할 수 없습니다. 과거 거래 기록과 현재 외부 동향은 별도 근거입니다.',
              '', '추천 후보 (검토 순서, 확정된 시장 인기 순위 아님)']
+    if period_plan is not None:
+        lines.insert(2, period_note(period_plan))
+        lines.insert(3, '핵심 월 구매 기록이 있는 모델 수를 기준으로 모델당 구매량을 계산합니다. 네이버 상승 여부 우선, 핵심 구매 기록순 추천 기준은 기존과 같습니다.')
     for i, c in enumerate(candidates, 1):
         lines.append(f'{i}. {c["category"]}')
         lines.extend('  - ' + reason for reason in c['reasons'])
+        if period_plan is not None:
+            lines.append('  - ' + period_table_note(period_plan, c['hm_purchases'], before.get(c['category'])))
     lines.extend(['', '네이버 미수집 카테고리는 관심 부족이 아니라 데이터 없음입니다.',
                   '무신사 수집 리뷰 수·랭킹은 판매량이 아닙니다.',
                   '최근 상승은 기획전 기간 지속을 보장하지 않습니다.',
@@ -77,4 +101,5 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3) 
             slack_chart = str(target_path)
     return {'final_answer': '\n'.join(lines), 'dataframe': frame,
             'visualization_path': slack_chart,
-            'rows': rows, 'candidates': candidates, 'naver_metrics': naver_metrics}
+            'rows': rows, 'candidates': candidates, 'naver_metrics': naver_metrics,
+            'data_sources': ['hm', 'musinsa', 'naver']}

@@ -54,7 +54,31 @@ def build_action_blocks(actions: list[dict] | None, thread_id: str, requester_us
     blocks = []
     for item in actions or []:
         kind = item.get("type")
+        if kind == "copy_revision_review" and item.get("run_id") and isinstance(item.get("revision"), int):
+            phase = item.get("phase", "review")
+            decisions = [('choose1', '1안 확정', None), ('choose2', '2안 확정', None),
+                         ('choose3', '3안 확정', 'primary'), ('edit','추가 수정',None),
+                         ('undo','직전 수정 되돌리기','danger')]
+            buttons = [_button(f"{ACTION_PREFIX}copy_review_{d}", label,
+                               {'k': 'copy_revision_review', 'd': d, 'run': item['run_id'],
+                                'rev': item['revision'], 'phase': phase,
+                                't': thread_id, 'owner': requester_user_id}, style)
+                       for d, label, style in decisions]
+            note = '완성형 카피 하나를 바로 확정하거나 추가 수정·되돌리기할 수 있습니다.'
+            blocks += [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': f'*카피 수정 검토* — {note}'}},
+                       {'type': 'actions', 'block_id': f'{ACTION_PREFIX}copy_review', 'elements': buttons}]
+            continue
+        if kind == 'report_draft_review' and item.get('run_id'):
+            buttons = [_button(f'{ACTION_PREFIX}report_{d}', label,
+                       {'k':'report_draft_review','d':d,'run':item['run_id'],
+                        'rev':item['revision'],'t':thread_id,'owner':requester_user_id}, style)
+                       for d,label,style in [('approve','승인','primary'),('edit','수정 요청',None),
+                                              ('cancel','취소','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*보고서 초안 검토* — 승인, 수정 요청 또는 초안 취소를 선택하세요.'}},
+                       {'type':'actions','block_id':f'{ACTION_PREFIX}report_review','elements':buttons}]
+            continue
         if kind == "approval" and item.get("token"):
+
             title = item.get("title") or "승인 요청"
             # 승인 버튼도 내부 단계 번호 없이 표시합니다.
             from interfaces.slack.message_policy import hide_workflow_stage_labels
@@ -63,13 +87,18 @@ def build_action_blocks(actions: list[dict] | None, thread_id: str, requester_us
                                {"k": "approval", "d": d, "tok": item["token"], "t": thread_id, "owner": requester_user_id}, style)
                        for d, label, style in _APPROVAL_BUTTONS]
             blocks += [{"type": "section", "text": {"type": "mrkdwn",
-                                                    "text": f"*{title}* — 버튼으로 선택해 주세요. 수정은 채팅으로 입력 (예: \"카디건으로 수정\")"}},
+                                                    "text": f"*{title}* — 버튼으로 선택해 주세요. 변경할 내용은 채팅으로 알려 주세요."}},
                        {"type": "actions", "block_id": f"{ACTION_PREFIX}approval", "elements": buttons}]
         elif kind == "category_confirm" and item.get("run_id") and item.get("category"):
             category = str(item["category"])
             buttons = [_button(f"{ACTION_PREFIX}category_confirm", f"{category} 승인",
                                {"k": "category_confirm", "run": item["run_id"], "category": category,
+                                "tok": item.get("token", ""),
                                 "t": thread_id, "owner": requester_user_id}, "primary")]
+            for decision, label, style in _APPROVAL_BUTTONS[1:]:
+                buttons.append(_button(f"{ACTION_PREFIX}category_{decision}", label,
+                    {"k": "category_confirm", "d": decision, "run": item["run_id"],
+                     "category": category, "tok": item.get("token", ""), "t": thread_id, "owner": requester_user_id}, style))
             blocks += [{"type": "section", "text": {"type": "mrkdwn",
                         "text": f"*대분류 최종 확인* — {category}로 확정하시겠습니까? 승인 시 세부 유형 순위와 색상별 구매 근거를 안내합니다."}},
                        {"type": "actions", "block_id": f"{ACTION_PREFIX}category", "elements": buttons}]
@@ -116,12 +145,33 @@ def parse_action(body: dict) -> dict | None:
         label = LABELS[("approval", value["d"])]
     elif value.get("k") == "category_confirm" and value.get("run") and value.get("category"):
         action = {"type": "category_confirm", "run_id": str(value["run"]), "category": str(value["category"])}
-        label = f"{action['category']} 확정"
+        decision = value.get("d", "approve")
+        if decision not in {"approve", "reject", "cancel"}:
+            return None
+        if value.get("tok"):
+            action["token"] = str(value["tok"])
+        if decision != "approve":
+            action["decision"] = decision
+        label = f"{action['category']} 확정" if decision == "approve" else LABELS[("approval", decision)]
     elif (value.get("k") == "subtype_suggestion" and value.get("run") and value.get("subtype")
           and isinstance(value.get("colors"), list) and value["colors"]):
         action = {"type": "subtype_suggestion", "run_id": str(value["run"]),
                   "subtype": str(value["subtype"]), "colors": [str(c) for c in value["colors"]]}
         label = "추천 유형·상위 2색 선택"
+    elif (value.get('k') == 'copy_revision_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') >= 0
+          and value.get('phase') in ('review', 'select')
+          and value.get('d') in ('approve','edit','undo','choose1','choose2','choose3')):
+        action = {'type': 'copy_revision_review', 'command': value['d'],
+                  'run_id': str(value['run']), 'revision': value['rev'], 'phase': value['phase']}
+        label = {'approve':'승인','edit':'추가 수정','undo':'취소 후 되돌리기',
+                 'choose1':'1안 선택','choose2':'2안 선택','choose3':'3안 선택'}[value['d']]
+    elif (value.get('k') == 'report_draft_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') > 0
+          and value.get('d') in ('approve','edit','cancel')):
+        action = {'type':'report_draft_review','command':value['d'],
+                  'run_id':str(value['run']),'revision':value['rev']}
+        label = {'approve':'승인','edit':'수정 요청','cancel':'취소'}[value['d']]
     elif value.get("k") == "workflow" and ("workflow", value.get("c")) in LABELS and value.get("run"):
         action = {"type": "workflow", "command": value["c"], "run_id": str(value["run"])}
         label = LABELS[("workflow", value["c"])]
