@@ -119,3 +119,73 @@ def build_draft(run, campaign):
             "\n[초안 상태] 타깃 모델 미연결로 실행 계획의 일부만 작성됐습니다. "
             "팀장 승인 메일 발송, 실제 고객 선정·메시지 발송, 페이지 공개 및 사후 예약은 수행하지 않았습니다. "
             "기존 워크플로는 고객 타깃 분석 진입 전 상태를 유지합니다.")
+
+
+def is_report_revision(message: str) -> bool:
+    """기존 보고서에 대한 수정 요청을 일반 데이터 분석과 구분한다."""
+    text = str(message or "").strip()
+    return bool(re.search(r"(?:기획전\s*)?보고서", text)
+                and re.search(r"추가|수정|보완|반영|업데이트|고쳐|바꿔", text))
+
+
+def _supported_revision(message: str) -> bool:
+    """근거가 저장된 두 항목의 추가만 허용한다. 그 외 요청은 명시적으로 보류한다."""
+    text = str(message or "")
+    return bool(re.search(r"(?:네이버|트렌드|관심도)", text)
+                or re.search(r"(?:구매\s*(?:기록|건수)|구매량|상품\s*5개.*합계)", text))
+
+
+def _verified_purchase_total(run: dict, campaign: dict) -> str:
+    """승인된 ID만 합산하고 결측 시 합계를 추정하지 않는다."""
+    values = (campaign or {}).get("values") or {}
+    ids = re.findall(r"(?<!\d)\d{10}(?!\d)", str(values.get("products") or ""))
+    rows = {str(row.get("article_id")): row for row in run.get("verified_candidate_rows") or []
+            if isinstance(row, dict)}
+    if not ids or len(set(ids)) != len(ids):
+        return "확정된 상품 ID 목록의 검증이 필요하여 합계를 계산하지 않았습니다."
+    counts = []
+    for aid in ids:
+        count = rows.get(aid, {}).get("winter_online_purchases")
+        if isinstance(count, bool) or not isinstance(count, (int, float)) or not float(count).is_integer() or count < 0:
+            return "선정 상품 중 구매 기록이 확인되지 않은 항목이 있어 합계를 계산하지 않았습니다."
+        counts.append(int(count))
+    return (f"H&M 확정 상품 {len(ids)}개({', '.join(ids)})의 과거 겨울 온라인 구매 기록 합계: "
+            f"{sum(counts):,}건. 동일 Run의 승인 상품만 합산했으며 현재 판매량이나 경량패딩 전체 구매량은 아닙니다.")
+
+
+def _verified_naver_note(run: dict, campaign: dict) -> str:
+    """저장된 키워드별 상대 변화율과 비교 기간만 보고한다."""
+    values = (campaign or {}).get("values") or {}
+    subtype = _text(values.get("subtype"), "")
+    metrics = ((run.get("category_market") or {}).get("naver_metrics") or {})
+    key = subtype if subtype in metrics else subtype.replace(" ", "")
+    entry = metrics.get(key)
+    if not isinstance(entry, dict):
+        return (f"선정 유형 '{subtype or '미확정'}'에 대응하는 네이버 저장 근거가 없어 "
+                "관심도 변화율을 추가하지 않았습니다.")
+    growth = entry.get("growth_percent")
+    if isinstance(growth, bool) or not isinstance(growth, (int, float)):
+        return "네이버 상대 관심도 변화율이 저장되지 않아 수치 제시를 보류합니다."
+    prior = entry.get("prior_window") or "기간 미확인"
+    recent = entry.get("recent_window") or "기간 미확인"
+    return (f"네이버 '{key}' 상대 관심도 변화 {growth:+.2f}% "
+            f"(이전: {prior} / 최근: {recent}). "
+            "동일 키워드의 비교 기간 내 상대 지표 변화이며 절대 검색량·현재 구매량·향후 수요 예측은 아닙니다.")
+
+
+def revise_draft(run: dict, campaign: dict, message: str) -> str:
+    """기존 보고서의 확정값을 유지한 채 지원되는 근거 보강만 처리한다."""
+    if not _supported_revision(message):
+        raise ValueError("현재는 보고서의 네이버 트렌드 근거 및 확정 상품 구매 합계 추가만 지원합니다. "
+                         "기존 보고서는 유지됩니다. 다른 내용의 수정은 기능 연결 후 가능합니다.")
+    if not (run.get("report_draft") or {}).get("text"):
+        raise ValueError("수정할 보고서 초안이 없습니다. 먼저 '기획전 보고서 초안 작성해줘'를 입력해 주세요.")
+    report = build_draft(run, campaign)
+    additions = []
+    if re.search(r"네이버|트렌드|관심도", message):
+        additions.append("- " + _verified_naver_note(run, campaign))
+    if re.search(r"구매\s*(?:기록|건수)|구매량|상품\s*5개.*합계", message):
+        additions.append("- " + _verified_purchase_total(run, campaign))
+    if additions:
+        report = report.replace("\n3. 콘텐츠 및 소구점\n", "\n2.1. 추가 분석 근거\n" + "\n".join(additions) + "\n\n3. 콘텐츠 및 소구점\n", 1)
+    return report

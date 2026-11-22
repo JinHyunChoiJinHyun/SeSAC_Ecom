@@ -681,6 +681,21 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             return str(exc), None, False
         revised = dict(run, report_draft={"status": "draft_only", "text": report, "target_verified": False})
         return report, base.record_run_event(revised, "provisional_report_drafted", target_verified=False), False
+    # 보고서 수정은 새 SQL 조회가 아닌 현재 Run의 확정 근거만 사용한다.
+    from agent_system.orchestrator.tools.provisional_report import is_report_revision, revise_draft
+    if is_report_revision(message):
+        workflow, _, step = current_step(run)
+        if (not workflow or workflow.name != "trend_planning" or not step or step.no != 17
+                or run.get("status") != "paused"):
+            return "현재 Run의 보고서 초안 수정은 대표 문구 확정 후에만 가능합니다.", None, False
+        try:
+            report = revise_draft(run, campaign, message)
+        except ValueError as exc:
+            return str(exc), None, False
+        revised = dict(run, report_draft={"status": "draft_only", "text": report,
+                                          "target_verified": False})
+        return report, base.record_run_event(revised, "provisional_report_revised",
+                                             target_verified=False), False
     # 기존 13단계 승인 요청을 취소한 뒤, 11~12단계의 새 랭킹 분석만 다시 수행한다.
     if message.strip() == "워크플로 11단계 재실행":
         wf, _, step = current_step(run)
