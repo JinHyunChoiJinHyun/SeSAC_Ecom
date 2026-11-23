@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from backend.api.dependencies import get_chat_service, get_db
+from backend.api.dependencies import get_chat_service, get_operations_session
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ def health_check():
 
 
 @router.get("/db")
-def database_check(db: Session = Depends(get_db)):
+def database_check(db: Session = Depends(get_operations_session)):
     """PostgreSQL 연결 상태 확인"""
     try:
         db.execute(text("SELECT 1"))

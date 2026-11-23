@@ -2,6 +2,7 @@
 .env
 
 # data 폴더
+data/
 synerise_dataset/
 synerise.duckdb
 synerise.duckdb.wal

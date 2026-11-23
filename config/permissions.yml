@@ -1,0 +1,62 @@
+agents:
+  orchestrator:
+    - run:read
+    - execution:read
+
+  market:
+    - market:read
+
+  product:
+    - product:read
+  
+  targeting:
+    - targeting:compute
+    - audience:write
+
+  content:
+    - content:write
+    - knowledge:read
+  
+  validation:
+    - validation:write
+
+  reporting:
+    - repost:write
+  
+  execution:
+    - execution:read
+    - execution:approval_request
+    - execution:page_delivery
+    - execution:url_check
+    - execution:send
+    - execution:schedule
+
+# 워크플로별 허용 scope
+workflows:
+  trend_planning:
+    allowed_scopes:
+      - run:read
+      - execution:read
+      - market:read
+      - product:read
+      - targeting:compute
+      - audience:write
+      - content:write
+      - knowledge:read
+      - validation:write
+      - report:write
+      - execution:approval_request
+      - execution:page_delivery
+      - execution:url_check
+      - execution:send
+      - execution:schedule
+
+  photography_planning:
+    allowed_scopes:
+      - run:read
+      - market:read
+      - product:read
+      - content:write
+      - knowledge:read
+      - validation:write
+      - report:write

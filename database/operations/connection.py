@@ -17,18 +17,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(PROJECT_ROOT / "env" / ".env", override=False)
 
-def _database_url() -> str | URL:
+def get_database_url() -> str | URL:
     """DB URL 생성 또는 기존 URL 반환"""
 
     # url이 있으면 반환 없으면 생성
-    if url := os.getenv("OPS_DATABASE_URL"):
-        return url
+    if database_url := os.getenv("OPS_DATABASE_URL"):
+        return database_url
 
     # 필수 env 불러오기
-    required_env = {key: os.getenv(key) for key in ("DB_USER", "DB_PASSWORD", "DB_NAME")}
+    required_env = ("DB_USER", "DB_PASSWORD", "DB_NAME")
 
     # 누락된 env 확인
-    missing_env = [key for key, value in required_env.items() if not value]
+    missing_env = [key for key in required_env if not os.getenv(key)]
 
     # 누락된 env 존재할 시 예외 발생
     if missing_env:
@@ -36,28 +36,40 @@ def _database_url() -> str | URL:
 
     # URL 객체 반환
     return URL.create(
-        "postgresql+psycopg",
-        username=required_env["DB_USER"],
-        password=required_env["DB_PASSWORD"],
-        host=os.getenv("DB_HOST") or "127.0.0.1",
-        port=int(os.getenv("DB_PORT") or "5433"),
-        database=required_env["DB_NAME"]
+        drivername="postgresql+psycopg",
+        username=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST", "127.0.0.1"),
+        port=int(os.getenv("DB_PORT", "5433")),
+        database=os.getenv("DB_NAME")
     )
 
 @lru_cache
 def get_engine() -> Engine:
     """엔진 생성 후 캐시에 저장하여 재사용"""
-    return create_engine(_database_url(), pool_pre_ping=True)
+    return create_engine(get_database_url(), pool_pre_ping=True)
 
 @lru_cache
-def _session_factory() -> sessionmaker[Session]:
+def get_session_factory() -> sessionmaker[Session]:
     """공통 설정을 가진 세션 생성기 생성 후 캐시에 저장하여 재사용"""
     return sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
 
+def get_operations_session():
+    """FastAPI 요청용 DB Session 제공 (트랜잭션 관리는 Service에서 담당)"""
+    session = get_session_factory()()
+
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 @contextmanager
 def session_scope():
-    """with문으로 DB 세션의 생성 / 트랜젝션 / 종료를 자동으로 관리"""
-    session = _session_factory()() # 세션 생성기로 세션 생성
+    """배치 및 스크립트용 DB 트랜잭션 관리"""
+    session = get_session_factory()() # 세션 생성기로 세션 생성
     try:
         yield session # with 블록에 Session 전달
         session.commit()
@@ -67,14 +79,9 @@ def session_scope():
     finally:
         session.close()
 
-def get_operations_session():
-    """생성된 Session을 Operations DB 작업용으로 제공"""
-    with session_scope() as session:
-        yield session
-
 def reset_engine() -> None:
     """테스트용 URL 교체 후 엔진 재생성"""
     if get_engine.cache_info().currsize:
         get_engine().dispose()
     get_engine.cache_clear()
-    _session_factory.cache_clear()
+    get_session_factory.cache_clear()
