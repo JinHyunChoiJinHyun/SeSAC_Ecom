@@ -201,6 +201,12 @@ def _draft_blocks(lines):
 
 
 
+def _saved_evidence_lines(draft: dict, section: str, fallback: list[str]) -> list[str]:
+    """Slack 최신 초안의 출처별 문장을 우선 표시하고 없는 절만 저장 근거로 보완한다."""
+    lines = draft.get(section)
+    return [str(line) for line in lines if str(line).strip()] if isinstance(lines, list) and lines else fallback
+
+
 def _report_market_evidence(run, draft):
     """저장된 무신사 근거만 보고서에 반영한다. 미확인 숫자는 추정하지 않는다."""
     market = run.get('category_market') or {}
@@ -284,10 +290,31 @@ def _cross_evidence_blocks(run: dict, confirmed_ids: list[str], *, reference_onl
         scope = '상품별 한정' if item.get('scope') == 'partial' else '공통'
         rows.append([('[선택] ' if str(item.get('label') or '') in (selected_points or []) else '[미선택·참고] ') + str(item.get('label') or '확인된 특징'), scope,
                      ', '.join(ids), f"{item.get('musinsa_aspect') or '관심 표현'} {mentions:,}/{total:,}건"])
+    # V429O_CROSS_ROWS: 선택 소구점이 사전 교차 검증 목록에 없더라도
+    # 확정된 편성 방향을 누락하지 않는다. 검증되지 않은 교차 관계로 오인하지 않게 표기한다.
+    from agent_system.orchestrator.tools.provisional_report import _point_evidence_detail
+    selected = [str(p) for p in (selected_points or []) if str(p).strip()]
+    included = {str(row[0]).removeprefix('[선택] ').strip() for row in rows}
+    for point in selected:
+        if point in included:
+            continue
+        detail = _point_evidence_detail(point, run)
+        # 참고 ID도 이번 보고서의 승인 상품 범위 밖이라면 출력하지 않는다.
+        safe_refs = [ref for ref in detail['refs'] if ref in approved]
+        rows.append(['[선택·참고] ' + point,
+                     '편성 방향 (교차 검증 아님)',
+                     ', '.join(safe_refs) if safe_refs else '연결 확인 필요',
+                     detail['review']])
+    if any(str(r[0]).startswith('[선택·참고]') for r in rows):
+        # 선택되었다는 사실과 출처 간 교차 검증을 구분한다.
+        appendix_notice = True
+    else:
+        appendix_notice = False
     if not rows:
         return []
     return [Paragraph('5.2 H&M × 무신사 참고 소구점 교차 근거 (미선택 항목 포함)' if reference_only else '5.2 H&M × 무신사 소구점 교차 근거', 'subheading'),
             Table(['소구점', '과거 사례 일치 범위' if reference_only else 'H&M 적용 범위', 'H&M 과거 참고 ID' if reference_only else '확인된 H&M 상품 ID', '무신사 리뷰 언급'], rows),
+            *([Paragraph('선택·참고 행은 캠페인 편성 방향이며 H&M·무신사 간 상품별 교차 검증을 뜻하지 않습니다.', 'notice')] if appendix_notice else []),
             Paragraph('무신사 리뷰는 경쟁 상품의 관심 표현이며 H&M 상품의 만족도·성능 또는 동일 상품을 입증하지 않습니다.', 'notice')]
 
 
@@ -382,27 +409,22 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
                   if confirmed_ids and len(purchases) == len(confirmed_ids) else
                   '과거 참고 사례의 구매 건수 중 미확인 값이 있어 합계는 표시하지 않습니다.' if reference_only else '확정 상품 구매 건수 중 미확인 값이 있어 합계는 표시하지 않습니다.')
 
-    # 수정된 초안의 2.1절을 먼저 사용하며, 아직 재생성 전이면 Run 근거로 보완한다.
-    extra = draft.get('2.1') or []
-    if not extra:
-        verified = []
-        if hasattr(provisional_report, '_verified_naver_note'):
-            verified.append(provisional_report._verified_naver_note(run, campaign))
-        if confirmed_ids:
-            verified.append(total_note + ' (과거 기록이며 현재 판매량 아님)')
-        extra = verified
-
-    # Slack 초안에 추가된 무신사 관심사별 수정 결과도 Word에 전달한다.
-    musinsa_extra = []
-    for line in extra:
-        if line.startswith('- 무신사') or line.startswith('- 핏·') or line.startswith('- 가벼움') or line.startswith('- 색감') or line.startswith('- 보온성') or line.startswith('- 디자인') or line.startswith('- 두께감') or line.startswith('- 리뷰'):
-            musinsa_extra.append(line)
-    # 무신사 상세 통계는 아래 구조화 표로 이미 출력되므로 중복 문단으로 표시하지 않는다.
-    extra = [x for x in extra if x not in musinsa_extra]
-
-    # 문서 본문에서는 구매 합계를 한 번만 보여주고, 무신사 근거를 별도로 구성한다.
-    extra = _deduplicate_purchase_summary(extra, total_note)
-    musinsa_notes = _report_market_evidence(run, draft)
+    # Slack 초안과 동일한 저장 근거를 사용하되 출처별 절은 Word에서 한 번씩만 표현한다.
+    from agent_system.orchestrator.tools.provisional_report import _verified_naver_note, _selected_point_reasons
+    naver_notes = _saved_evidence_lines(draft, '2.1', [_verified_naver_note(run, campaign)])
+    musinsa_notes = _saved_evidence_lines(draft, '2.2', _report_market_evidence(run, draft))
+    revision_notes = _saved_evidence_lines(draft, '2.4', [])
+    # 가격·리뷰 상세 통계는 아래 구조화 표를 정본으로 삼아 중복 나열하지 않는다.
+    market_blocks = _market_detail_blocks(run)
+    # 상세 표가 없는 경우에만 Slack 검증 문구를 대신 사용한다.
+    has_review_table = any(isinstance(block, Table) and '리뷰 관심사' in block.columns
+                           for block in market_blocks)
+    musinsa_detail_fallback = ([] if has_review_table else
+                               provisional_report._verified_musinsa_note(run))
+    point_reasons = _selected_point_reasons([str(x) for x in points], run)
+    reasoning = ('종합 판단: 네이버는 상대 검색 관심도, H&M은 과거 구매·상품 디자인 사례, '
+                 '무신사는 경쟁 상품·리뷰 관심 표현을 나타냅니다. 서로 다른 시점과 표본이므로 '
+                 '현재 재고·실제 판매량·성능·기획전 수요를 입증하지 않습니다.')
 
     sections = [
         Section('1. 제안 요약', [
@@ -424,11 +446,15 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
             *([Paragraph(line) for line in period_note(plan).splitlines() if not line.startswith("운영 일정:")] if plan else []),
             *([Paragraph(saved_comparison_note(run))] if saved_comparison_note(run) else []),
             Paragraph(total_note + ' (현재 판매량 아님)'),
-            Paragraph("3.2 네이버 및 추가 분석 근거", "subheading"),
-            *(_draft_blocks(extra) or [Paragraph("추가 분석 근거 미확인", "notice")]),
+            Paragraph("3.2 네이버 검색 관심도 분석", "subheading"),
+            *_draft_blocks(naver_notes),
             Paragraph("3.3 무신사 경쟁 시장 근거", "subheading"),
             *(_draft_blocks(musinsa_notes) or [Paragraph("무신사 경쟁 시장 근거 미확인", "notice")]),
-            *_market_detail_blocks(run),
+            *market_blocks,
+            *([] if has_review_table else [Paragraph('3.5 무신사 리뷰 관심사 분석', 'subheading')] + _draft_blocks(musinsa_detail_fallback)),
+            Paragraph('3.6 종합 추천 판단', 'subheading'),
+            Paragraph(reasoning),
+            *([Paragraph('3.7 Slack 보고서 수정 요청 처리', 'subheading'), *_draft_blocks(revision_notes)] if revision_notes else []),
             *_draft_blocks([x for x in draft.get('2', []) if x.startswith('선정 근거:')])]),
         Section('4. 과거 H&M 판매 참고 사례 (실제 판매 상품 미확정)' if reference_only else '4. 주력 상품 구성', [
             Table(['과거 상품명' if reference_only else '상품명', '참고 상품 ID' if reference_only else '상품 ID', '색상', basis], products)
@@ -436,6 +462,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
         Section('5. 상품 구성 전략 및 콘텐츠' if reference_only else '5. 콘텐츠 및 소구점', [
             *([Paragraph('5.1 향후 상품 편성 조건', 'subheading'), Paragraph(f"상품 유형: {direction.get('subtype') or '미확정'} / 검토 색상: {', '.join(direction.get('colors') or []) or '미확정'}"), Paragraph('검토 디자인 특징: ' + (' / '.join(x['feature'] for x in direction.get('design_features') or []) or '미선정')), Paragraph('판매 상품 ID·재고·실제 적용 디자인 특징: 미확정 (과거 H&M 상품 ID를 판매 상품으로 사용하지 않음)', 'notice')] if reference_only else []),
             Paragraph(('편성 방향으로 선택한 소구점: ' if reference_only else '확정 소구점: ') + (', '.join(str(p) for p in points) if points else '미확정')),
+            *[Paragraph(note) for note in point_reasons],
             *_cross_evidence_blocks(run, confirmed_ids, reference_only=reference_only, selected_points=points),
             *_approved_copy_blocks(page),
             Paragraph(f'{"·".join(colors)} 과거 상품 사례를 비교하고, 향후 실제 편성 상품에는 확인된 디자인만 반영합니다.' if reference_only else f'{"·".join(colors)} 상품을 비교하고, 확인된 상품별 디자인 차이를 안내합니다.'

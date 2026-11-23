@@ -49,30 +49,78 @@ def _selling_points(value):
     return [str(x).strip() for x in points if str(x).strip()]
 
 
-def _initial_evidence(run: dict, campaign: dict) -> list[str]:
-    """첫 초안에 포함할 필수 근거. 해당 Run에 저장된 검증값만 사용한다."""
-    market = run.get('category_market') or {}
+def _initial_evidence(run: dict, campaign: dict) -> dict[str, list[str]]:
+    """출처별 독립 근거. 검증된 동일 Run 값만 사용한다."""
+    return {
+        'naver': [_verified_naver_note(run, campaign)],
+        'musinsa': _verified_musinsa_note(run),
+        'hm': ['H&M 과거 구매 사례: ' + _verified_purchase_total(run, campaign)],
+        'judgment': [
+            '네이버 상대 관심도는 키워드 관심 변화, H&M 구매 기록은 과거 상품·색상 참고, '
+            '무신사 상품명과 리뷰는 경쟁 상품의 관심 표현을 나타냅니다. '
+            '서로 다른 관측 범위이므로 현재 판매량·성능·재고·미래 수요를 입증하지 않습니다.'
+        ],
+    }
+
+
+# V429O_POINT_EVIDENCE: 확정 소구점과 해당 출처의 검증된 관심사를 연결한다.
+def _selected_point_reasons(points: list[str], run: dict) -> list[str]:
+    """선택된 소구점에 서로 다른 근거를 제공하고 결측값은 확인 필요로 남긴다."""
+    return [_point_evidence_detail(point, run)['note'] for point in points]
+
+
+def _point_evidence_detail(point: str, run: dict) -> dict:
+    """H&M 상품 참고 ID와 무신사 관심사 집계를 같은 Run에서 읽는다."""
     summary = run.get('campaign_summary') or {}
+    market = run.get('category_market') or {}
     ranked = market.get('ranked_evidence') or summary.get('ranked_evidence') or {}
-    rows = []
+    candidates = summary.get('candidates') or []
+    cross = summary.get('cross_evidence') or []
+    detail = next((c for c in candidates if isinstance(c, dict) and str(c.get('label')) == str(point)), {})
+    verified = next((c for c in cross if isinstance(c, dict)
+                     and str(c.get('label')) == str(point) and c.get('cross_verified') is True), {})
+    # 교차 검증이 완료된 상품 ID만 검증 근거로 사용한다.
+    # candidates[].matched는 잠정 연결 후보일 수 있으므로 혼용하지 않는다.
+    refs = verified.get('hm_matched_ids') or []
+    refs = list(dict.fromkeys(str(ref) for ref in refs if str(ref).strip()))
 
-    naver = _verified_naver_note(run, campaign)
-    rows.append('네이버 트렌드: ' + naver)
-    if isinstance(ranked, dict) and ranked.get('related_reviews'):
-        rows.extend('무신사 리뷰: ' + line if i == 0 else '  ' + line
-                    for i, line in enumerate(_verified_musinsa_note(run)))
+    # 무신사 관심사별 분모·분자를 확인한 후에만 집계 문자열을 구성한다.
+    labels = {'색상별 스타일링 선택': ('색감', '색상'),
+              '상품별 디자인 상세 비교': ('디자인', '상품별 디자인')}
+    aspect, basis = labels.get(str(point), (None, '상품별 특징'))
+    aspects = ranked.get('aspects') or [] if isinstance(ranked, dict) else []
+    row = next((a for a in aspects if isinstance(a, dict)
+                and str(a.get('label')) == str(aspect)), {}) if aspect else {}
+    count = row.get('mentions')
+    total = ranked.get('related_reviews') if isinstance(ranked, dict) else None
+    valid = (isinstance(count, int) and not isinstance(count, bool)
+             and isinstance(total, int) and not isinstance(total, bool)
+             and total > 0 and 0 <= count <= total)
+    review = f'무신사 경쟁 상품 리뷰의 {aspect} 언급 {count:,}/{total:,}건 ({count / total * 100:.1f}%)' if valid else '무신사 관심사별 검증 집계 확인 필요'
+
+    if str(point) == '색상별 스타일링 선택':
+        hm = (f'H&M 과거 참고 사례 {len(refs)}개에 기록된 색상 정보를 비교' if refs
+              else 'H&M 과거 참고 사례의 색상 연결 근거 확인 필요')
+    elif str(point) == '상품별 디자인 상세 비교':
+        hm = (f'H&M 과거 참고 사례 {len(refs)}개의 상품별 설명·디자인 표현 비교' if refs
+              else 'H&M 과거 참고 사례의 디자인 연결 근거 확인 필요')
     else:
-        rows.append('무신사 리뷰 상세: 검증된 관심사별 집계가 없어 확인이 필요합니다.')
+        hm = (f'H&M 과거 참고 사례 {len(refs)}개의 관련 설명 참고' if refs
+              else 'H&M 과거 참고 사례 연결 근거 확인 필요')
 
-    # 중복 ID나 결측 구매량은 추정하지 않고 별도로 안내한다.
-    purchase = _verified_purchase_total(run, campaign)
-    rows.append('H&M 과거 구매 사례: ' + purchase)
+    # 참고 출처는 향후 판매 상품의 디자인·성능이 확정됐다는 뜻이 아니다.
+    note = (f'선택 소구점 「{point}」: {hm}; {review}. '
+            '이는 향후 상품 편성의 참고 근거이며 현재 판매 상품에 적용 여부는 미확정입니다.')
+    return {'point': str(point), 'refs': refs, 'review': review, 'note': note,
+            'valid_review': valid, 'basis': basis}
 
-    # 세 출처는 각각 다른 의미를 갖는다. 자동 추천을 인과적 사실로 표현하지 않는다.
-    rows.append('추천 판단: 네이버는 수집 키워드의 상대 관심도, H&M은 과거 구매 및 상품 설명, '
-                '무신사는 경쟁 상품명·리뷰 관심사에 대한 참고 근거입니다. '
-                '현재 판매량·소재 성능·재고·기획전 기간 수요를 입증하지 않습니다.')
-    return rows
+
+def _evidence_sections(run: dict, campaign: dict, market_note: str) -> str:
+    evidence = _initial_evidence(run, campaign)
+    return ("\n2.1. 네이버 검색 관심도 분석\n" + '\n'.join(evidence['naver']) +
+            "\n\n2.2. 무신사 경쟁 상품·리뷰 분석\n" + market_note + '\n' + '\n'.join(evidence['musinsa']) +
+            "\n\n2.3. H&M 참고 사례 구매 합계 및 종합 판단\n" +
+            '\n'.join(evidence['hm'] + evidence['judgment']) + '\n')
 
 
 def build_draft(run, campaign):
@@ -113,7 +161,7 @@ def build_draft(run, campaign):
                        f"{ranked.get('related_products', '미확인')}개와 연결 리뷰 "
                        f"{ranked.get('related_reviews', '미확인')}건을 참고했습니다. "
                        "상품명 기반 잠정 분류이며 판매량·시장 선호도 순위가 아닙니다.")
-    initial_evidence = _initial_evidence(run, campaign)
+    initial_evidence = _evidence_sections(run, campaign, market_note)
     return (f"■ 기획전 운영 제안서 초안 (타깃 모델 연결 전)\n"
             f"\n1. 제안 요약\n기획전: {theme}\n"
             f"대분류·소분류: {_text(values.get('category'))} / {subtype}\n"
@@ -125,12 +173,12 @@ def build_draft(run, campaign):
             "참고 사례 선정 근거: H&M 상품명·설명 기준 세부 유형 매칭과 20~39세·여성용 상품·"
             + ("검증된 핵심 월" if plan else "겨울(12~2월)") + "·온라인 채널의 과거 거래 기록."
             + " 현재 매출이나 재고는 아닙니다.\n"
-            + ((period_note(plan) + "\n" + saved_comparison_note(run) + "\n") if plan else "") +
-            f"{market_note}\n"
-            "\n2.1. 추가 분석 근거\n" + "\n".join('- ' + line for line in initial_evidence) + "\n"
-            "\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n"
-            + ("편성 특징 후보: " + ", ".join(points) if points else "편성 특징 후보: 확인 필요") + "\n"
-            "과거 사례에서 확인된 색상·디자인 특징을 향후 상품 편성 조건으로 제안합니다. 실제 판매 상품의 소재·성능은 아직 검증하지 않았습니다.\n"
+            + (("\n".join(x for x in period_note(plan).splitlines() if not x.startswith("운영 일정:")) + "\n" + saved_comparison_note(run) + "\n") if plan else "") +
+            initial_evidence
+            + "\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n"
+            + ("최종 선택 소구점: " + ", ".join(points) if points else "최종 선택 소구점: 확인 필요") + "\n"
+            + "\n".join(_selected_point_reasons(points, run)) + "\n"
+            + "과거 사례에서 확인된 색상·디자인 특징을 향후 상품 편성 조건으로 제안합니다. 실제 판매 상품의 소재·성능은 아직 검증하지 않았습니다.\n"
             "\n4. 고객 타깃 선정 및 메시지 운영 — 추후 작성\n"
             "[작성 예정] 이 절은 타깃 선정 모델 및 최신 운영 데이터 연동 후 채울 공간입니다. "
             "아래 빈칸은 실제 분석 결과가 아니며, 고객 선정·발송을 수행하지 않았습니다.\n"
@@ -217,9 +265,18 @@ def _verified_musinsa_note(run: dict) -> list[str]:
 
 
 def _prior_additions(report: str) -> list[str]:
-    match = re.search(r'\n2\.1\. 추가 분석 근거\n(.*?)(?=\n\n3\. 제안 상품 구성 조건)',
-                      report or '', flags=re.S)
-    return [x.strip() for x in match.group(1).splitlines() if x.strip()] if match else []
+    """레거시 2.1절과 새 출처별 절의 문장 수집 (후속 수정 호환)."""
+    result = []
+    for pattern in (
+        r'\n2\.1\. 추가 분석 근거\n(.*?)(?=\n\n3\. 제안 상품 구성 조건)',
+        r'\n2\.1\. 네이버 검색 관심도 분석\n(.*?)(?=\n\n2\.2\.)',
+        r'\n2\.2\. 무신사 경쟁 상품·리뷰 분석\n(.*?)(?=\n\n2\.3\.)',
+        r'\n2\.3\. H&M 참고 사례 구매 합계 및 종합 판단\n(.*?)(?=\n\n(?:2\.4\.|3\.))',
+    ):
+        match = re.search(pattern, report or '', flags=re.S)
+        if match:
+            result.extend(line.strip().lstrip('- ').strip() for line in match.group(1).splitlines() if line.strip())
+    return result
 
 
 def _verified_purchase_total(run: dict, campaign: dict) -> str:
@@ -262,43 +319,54 @@ def _verified_naver_note(run: dict, campaign: dict) -> str:
 
 
 def revise_draft(run: dict, campaign: dict, message: str) -> str:
-    """보고서 확정값 및 기존 보강 근거를 유지하면서 복수 요청을 모두 반영한다."""
+    """출처별 보고서와 구형 초안 모두에서 검증 근거·이전 수정을 보존한다."""
     intents = _revision_intents(message)
     if not intents:
         raise ValueError('현재는 네이버·무신사 저장 근거 및 H&M 구매 합계 보강만 지원합니다. 기존 보고서는 유지됩니다.')
-    # 지원하지 않는 수정을 함께 요청하면 일부만 조용히 반영하지 않는다.
     if re.search(r'글꼴|폰트|표지\s*(?:디자인|변경)|레이아웃\s*변경|차트\s*(?:추가|수정)|발송\s*(?:대상|명단)|재고\s*(?:수량|현황)', str(message or '')):
         raise ValueError('요청 중 현재 처리할 수 없는 수정 항목이 있습니다. 초안은 유지됩니다. '
                          '네이버·무신사 저장 근거 또는 H&M 구매 합계 보강 요청으로 나누어 주세요.')
     previous = (run.get('report_draft') or {}).get('text')
     if not previous:
         raise ValueError("수정할 보고서 초안이 없습니다. 먼저 '기획전 보고서 초안 작성해줘'를 입력해 주세요.")
+
     report = build_draft(run, campaign)
-    existing = _prior_additions(previous)
+    marker = '\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n'
+    if marker not in report:
+        raise ValueError('보고서 절 구조를 확인하지 못해 변경을 적용하지 않았습니다.')
+
+    # 출처별 새 형식은 각 절에 검증된 데이터가 들어 있으므로 동일 근거를 중복 삽입하지 않는다.
+    if '2.1. 네이버 검색 관심도 분석' in report:
+        labels = {'naver': '네이버 검색 관심도(2.1절)',
+                  'musinsa': '무신사 리뷰·경쟁 근거(2.2절)',
+                  'purchase': 'H&M 과거 구매 합계(2.3절)'}
+        acknowledged = ', '.join(labels[key] for key in ('naver', 'musinsa', 'purchase') if key in intents)
+        notice = ('수정 요청 반영 확인: ' + acknowledged +
+                  '을(를) 동일 Run의 저장·검증 자료로 재작성했습니다. '
+                  '새로운 자료 수집이나 추가 수치 산출은 수행하지 않았습니다.')
+        return report.replace(marker, '\n2.4. 수정 요청 처리 결과\n' + notice + '\n' + marker, 1)
+
+    # 구형/부분 초안에서는 실제 검증 수치를 이전 보강 근거와 합쳐야 한다.
+    # 이 경우 안내문만 출력하면 요청 근거가 누락되므로 테스트 및 레거시 동작을 보존한다.
     additions = []
     if 'naver' in intents:
-        naver_note = _verified_naver_note(run, campaign)
-        if not any(naver_note in x for x in _prior_additions(report)):
-            additions.append('- ' + naver_note)
+        additions.append(_verified_naver_note(run, campaign))
     if 'purchase' in intents:
-        additions.append('- ' + _verified_purchase_total(run, campaign))
+        additions.append(_verified_purchase_total(run, campaign))
     if 'musinsa' in intents:
-        additions.extend('- ' + line for line in _verified_musinsa_note(run))
-    # 이전 보강을 보존하고 중복 줄을 제거한다.
-    merged = []
+        additions.extend(_verified_musinsa_note(run))
+
+    unique = []
     seen = set()
-    for item in _prior_additions(report) + existing + additions:
-        normalized = re.sub(r'^\s*-\s*', '', str(item)).strip()
-        if normalized and normalized not in seen:
-            merged.append('- ' + normalized)
-            seen.add(normalized)
-    if merged:
-        # 자동 삽입된 2.1절이 있으면 교체하고, 레거시 보고서에는 추가한다.
-        replacement = '\n2.1. 추가 분석 근거\n' + '\n'.join(merged)
-        if '\n2.1. 추가 분석 근거\n' in report:
-            report = re.sub(r'\n2\.1\. 추가 분석 근거\n.*?(?=\n\n3\. 제안 상품 구성 조건)',
-                            lambda _: replacement, report, count=1, flags=re.S)
-        else:
-            report = report.replace('\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n',
-                                    replacement + '\n\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n', 1)
-    return report
+    for line in _prior_additions(report) + _prior_additions(previous) + additions:
+        clean = re.sub(r'^\s*-\s*', '', str(line)).strip()
+        if clean and clean not in seen:
+            unique.append('- ' + clean)
+            seen.add(clean)
+    if not unique:
+        return report
+    replacement = '\n2.1. 추가 분석 근거\n' + '\n'.join(unique)
+    if '\n2.1. 추가 분석 근거\n' in report:
+        return re.sub(r'\n2\.1\. 추가 분석 근거\n.*?(?=\n\n3\. 제안 상품 구성 조건)',
+                      lambda _: replacement, report, count=1, flags=re.S)
+    return report.replace(marker, replacement + '\n' + marker, 1)
