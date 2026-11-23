@@ -476,7 +476,24 @@ def make_agent_node(spec):
             campaign=campaign,                      # manage_context: 확정된 상품·타깃·일정
         )
 
-        result = normalize_agent_result(spec.name, spec.load_runner()(request))
+        # 검증은 결과 저장·승인·대화 상태 갱신보다 먼저 수행한다.
+        from agent_system.validation.specialized_selection_gate import validate_with_retries
+        runner = spec.load_runner()
+        result = validate_with_retries(
+            spec.name, question,
+            lambda attempt, feedback: normalize_agent_result(
+                spec.name,
+                runner(request if not feedback else AgentRequest(
+                    question=question + "\n\n[검증 보완 요청] " + feedback,
+                    user_question=request.user_question,
+                    is_followup=request.is_followup,
+                    last_analysis=request.last_analysis,
+                    llm_config=request.llm_config,
+                    campaign=request.campaign,
+                    approved_actions=(),
+                )),
+            ),
+        )
         result.update(turn_type="analysis", standalone_question=question, route=spec.name, route_label=spec.label)
         store_turn_result(state["turn_id"], result)
 
