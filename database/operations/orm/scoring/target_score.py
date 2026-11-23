@@ -20,7 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database.operations.base import Base
 
 if TYPE_CHECKING:
-    from .sc
+    from .scoring_run import ScoringRun
 
 # 4분면 세그먼트
 QUADRANTS = ("core", "pref_only", "prop_only", "low") # scoring.yaml의 4분면 이름과 통일
@@ -58,7 +58,8 @@ class TargetScore(Base):
     # 근거 (예: [{"type": "preference", "feature": "...", "lift": 2.3}, ...])
     reasons: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
 
-    scoing_run: Mapped[] = relationship(back_populates="target_scores")
+    # 점수 계산에 사용한 모델 추적 (1:N 관계)
+    scoing_run: Mapped[ScoringRun] = relationship(back_populates="target_scores")
 
     __table_args__ = (
         CheckConstraint("preferencew_pct BETWEEN 0 AND 1", name="preference_pct_range"),
@@ -80,6 +81,6 @@ class TargetScore(Base):
         ),
 
         # 동일한 실행의 상품 내에서 순위 중복 방지 + 상위 N명 조회를 위한 인덱스 역할
-        UniqueConstraint("scoring_run_id", "campaign_product_id", "target_rank_in_product", name="product_rank")
+        UniqueConstraint("scoring_run_id", "campaign_product_id", "target_rank_in_product", name="product_rank"),
         Index("ix_target_score_run_customer", "scoring_run_id", "customer_id")
     )
