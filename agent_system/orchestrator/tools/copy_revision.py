@@ -173,3 +173,34 @@ def validate_copy_claims(package, summary):
                 if point in str(card.get('copy') or '') and product_id not in (row.get('matched') or {}):
                     raise ValueError('상품별 소구점이 근거 없는 상품에 적용됐습니다.')
     return True
+
+# V429P_R2_COMPAT: 기존의 자연어 스타일 수정과 신규 명시 문구 지정을 분리한다.
+_regenerate_copy_legacy = regenerate_copy
+from agent_system.orchestrator.tools.copy_revision_v429p import (
+    regenerate_copy as _regenerate_copy_v429p,
+    replay_copy_step,
+    _split_instructions as _split_v429p_instructions,
+    _explicit_field as _v429p_explicit_field,
+)
+
+
+def _has_explicit_copy_field(feedback: str) -> bool:
+    """'제목을 "..."로' 등 필드+인용 문구가 명시된 경우에만 신규 엔진을 사용한다.
+
+    인용된 말이 단순 스타일 참고문구인 경우에는 기존 생성 동작을 유지한다.
+    """
+    clauses = _split_v429p_instructions(feedback)
+    if not clauses:
+        clauses = {0: feedback}
+    return any(
+        _v429p_explicit_field(clause, field) is not None
+        for clause in clauses.values()
+        for field in ('headline', 'body')
+    )
+
+
+def regenerate_copy(base, feedback, previous_revision=0):
+    """정확한 필드 지정은 V4.29P, 일반 스타일 요청은 기존 호환 경로로 처리."""
+    if _has_explicit_copy_field(str(feedback or '')):
+        return _regenerate_copy_v429p(base, feedback, previous_revision)
+    return _regenerate_copy_legacy(base, feedback, previous_revision)

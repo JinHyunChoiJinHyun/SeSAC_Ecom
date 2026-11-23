@@ -235,7 +235,7 @@ def orchestrator_node(state) -> dict:
         if question.startswith('__cart_copy_review__:'):
             from copy import deepcopy
             from agent_system.orchestrator.tools.campaign_copy import generate_candidates, validate_candidates, render_options
-            from agent_system.orchestrator.tools.copy_revision import regenerate_copy
+            from agent_system.orchestrator.tools.copy_revision import regenerate_copy, replay_copy_step
             command = question.split(':', 1)[1]
             if command == 'edit':
                 new_run = deepcopy(run)
@@ -253,7 +253,7 @@ def orchestrator_node(state) -> dict:
                     summary = run.get('campaign_summary') or {}
                     previous = generate_candidates(summary, campaign)
                     for step in (package.get('revision_steps') or [])[:-1]:
-                        previous = regenerate_copy(previous, step['feedback'], int(previous.get('revision') or 0))
+                        previous = replay_copy_step(previous, step)
                     previous = validate_candidates(previous, summary, campaign)
                     new_run = deepcopy(run)
                     new_run['copy_package'] = previous

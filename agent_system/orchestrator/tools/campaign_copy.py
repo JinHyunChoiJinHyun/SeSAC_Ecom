@@ -189,7 +189,7 @@ def generate_candidates(summary, campaign):
 
 def validate_candidates(package, summary, campaign):
     """후보가 확정 입력으로 재현 가능한지 확인한다. 실패 시 16단계 진입 금지."""
-    from agent_system.orchestrator.tools.copy_revision import regenerate_copy, validate_copy_claims
+    from agent_system.orchestrator.tools.copy_revision import regenerate_copy, replay_copy_step, _regenerate_copy_legacy, validate_copy_claims
     expected = generate_candidates(summary, campaign)
     if package.get('revision'):
         steps = package.get('revision_steps')
@@ -197,12 +197,12 @@ def validate_candidates(package, summary, campaign):
             if len(steps) != package['revision'] or steps[-1].get('feedback') != package.get('revision_feedback'):
                 raise ValueError('문구 수정 이력이 일치하지 않습니다.')
             for step in steps:
-                expected = regenerate_copy(expected, step['feedback'], expected.get('revision', 0))
+                expected = replay_copy_step(expected, step)
                 if step.get('targets') != expected.get('revision_targets'):
                     raise ValueError('문구 수정 대상이 변경됐습니다.')
         else:
             # 이전 Run 수정 패키지와의 호환성.
-            expected = regenerate_copy(expected, package.get('revision_feedback', ''), package['revision'] - 1)
+            expected = _regenerate_copy_legacy(expected, package.get('revision_feedback', ''), package['revision'] - 1)
             for legacy_field in ('revision_steps', 'revision_targets'):
                 expected.pop(legacy_field, None)
     if package != expected:
