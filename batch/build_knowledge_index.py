@@ -3,6 +3,9 @@ import json
 from collections import Counter
 from datetime import date
 from pathlib import Path
+from datetime import date
+
+from pydantic import ValidationError
 
 from rag.chunk import split_text
 from rag.embedding import embeded_documents
@@ -13,6 +16,10 @@ from backend.repositories.knowledge.knowledge_repository import (
     replace_document_chunks
 )
 
+from backend.schemas.knowledge import (
+    KnowledgeDocument
+)
+
 DATA_PATH = (
     Path(__file__).resolve().parents[1]
     / "data"
@@ -21,24 +28,34 @@ DATA_PATH = (
     / "business_knowledge.jsonl"
 )
 
+
 def load_documents():
     """JSONL 문서 불러오기"""
     documents = []
 
     with open(DATA_PATH, "r", encoding="utf-8") as file:
-        for line in file:
-            if line.strip():
-                documents.append(json.loads(line))
+        for line_number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+            try:
+                raw_document = json.loads(line)
+                document = KnowledgeDocument.model_validate(raw_document)
+            except (json.JSONDecodeError, ValidationError) as error:
+                raise ValueError(
+                    f"JSONL {line_number}번째 줄 검증 실패: {error}"
+                ) from error
+
+            documents.append(document)
 
     return documents
 
 def index_knowledge_documents():
-    """"""
+    """JSONL 문서 임베딩 후 저장"""
 
     documents = load_documents()
 
     # 1. 원본 문서 ID 중복 검사
-    doc_ids = [document["doc_id"] for document in documents]
+    doc_ids = [document.doc_id for document in documents]
 
     duplicates = [
         doc_id
@@ -55,11 +72,11 @@ def index_knowledge_documents():
     with get_session_factory()() as session:
         try:
             for document in documents:
-                chunks = split_text(document["content"])
+                chunks = split_text(document.content)
 
                 if not chunks:
                     raise ValueError(
-                        f"문서의 청킹 결과가 비어 있습니다: {document["doc_id"]}"
+                        f"문서의 청킹 결과가 비어 있습니다: {document.doc_id}"
                     )
 
                 embeddings = embeded_documents(chunks)
@@ -67,7 +84,7 @@ def index_knowledge_documents():
                 if len(chunks) != len(embeddings):
                     raise ValueError(
                         f"청크와 임베딩 개수가 일치하지 않습니다: "
-                        f"{document["doc_id"]}"
+                        f"{document.doc_id}"
                     )
 
                 chunk_documents = []
@@ -77,28 +94,22 @@ def index_knowledge_documents():
                 ):
                     chunk_documents.append(
                         {
-                            "doc_id": (
-                                f"{document["doc_id"]}:"
-                                f"{document["version"]}:"
-                                f"{index}:"
-                            ),
-                            "source_doc_id": document["doc_id"], # 원본 문서 ID
-                            "title":document["title"],
-                            "knowledge_type": document["knowledge_type"],
-                            "category": document["category"],
+                            "source_doc_id": document.doc_id, # 원본 문서 ID
+                            "title":document.title,
+                            "knowledge_type": document.knowledge_type,
+                            "category": document.category,
                             "chunk_index": index,
                             "body": chunk,
-                            "metadata_json": document.get("metadata", {}),
-                            "version": document["version"],
+                            "metadata_json": document.metadata,
                             "status": "active",
                             "effective_from": (
-                                date.fromisoformat(document["effective_from"])
-                                if document.get("effective_from")
-                                else None
+                                date.fromisoformat(document.effective_from)
+                                if document.effective_from
+                                else date.today()
                             ),
                             "effective_to": (
-                                date.fromisoformat(document["effective_to"])
-                                if document.get("effective_to")
+                                date.fromisoformat(document.effective_to)
+                                if document.effective_to
                                 else None
                             ),
                             "embedding": embedding
@@ -106,7 +117,7 @@ def index_knowledge_documents():
                     )
                 replace_document_chunks(
                     session=session,
-                    source_doc_id=document["doc_id"],
+                    source_doc_id=document.doc_id,
                     documents=chunk_documents
                 )
             session.commit()

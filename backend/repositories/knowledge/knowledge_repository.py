@@ -8,6 +8,46 @@ from database.operations.orm.knowledge.knowledge_doc import (
     KnowledgeDoc
 )
 
+def is_document_changed(existing_chunks, new_documents):
+    """기존 문서와 새 문서의 변경 여부 확인
+    - existing_chunks는 비어 있지 않고 chunk_index 순으로 정렬 필수
+    """
+
+    existing = existing_chunks[0]
+    new = new_documents[0]
+
+    compare_fields = [
+        "title",
+        "knowledge_type",
+        "category",
+        "metadata_json",
+        "effective_from",
+        "effective_to",
+    ]
+
+    # 문서 공통 속성 비교
+    for field in compare_fields:
+        if getattr(existing, field) != new[field]:
+            return True
+
+    # 청크 본문 비교
+    existing_bodies = [chunk.body for chunk in existing_chunks]
+    new_bodies = [doc["body"] for doc in new_documents]
+
+    return existing_bodies != new_bodies
+
+def increase_version(version: str) -> str:
+    """마이너 버전 증가 (형식: major.minor)"""
+    
+    try:
+        major, minor = map(int, version.split("."))
+    except ValueError as error:
+        raise ValueError(f"버전 형식이 올바르지 않습니다.: {version}") from error
+
+
+    return f"{major}.{minor + 1}"
+
+
 def replace_document_chunks(
         session:Session,
         source_doc_id: str,
@@ -25,15 +65,52 @@ def replace_document_chunks(
     if any(doc["source_doc_id"] != source_doc_id for doc in documents):
         raise ValueError("원본 문서 ID가 일치하지 않습니다.")
 
-    # 3) 모든 청크의 버전 검증
-    versions = {doc["version"] for doc in documents}  # version 조회
+    # 2. 기존 활성 chunk 조회
+    existing_chunks = (
+        session.query(KnowledgeDoc)
+        .filter(
+            KnowledgeDoc.source_doc_id == source_doc_id,
+            KnowledgeDoc.status == "active"
+        )
+        .order_by(KnowledgeDoc.chunk_index)
+        .all()
+    )
 
-    if len(versions) != 1:
-        raise ValueError("모든 청크의 버전이 동일해야 합니다.")
+    # 3. 버전 결정
+    # 1) 기존 문서가 존재하고 변경이 없는 경우 기존 버전 유지
+    if existing_chunks and not is_document_changed(existing_chunks, documents):
+        return
 
-    version = next(iter(versions)) # set의 요소 하나 반환
+    # 2) 비활성 이력까지 포함한 전체 버전 조회
+    versions = session.execute(
+        select(KnowledgeDoc.version)
+        .where(KnowledgeDoc.source_doc_id == source_doc_id)
+        .distinct()
+    ).scalars().all() # 값만 반환
 
-    # 2. 동일 원본 문서 + 동일 버전의 기존 청크 삭제 (버전이 다른 경우 pass)
+    # 3-1) 기존 버전이 존재하면 최댓값에서 마이너 버전 증가 
+    if versions:
+        # versions를 숫자로 변환하여 최댓값 반환
+        latest_version = max(versions, key=lambda value: tuple(map(int, value.split(".")))) 
+        version = increase_version(latest_version)
+
+    # 3-2) 최초 적재 시
+    else:
+        version = "1.0"
+
+    # 4. 모든 청크에 결정된 버전 적용
+    for index, document in enumerate(documents):
+        document["version"] = version
+        document["doc_id"] = f"{source_doc_id}:{version}:{index}"
+
+    # 5. 기존 버전 비활성화
+    session.execute(
+        update(KnowledgeDoc)
+        .where(KnowledgeDoc.source_doc_id == source_doc_id)
+        .values(status="inactive")
+    )
+
+    # 6. 동일 원본 문서 + 동일 버전의 기존 청크 삭제 (버전이 다른 경우 pass)
     session.execute(
         delete(KnowledgeDoc)
         .where(
@@ -42,14 +119,7 @@ def replace_document_chunks(
         )
     )
 
-    # 3. 동일 원본 문서의 기존 버전 행 모두 비활성화
-    session.execute(
-        update(KnowledgeDoc)
-        .where(KnowledgeDoc.source_doc_id == source_doc_id)
-        .values(status="inactive")
-    )
-
-    # 4. 새로운 버전 저장
+    # 7. 새로운 버전 저장
     for document in documents:
         session.add(
             KnowledgeDoc(
