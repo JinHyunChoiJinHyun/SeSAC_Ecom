@@ -63,6 +63,15 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
     # 성별 미확인 상품은 여성·공용으로 간주하지 않는다.
     gender_known = p['gender'].notna().any()
     eligible = p[p['gender'].isin(['여', '여성', '공용', '유니섹스', 'unisex'])].copy() if gender_known else p.copy()
+    # 아우터 통합 표본의 분류 적합성을 확인한다. 원본 100개는 보존하고
+    # 소분류 근거에 한해서 명백 불일치/판정 보류 상품을 자동 제외한다.
+    audit_counts = {}
+    if ('category' in p and p['category'].astype(str).isin(['아우터', 'outer']).any()):
+        from agent_system.common_tools.external_data.musinsa_category_audit import audit_outer
+        audited = audit_outer(p)
+        audit_counts = {str(k): int(v) for k,v in audited['audit_status'].value_counts().items()}
+        eligible = eligible.loc[eligible['item_id'].isin(
+            audited.loc[audited['audit_status'].eq('아우터 근거 확인'), 'item_id'])].copy()
     # '시어링'을 sheer(얇음)으로 오인하지 않고, 패딩/다운 표현을 경량 확정으로 보지 않는다.
     target_pattern = RELATED.get(str(subtype).strip())
     related = eligible[_matching(eligible['name'], target_pattern)].copy() if target_pattern else eligible.iloc[0:0].copy()
@@ -96,6 +105,7 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
         'subtype': subtype,
         'total_products': len(p), 'eligible_products': len(eligible),
         'gender_scope': '여성·공용' if gender_known else '성별 미확인(전체 참고)',
+        'category_audit': audit_counts,
         'related_products': len(related), 'lightweight_named_products': len(lightweight),
         'related_reviews': len(r),
         'market_metrics': analyze_metrics(related, r),
@@ -108,7 +118,18 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
 
 
 def load_ranked_evidence(category: str, subtype: str) -> dict:
-    """현재 프로젝트의 카테고리별 CSV를 직접 읽는다(원본 수정 없음)."""
+    """DuckDB 모드에는 통합 테이블의 category를 기준으로, CSV 모드에는 기존 파일을 읽는다."""
+    from common.external_data_store import enabled as duckdb_enabled
+    if duckdb_enabled():
+        from agent_system.common_tools.external_data.musinsa_sample import category_frames
+        from common.external_data_store import fetch, LABELS
+        products, reviews, _ = category_frames(category)
+        details = fetch('musinsa_add_info')
+        details = details.loc[details['category'].map(LABELS).eq(category)].copy()
+        # 랭킹 데이터에는 상세 정보가 합쳐져 있어도 analyze_ranked가 기존 방식으로 합칩니다.
+        if products.empty:
+            raise ValueError(f'무신사 DuckDB 카테고리 상품이 없습니다: {category}')
+        return analyze_ranked(products, details, reviews, subtype)
     from agent_system.common_tools.external_data import musinsa_sample
     from shared_analysis.market.category_comparison import normalize_category
     sets = [(key, value) for key, value in musinsa_sample.file_sets().items()
@@ -132,6 +153,9 @@ def render_ranked(evidence: dict) -> str:
     lines = [f"■ 무신사 상위 상품 디자인 분석 ({scope} 기준)",
              f"수집 랭킹 {evidence['total_products']}개 중 비교 대상 {evidence['eligible_products']}개, "
              f"'{evidence['subtype']}' 관련 상품명 규칙 매칭 {evidence['related_products']}개."]
+    if evidence.get('category_audit'):
+        counts = evidence['category_audit']
+        lines.append('아우터 상품명 적합성 점검: ' + ', '.join(f'{k} {v}개' for k,v in counts.items()) + ' (원본 표본 유지, 자동 소분류 매칭에서는 보류·의심 제외)')
     if evidence['ranked_examples']:
         lines.append('관련 상품 상위 순위 사례: ' + '; '.join(
             f"{x['rank']}위 {x['name']}" for x in evidence['ranked_examples'][:3]))

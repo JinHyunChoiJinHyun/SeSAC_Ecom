@@ -87,7 +87,9 @@ def visualize_analysis_results(run_id: str | None = None, snapshot_ids: list[str
 def generate_campaign_report(campaign_id: str = "") -> dict:
     """기획전 실행 계획 보고서 생성 (상품 선정·페이지·타깃 결과 종합). 로컬에서는 Word 초안."""
     ctx = _local()
-    if backend_client.enabled() and (ctx is None or clean_id(campaign_id)):
+    # R39의 확정 고객 집계는 로컬 보고서 정본에서 사용한다.
+    r39 = ((ctx or {}).get('run') or {}).get('campaign_target_r39') or {}
+    if r39.get('status') != 'confirmed' and backend_client.enabled() and (ctx is None or clean_id(campaign_id)):
         result = backend_client.call("POST", "/reports/campaign", source=SOURCE,
                                      body={"campaign_id": clean_id(campaign_id)})
         if result.get("available") or ctx is None:
@@ -106,7 +108,7 @@ def generate_campaign_report(campaign_id: str = "") -> dict:
     report_id, path = _write_draft(doc, ctx, "기획전_실행계획_보고서")
     return _ok({"report_id": report_id, "kind": "campaign", "label": "기획전 실행 계획 보고서 (초안)",
                 "files": [str(path)], "format": "docx", "draft": True,
-                "note": "백엔드 보고서 기능 연결 전이라 대화에 기록된 확정값·단계 결과로 만든 초안입니다 (미진행 단계는 그대로 표시)."},
+                "note": "고객군별 선정 근거 및 메시지 제안을 포함했습니다." if r39.get("status") == "confirmed" else "백엔드 보고서 기능 연결 전이라 대화에 기록된 확정값·단계 결과로 만든 초안입니다 (미진행 단계는 그대로 표시)."},
                [{"source_type": "workflow_run", "source_id": run.get("run_id", ""), "label": run.get("workflow", "")}])
 
 

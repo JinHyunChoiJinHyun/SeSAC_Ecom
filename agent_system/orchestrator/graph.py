@@ -144,11 +144,30 @@ def pending_actions(graph, thread_id: str) -> list[dict]:
         return [{"type": "approval", "token": str(getattr(interrupts[0], "id", "") or ""),
                  "title": str(value.get("title", ""))}]
     run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+    preview = run.get('page_preview') or {}
+    if (run.get('status') == 'waiting_input' and run.get('waiting_key') == 'page'
+            and preview.get('status') == 'review' and run.get('run_id')):
+        return [{'type': 'page_preview_review', 'run_id': run['run_id'],
+                 'revision': int(preview.get('button_epoch') or preview.get('revision') or 1)}]
+    if (run.get('status') == 'waiting_input' and run.get('waiting_key') == 'page'
+            and preview.get('status') == 'rejected' and run.get('run_id')):
+        return []
     if (run.get('status') == 'waiting_input' and run.get('waiting_key') == 'page'
             and (run.get('copy_package') or {}).get('status') == 'verified' and run.get('run_id')):
         return [{'type': 'copy_revision_review', 'run_id': run['run_id'],
                  'revision': int(run['copy_package'].get('revision') or 0),
                  'phase': 'review'}]
+    target = run.get('campaign_target_r39') or {}
+    if (preview.get('status') == 'approved' and run.get('status') == 'paused' and target.get('status') == 'review'
+            and target.get('proposal') and target.get('review_token') and run.get('run_id')):
+        return [{'type':'target_selection_review', 'run_id':run['run_id'], 'token':target['review_token'],
+                 **({'fixed_policy':True} if target.get('policy') == 'r40_v1' else {})}]
+    package41 = run.get('segment_copy_r41') or {}
+    if run.get('status') == 'paused' and target.get('status') == 'confirmed' and target.get('policy') == 'r40_v1' and package41.get('status') == 'review' and package41.get('token'):
+        return [{'type':'segment_copy_review','run_id':run['run_id'],'token':package41['token']}]
+    # 승인 후에는 일반 워크플로 실행 버튼 대신 명시적 업무 요청을 기다린다.
+    if preview.get('status') == 'approved' and (run.get('target_start_pending') or run.get('campaign_target_r39')):
+        return []
     draft = run.get('report_draft') or {}
     if (run.get('run_id') and draft.get('status') == 'review'
             and run.get('status') == 'paused'):
@@ -317,13 +336,33 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
     # 저장된 분석 증거에서 표·그래프를 이 시점에 별도 첨부한다.
     from agent_system.orchestrator.tools.category_planning.confirmation_report import enrich_confirmation_result
     if result.get("turn_type") == "chitchat":
-        from agent_system.orchestrator.tools.category_planning.review_selection import parse_category_confirmation
-        if (action or {}).get("type") == "category_confirm":
-            snapshot = _snapshot(graph, thread_id)
-            run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
-            result = enrich_confirmation_result(result, run)
+        from agent_system.orchestrator.tools.category_planning.confirmation_report import is_subtype_replay_request
+        approval_turn = (action or {}).get("type") == "category_confirm"
+        replay_turn = is_subtype_replay_request(question)
+        # 유형을 선택한 직후는 색상 증거만 추가한다. 승인을 다시 요청하지 않는다.
+        # 상세 분석은 후보를 잠깐 표시할 뿐, 선택·확정 상태를 변경하지 않는다.
+        from agent_system.orchestrator.tools.category_planning.exploration_r28 import requested_subtype_review
+        snapshot = _snapshot(graph, thread_id)
+        run = ((getattr(snapshot, "values", None) or {}) if snapshot is not None else {}).get("workflow_run") or {}
+        preview = requested_subtype_review(question, run.get('subtype_options') or []) if (
+            run.get('status') == 'waiting_input' and run.get('waiting_key') == 'subtype_colors'
+            and run.get('category_confirmed')) else None
+        if preview and run.get('preview_subtype') == preview:
+            display_run = {**run, 'selected_subtype': preview, 'selected_colors': []}
+            result = enrich_confirmation_result(result, display_run, mode='colors')
+        elif approval_turn or replay_turn:
+            result = enrich_confirmation_result(result, run, mode='types')
     actions = pending_actions(graph, thread_id)
     # 워크플로 버튼은 워크플로 결과·워크플로 명령 답변에만 붙임 (대기 중 다른 질문마다 버튼이 쌓이지 않게)
+    if actions and actions[0]['type'] == 'target_selection_review' and '고객 타깃 선정 제안' not in str(result.get('final_answer','')):
+        actions = []
+    if actions and actions[0]['type'] == 'segment_copy_review' and '고객군별 마케팅 문구 ·' not in str(result.get('final_answer','')):
+        actions = []
+    if actions and actions[0]['type'] == 'page_preview_review':
+        if (action or {}).get('type') != 'page_preview_review' and not (
+                result.get('turn_type') == 'chitchat'
+                and ('페이지 틀' in str(result.get('final_answer','')) or '페이지 목업' in str(result.get('final_answer','')))):
+            actions = []
     if actions and actions[0]['type'] == 'copy_revision_review':
         if (action or {}).get('type') != 'copy_revision_review' and not (
                 result.get('turn_type') == 'chitchat'
@@ -336,6 +375,17 @@ def run_turn(question: str, thread_id: str, llm_config: dict, graph=None, metada
                          or any(label in str(result.get("final_answer", "")) for label in workflow.BUTTON_LABELS))
         if not workflow_turn:
             actions = []
+    # R42.2: 실제 R40 제안의 집계만 PNG로 전달 (실패해도 텍스트·승인 유지).
+    if actions and actions[0].get('type') == 'target_selection_review' and actions[0].get('fixed_policy'):
+        from agent_system.orchestrator.tools.target_presentation_r422 import optional_chart
+        snapshot = _snapshot(graph, thread_id)
+        display_run = (getattr(snapshot, 'values', None) or {}).get('workflow_run') or {}
+        target = display_run.get('campaign_target_r39') or {}
+        if target.get('review_token') == actions[0].get('token'):
+            path = optional_chart(target, display_run)
+            if path:
+                # 비공개 집계 PNG는 허용된 프로젝트 첨부 경로로 전달한다.
+                result['attachments'] = [*(result.get('attachments') or []), path]
     result["actions"] = actions
     return result
 
@@ -383,6 +433,8 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
 
     # ── Slack 버튼 (글자 판단 없이 버튼 값 그대로)
     skip_approval_check = False
+    if not action and str(question).strip().startswith(('__cart_target_review__:', '__cart_segment_copy__:')):
+        return _notice(thread_id, STALE_ACTION_REPLY)
     if action:
         kind = action.get("type")
         if kind == "approval":
@@ -395,7 +447,37 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
             print(f"[버튼] 승인 요청 → {decision}")
             return _resume_approval(graph, config, turn_id, thread_id, decision,
                                     f"[버튼] {APPROVAL_BUTTON_LABELS[decision]}")
-        if kind == 'copy_revision_review':
+        if kind == 'target_selection_review':
+            from agent_system.orchestrator.tools.campaign_target_r39 import review_action_valid
+            snapshot = _snapshot(graph, thread_id)
+            run = (getattr(snapshot, 'values', None) or {}).get('workflow_run') or {}
+            if pending_interrupt(graph, thread_id) is not None or not review_action_valid(run, action):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            question = '__cart_target_review__:' + action['command']
+            skip_approval_check = True
+        elif kind == 'segment_copy_review':
+            from agent_system.orchestrator.tools.campaign_copy_r41 import action_valid
+            snapshot = _snapshot(graph, thread_id)
+            run = (getattr(snapshot, 'values', None) or {}).get('workflow_run') or {}
+            if pending_interrupt(graph, thread_id) is not None or not action_valid(run, action):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            question = '__cart_segment_copy__:' + action['command']
+            skip_approval_check = True
+        elif kind == 'page_preview_review':
+            snapshot = _snapshot(graph, thread_id)
+            run = ((getattr(snapshot, 'values', None) or {}) if snapshot is not None else {}).get('workflow_run') or {}
+            preview = run.get('page_preview') or {}
+            if (run.get('status') != 'waiting_input' or run.get('waiting_key') != 'page'
+                    or run.get('run_id') != action.get('run_id')
+                    or int(preview.get('button_epoch') or preview.get('revision') or 0) != action.get('revision')
+                    or preview.get('status') != 'review'):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            command = action.get('command')
+            if command not in ('approve','reject','edit','regenerate','undo'):
+                return _notice(thread_id, STALE_ACTION_REPLY)
+            question = '__cart_page_preview__:' + command
+            skip_approval_check = True
+        elif kind == 'copy_revision_review':
             snapshot = _snapshot(graph, thread_id)
             run = ((getattr(snapshot, 'values', None) or {}) if snapshot is not None else {}).get('workflow_run') or {}
             if (run.get('status') != 'waiting_input' or run.get('waiting_key') != 'page'
@@ -544,6 +626,11 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
             agent_result["delivery_mode"] = "chart_only"
         return _with_reminders(agent_result, output)
 
+    # R29: 읽기 전용 소구점 재표시는 그래프 분기를 실행하지 않고 파일 포함 결과를 전송한다.
+    if agent_result is not None and agent_result.get('replay_delivery'):
+        agent_result['thread_id'] = thread_id
+        return _with_reminders(agent_result, output)
+
     answer = output.get("reply", "")
     if reminder and turn_type != "approval_request":
         answer = f"{answer}\n\n{reminder}" if answer else reminder
@@ -551,7 +638,7 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
     step_note = workflow.workflow_reminder(output.get("workflow_run"), output.get("campaign"))
     if step_note and turn_type != "approval_request":
         answer = f"{answer}\n\n{step_note}" if answer else step_note
-    return {
+    result = {
         "turn_type": "approval_request" if turn_type == "approval_request" else "chitchat",
         "final_answer": answer,
         "completed_steps": [],
@@ -560,6 +647,11 @@ def _run_turn(question: str, thread_id: str, llm_config: dict, graph, metadata: 
         "conversation_reset": bool(output.get("was_reset")),
         "awaiting_approval": bool(reminder),
     }
+    for key in ("visualization_path", "visualization_result", "attachments",
+                "page_preview_path", "page_preview_revision"):
+        if key in output:
+            result[key] = output[key]
+    return result
 
 
 def _with_reminders(result: dict, output: dict) -> dict:

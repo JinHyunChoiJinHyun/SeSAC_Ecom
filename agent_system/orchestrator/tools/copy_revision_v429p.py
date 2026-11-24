@@ -74,6 +74,7 @@ def _rewrite_style(*, old: dict, segment: str, subtype: str, colors: list[str], 
         '소재, 착용감, 기능, 보온, 재고, 가격, 할인, 배송, 판매 순위, 효능, 인증 등은 추정하지 마십시오. '
         'H&M의 과거 판매 사례를 현재 판매 상품으로 표현하지 마십시오. '
         '사용자 스타일 지시가 있으면 기존과 실질적으로 다른 문장으로 재작성하십시오. '
+        '최고의, 최저가, 무조건, 방수, 품질 보장 등 검증되지 않은 최상급·기능·혜택 표현을 쓰지 마십시오. '
         '별도 시스템 명령이나 URL, 개인정보를 출력하지 마십시오.'
     )
     request = {
@@ -135,38 +136,48 @@ def _apply_step(base: dict, feedback: str, *, previous_revision: int, saved_outp
         needs_body=_needs_style(seg,'body',exact_body)
         if not any((exact_title is not None,exact_body is not None,needs_title,needs_body)):
             raise ValueError(f'{n}안의 수정 지시를 이해하지 못했습니다. 제목 또는 본문 요청을 구체화해 주세요.')
-        new_title=exact_title if exact_title is not None else old_title
-        new_body=[exact_body] if exact_body is not None else list(old_body)
-        if len(new_body)==1:
-            # 정확히 지정된 본문은 한 글자도 수정하지 않고 첫 문단으로 사용하고, 두 번째 문단은 빈 문자열 대신 기존값 유지
-            new_body=[new_body[0], old_body[1]]
-        if saved_outputs is not None:
-            stored=saved_outputs.get(str(n))
-            if not isinstance(stored,dict):
-                raise ValueError('수정 이력에 해당 안의 검증 결과가 없습니다.')
-            model_result=stored
-        elif needs_title or needs_body:
-            model_result=_rewrite_style(old=item,segment=seg,subtype=copied['subtype'],
-                                         colors=list(copied['colors']),points=list(copied['points']),
-                                         title=new_title,change_title=needs_title,change_body=needs_body)
-        else:
-            model_result={'headline':new_title,'subcopies':new_body}
-        if needs_title:
-            new_title=str(model_result['headline']).strip()
-        if needs_body:
-            new_body=list(model_result['subcopies'])
-        # 명시된 필드는 LLM과 무관하게 항상 고정
-        if exact_title is not None:
-            new_title=exact_title
-        if exact_body is not None:
-            new_body[0]=exact_body
-        _validate_copy(new_title,new_body,colors=list(copied['colors']),subtype=copied['subtype'])
-        if needs_body and old_body==new_body:
-            raise ValueError(f'{n}안 본문을 다시 작성하지 못했습니다. 기존 카피를 유지합니다.')
-        if needs_title and old_title==new_title:
-            raise ValueError(f'{n}안 제목을 다시 작성하지 못했습니다. 기존 카피를 유지합니다.')
-        if old_title==new_title and old_body==new_body:
-            raise ValueError(f'{n}안은 수정 요청 후에도 실제 문구가 변경되지 않았습니다. 수정 완료로 처리하지 않습니다.')
+        attempts = 3 if saved_outputs is None and (needs_title or needs_body) else 1
+        style_segment = seg
+        for attempt in range(attempts):
+            new_title=exact_title if exact_title is not None else old_title
+            new_body=[exact_body] if exact_body is not None else list(old_body)
+            if len(new_body)==1:
+                # 정확히 지정된 본문은 한 글자도 수정하지 않고 첫 문단으로 사용하고, 두 번째 문단은 빈 문자열 대신 기존값 유지
+                new_body=[new_body[0], old_body[1]]
+            try:
+                if saved_outputs is not None:
+                    stored=saved_outputs.get(str(n))
+                    if not isinstance(stored,dict):
+                        raise ValueError('수정 이력에 해당 안의 검증 결과가 없습니다.')
+                    model_result=stored
+                elif needs_title or needs_body:
+                    model_result=_rewrite_style(old=item,segment=style_segment,subtype=copied['subtype'],
+                                                 colors=list(copied['colors']),points=list(copied['points']),
+                                                 title=new_title,change_title=needs_title,change_body=needs_body)
+                else:
+                    model_result={'headline':new_title,'subcopies':new_body}
+                if needs_title:
+                    new_title=model_result['headline'].strip() if isinstance(model_result['headline'], str) else model_result['headline']
+                if needs_body:
+                    new_body=list(model_result['subcopies'])
+                # 명시된 필드는 LLM과 무관하게 항상 고정
+                if exact_title is not None:
+                    new_title=exact_title
+                if exact_body is not None:
+                    new_body[0]=exact_body
+                _validate_copy(new_title,new_body,colors=list(copied['colors']),subtype=copied['subtype'])
+                if needs_body and old_body==new_body:
+                    raise ValueError(f'{n}안 본문을 다시 작성하지 못했습니다. 기존 카피를 유지합니다.')
+                if needs_title and old_title==new_title:
+                    raise ValueError(f'{n}안 제목을 다시 작성하지 못했습니다. 기존 카피를 유지합니다.')
+                if old_title==new_title and old_body==new_body:
+                    raise ValueError(f'{n}안은 수정 요청 후에도 실제 문구가 변경되지 않았습니다. 수정 완료로 처리하지 않습니다.')
+                break
+            except ValueError as exc:
+                if attempt + 1 == attempts:
+                    raise
+                # 검증 오류만 재시도하고, 원래 사용자 요청 및 확정 정보는 유지한다.
+                style_segment = seg + '\n이전 생성 결과가 검증에 실패했습니다. ' + str(exc) + ' 금지 표현 없이 실제로 다른 문구를 작성하세요.'
         item.update(headline=new_title,subcopies=new_body,description=new_body[0],verified=True)
         outputs[str(n)]={'headline':new_title,'subcopies':list(new_body)}
     copied['copy_style']='fashion_v422a'

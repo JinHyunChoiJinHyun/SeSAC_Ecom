@@ -29,12 +29,16 @@ _APPROVAL_BUTTONS = [
     ("reject", "반려", "danger"),
     ("cancel", "승인 요청 취소", None),
 ]
+_TARGET_BUTTONS = [('approve','승인','primary'), ('reject','반려','danger'), ('resize','선정 규모 변경',None), ('evidence','선정 근거 보기',None)]
+_PAGE_PREVIEW_BUTTONS = [('approve', '승인', 'primary'), ('reject', '반려', 'danger'), ('edit', '수정', None), ('regenerate', '페이지 다시 만들기', None), ('undo', '직전 수정 되돌리기', None)]
+
 _WORKFLOW_BUTTONS = {
     "blocked": [("continue", "다시 시도", "primary"), ("status", "진행 상황", None), ("cancel", "워크플로 취소", "danger")],
     "waiting_input": [("status", "진행 상황", None), ("cancel", "워크플로 취소", "danger")],
 }
 LABELS = {("approval", d): label for d, label, _ in _APPROVAL_BUTTONS}
 LABELS.update({("workflow", c): label for buttons in _WORKFLOW_BUTTONS.values() for c, label, _ in buttons})
+LABELS.update({("page_preview_review", c): label for c, label, _ in _PAGE_PREVIEW_BUTTONS})
 
 
 def _button(action_id: str, text: str, value: dict, style: str | None = None, confirm: dict | None = None) -> dict:
@@ -54,6 +58,22 @@ def build_action_blocks(actions: list[dict] | None, thread_id: str, requester_us
     blocks = []
     for item in actions or []:
         kind = item.get("type")
+        if kind == 'segment_copy_review' and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}segment_copy_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id}, style) for d,label,style in [('approve','문구 승인','primary'),('reject','문구 반려','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객군별 문구 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}segment_copy_review','elements':buttons}]
+            continue
+        if kind == 'target_selection_review'  and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}target_review_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id, **({'view':'open'} if item.get('fixed_policy') and d == 'evidence' else {})}, style) for d,label,style in _TARGET_BUTTONS if not (item.get('fixed_policy') and d == 'resize')]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객 타깃 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}target_selection_review','elements':buttons}]
+            continue
+        if kind == 'page_preview_review' and item.get('run_id') and isinstance(item.get('revision'), int):
+            buttons = [_button(f"{ACTION_PREFIX}page_preview_{d}", label,
+                               {'k':'page_preview_review','d':d,'run':item['run_id'],
+                                'rev':item['revision'],'t':thread_id,'owner':requester_user_id}, style)
+                       for d,label,style in _PAGE_PREVIEW_BUTTONS]
+            blocks += [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': '*시안 검토*'}},
+                       {'type': 'actions', 'block_id': f'{ACTION_PREFIX}page_preview_review', 'elements': buttons}]
+            continue
         if kind == "copy_revision_review" and item.get("run_id") and isinstance(item.get("revision"), int):
             phase = item.get("phase", "review")
             decisions = [('choose1', '1안 확정', None), ('choose2', '2안 확정', None),
@@ -158,6 +178,21 @@ def parse_action(body: dict) -> dict | None:
         action = {"type": "subtype_suggestion", "run_id": str(value["run"]),
                   "subtype": str(value["subtype"]), "colors": [str(c) for c in value["colors"]]}
         label = "추천 유형·상위 2색 선택"
+    elif value.get('k') == 'segment_copy_review' and value.get('run') and value.get('tok') and value.get('d') in ('approve','reject'):
+        action = {'type':'segment_copy_review','command':value['d'],'run_id':str(value['run']),'token':str(value['tok'])}
+        label = '문구 승인' if value['d']=='approve' else '문구 반려'
+    elif (value.get('k') == 'target_selection_review'  and value.get('run') and value.get('tok') and value.get('d') in {d for d, _, _ in _TARGET_BUTTONS}):
+        action = {'type':'target_selection_review','command':value['d'],'run_id':str(value['run']),'token':str(value['tok'])}
+        label = next(label for d,label,_ in _TARGET_BUTTONS if d == value['d'])
+        if value['d'] == 'evidence' and value.get('view') in ('open','close'):
+            action['view'] = value['view']
+            label = '선정 근거 보기' if value['view'] == 'open' else '선정 근거 접기'
+    elif (value.get('k') == 'page_preview_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') > 0
+          and value.get('d') in ('approve','reject','edit','regenerate','undo')):
+        action = {'type':'page_preview_review','command':value['d'],
+                  'run_id':str(value['run']),'revision':value['rev']}
+        label = {'approve':'승인','reject':'반려','edit':'수정','regenerate':'페이지 다시 만들기','undo':'직전 수정 되돌리기'}[value['d']]
     elif (value.get('k') == 'copy_revision_review' and value.get('run')
           and isinstance(value.get('rev'), int) and value.get('rev') >= 0
           and value.get('phase') in ('review', 'select')

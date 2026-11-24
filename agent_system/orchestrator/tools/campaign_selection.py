@@ -193,7 +193,8 @@ def build_summary(run, campaign, details):
         "과거 상품 ID는 실제 판매 상품이 아닙니다. 현재 판매 SKU·가격·할인·재고는 확인되지 않았으므로 문구에 넣지 않습니다.",
         "원하는 소구점을 번호로 선택해 주세요 (2~3개 권장, 개수 제한 없음). 상품별 한정 후보는 해당 상품에만 적용합니다.",
     ])
-    return {"final_answer": '\n'.join(lines), "campaign_summary": summary, "data_sources": ["musinsa", "hm"], "data_purpose": "12단계 추천 근거"}
+    summary['public_report'] = '\n'.join(lines)
+    return {"final_answer": summary['public_report'], "campaign_summary": summary, "data_sources": ["musinsa", "hm"], "data_purpose": "12단계 추천 근거"}
 
 
 def review_brief(market, subtype=None):
@@ -305,3 +306,147 @@ def parse_selection(text, summary):
 
 def updates(text, summary):
     return {"selling_points":json.dumps(parse_selection(text,summary),ensure_ascii=False,sort_keys=True)}
+
+# R29: 확정 근거에서 직접 생성하는 재표시·전달용 표/그래프. 새로운 분석값을 추정하지 않는다.
+def build_selling_point_evidence(summary, output_dir=None):
+    """승인 대기 소구점 후보의 공통/상품별 범위와 근거를 CSV·PNG로 출력한다."""
+    from pathlib import Path
+    import pandas as pd
+
+    if not isinstance(summary, dict) or summary.get('schema_version') != 2:
+        raise ValueError('저장된 소구점 검증 근거가 없습니다. 워크플로 12단계 재실행이 필요합니다.')
+    candidates = summary.get('candidates') or []
+    if not candidates:
+        raise ValueError('소구점 후보가 없어 근거표를 생성할 수 없습니다.')
+    ids = [str(item) for item in summary.get('ids') or []]
+    rows = []
+    for index, item in enumerate(candidates, 1):
+        matched = item.get('matched') or {}
+        rows.append({
+            '번호': index,
+            '소구점': str(item.get('label') or ''),
+            '적용범위': '전체 공통' if item.get('scope') == 'common' else '상품별 한정',
+            'H&M근거상품수': len(matched),
+            'H&M참고상품전체': len(ids),
+            '무신사연관관심사': str(item.get('aspect') or '해당 없음'),
+            '무신사관심사언급건수': int(item.get('mentions') or 0),
+            '관련H&M상품ID': ', '.join(str(k) for k in matched),
+        })
+    frame = pd.DataFrame(rows)
+    result = {'dataframe': frame, 'data_purpose': '확정 상품의 소구점 후보 근거표'}
+    if output_dir is None:
+        output_dir = Path.cwd() / 'visualization_output'
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    from uuid import uuid4
+    chart_path = output_dir / f'selling_point_evidence_{uuid4().hex[:10]}.png'
+    try:
+        from agent_system.orchestrator.tools.category_planning.confirmation_report import _korean_font_context
+        import matplotlib.pyplot as plt
+        with _korean_font_context():
+            fig, ax = plt.subplots(figsize=(11, max(4, 0.58 * len(rows) + 1.2)))
+            labels = [f"{r['번호']}. {r['소구점']}" for r in rows]
+            y = list(range(len(rows)))
+            ax.barh(y, [r['H&M근거상품수'] for r in rows])
+            ax.set_yticks(y, labels)
+            ax.invert_yaxis()
+            ax.set_xlim(0, max(len(ids) + 1, 2))
+            ax.set_xlabel('H&M 과거 참고 상품 중 설명 근거 확인 수 (개)')
+            ax.set_title('소구점 후보별 H&M 근거 상품 수 (광고 성능 검증 아님)')
+            for i, r in enumerate(rows):
+                ax.text(r['H&M근거상품수'] + .08, i,
+                        f"{r['H&M근거상품수']}/{len(ids)}", va='center', fontsize=9)
+            fig.tight_layout()
+            fig.savefig(chart_path, dpi=140)
+            plt.close(fig)
+        result['visualization_path'] = str(chart_path)
+    except Exception as exc:
+        # 그래프가 실패해도 검증 근거 CSV는 반드시 보낸다.
+        import logging
+        logging.getLogger(__name__).warning('SELLING_POINT_CHART_FAILED %s', type(exc).__name__)
+    return result
+
+
+def _r31_rebuild_detailed_report(summary, market=None):
+    """저장된 근거만 사용하여 12단계 상세 보고서를 재구성한다."""
+    ids = [str(x) for x in (summary.get('ids') or [])]
+    subtype = str(summary.get('subtype') or '선택 상품 유형')
+    category = str(summary.get('category') or '선택 상품군')
+    colors = summary.get('selected_colors') or []
+    if isinstance(colors, str):
+        colors = [v.strip() for v in colors.split(',') if v.strip()]
+    ranked = summary.get('ranked_evidence') or {}
+    if not ranked and isinstance(market, dict):
+        ranked = market.get('ranked_evidence') or {}
+    n = len(ids)
+    lines = [f'■ {subtype} 기획전 소구점 상세 분석 (저장된 근거 재표시)',
+             f'상품군: {category} / 상품 유형: {subtype}',
+             f'선택 색상: {", ".join(colors) if colors else "저장된 색상 없음"}',
+             f'H&M 과거 참고 사례: {n}개 (실제 판매 편성 상품 아님)',
+             '', '■ 무신사 관련 상품·리뷰 근거']
+    related_p = ranked.get('related_products')
+    related_r = ranked.get('related_reviews')
+    if related_p is not None and related_r is not None:
+        lines.append(f'관련 상품명 잠정 후보 {related_p}개 / 연결 수집 리뷰 {related_r}건 (판매량·긍정 평가 아님)')
+    else:
+        lines.append('상품·리뷰 표본 수: 저장된 상세 근거가 없어 재확인 필요')
+    shapes = [x for x in ranked.get('related_shapes', []) if isinstance(x, dict) and x.get('products')]
+    if shapes:
+        lines.append('상품명 디자인 표현(중복 허용): ' + ', '.join(
+            f"{x.get('label')} {x.get('products')}개" for x in shapes[:6]))
+    aspects = [x for x in ranked.get('aspects', []) if isinstance(x, dict) and x.get('mentions') is not None]
+    if aspects:
+        denominator = f'/{related_r}건' if related_r else ''
+        lines.append('관련 리뷰 언급(긍정·부정 미구분): ' + ', '.join(
+            f"{x.get('label')} {x.get('mentions')}건{denominator}" for x in aspects[:7]))
+    else:
+        lines.append('세부 리뷰 관심사: 저장된 자료에서 확인 필요')
+    lines.extend(['', '■ H&M 과거 참고 사례의 디자인 근거'])
+    designs = summary.get('verified_designs') or []
+    if designs:
+        lines.append('상품 설명에서 확인: ' + ', '.join(
+            f"{x.get('label')} {x.get('products')}/{n}개" for x in designs))
+    else:
+        lines.append('검증 가능한 디자인 태그가 저장되지 않았습니다.')
+    lines.extend(['', '■ 소구점 후보 및 적용 범위'])
+    for i, item in enumerate(summary.get('candidates') or [], 1):
+        matched = item.get('matched') or {}
+        scope = '전체 공통' if item.get('scope') == 'common' else '상품별 한정'
+        lines.append(f"{i}. {item.get('label')} / {scope} / H&M 근거 {len(matched)}/{n}개")
+        if scope == '상품별 한정':
+            lines.append('   해당 상품에만 적용 가능하며 공통 광고 문구로 사용할 수 없습니다.')
+    lines.extend(['', '■ H&M × 무신사 교차 검토'])
+    cross = summary.get('cross_evidence') or []
+    if cross:
+        for item in cross:
+            lines.append(f"- {item.get('label')}: H&M {item.get('hm_products')}/{item.get('hm_total')}개 "
+                         f"(ID: {', '.join(map(str, item.get('hm_matched_ids') or []))}) / "
+                         f"무신사 '{item.get('musinsa_aspect')}' 언급 "
+                         f"{item.get('musinsa_mentions')}/{item.get('musinsa_related_reviews')}건")
+    else:
+        lines.append('교차 검토 근거: 저장된 자료에서 확인 필요')
+    lines.append('교차 근거는 관심사와 상품 설명의 관련성을 보여줄 뿐 품질·만족도 검증이 아닙니다.')
+    unknown = summary.get('unknown_aspects') or []
+    if unknown:
+        lines.extend(['', '■ 확인이 필요한 표현'])
+        for item in unknown:
+            lines.append(f"- {item.get('aspect')}: {item.get('required')} 확인 전 광고에서 확정 표현 제외")
+    lines.extend(['', '■ 선택 안내',
+                  '소구점 번호를 선택해 주세요. 예: 소구점: 1, 2',
+                  '실제 판매 SKU·가격·할인·재고는 과거 H&M 데이터로 확정할 수 없습니다.',
+                  '이 분석을 다시 표시해도 기존 승인·선택 상태는 변경되지 않습니다.'])
+    return '\n'.join(lines)
+
+
+def replay_selling_point_report(summary, campaign=None, market=None):
+    """선택·승인 상태를 변경하지 않고 저장된 소구점 후보를 재표시한다."""
+    if not isinstance(summary, dict) or summary.get('schema_version') != 2:
+        raise ValueError('저장된 소구점 분석 결과가 없습니다. 워크플로 12단계 재실행이 필요합니다.')
+    if (campaign or {}).get('values', {}).get('selling_points'):
+        # 확정된 값은 유지하며, 과거 후보임을 구별한다.
+        title = '■ 저장된 소구점 후보 다시 보기 (기존 승인값 유지)'
+    else:
+        title = '■ 소구점 후보 다시 보기 (아직 승인 전)'
+    original = str(summary.get('public_report') or '').strip()
+    detailed = original or _r31_rebuild_detailed_report(summary, market)
+    return title + '\n\n' + detailed

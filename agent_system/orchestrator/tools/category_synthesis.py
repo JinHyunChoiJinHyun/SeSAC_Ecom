@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 import re
 import pandas as pd
+from shared_analysis.market.category_recommendation import naver_change_table
 
 
 def _num(v):
@@ -71,85 +72,94 @@ def _fallback_hm(category):
             'style_tag_counts': _counts(dict(tags))}
 
 
+def interpret_monthly_seasons(monthly: pd.DataFrame, category: str) -> str:
+    """선택 상품군의 관측 월별 구매량만 이용해 두 시즌의 방향을 설명한다."""
+    required = {'season', 'month', 'category', 'purchases'}
+    if monthly is None or monthly.empty or not required.issubset(monthly.columns):
+        return '월별 구매 변화: 비교 가능한 관측 자료가 부족합니다.'
+    part = monthly.loc[monthly['category'].eq(category)].copy()
+    if part.empty:
+        return '월별 구매 변화: 선택 상품군의 관측 자료가 없습니다.'
+    part['purchases'] = pd.to_numeric(part['purchases'], errors='coerce')
+    if part['purchases'].isna().any() or (part['purchases'] < 0).any():
+        return '월별 구매 변화: 구매 건수 검증이 필요합니다.'
+    series = []
+    for season, rows in part.groupby('season', sort=True):
+        values = {}
+        for row in rows.itertuples(index=False):
+            key = str(row.month)[5:7]
+            if key not in {'11', '12', '01'} or key in values or not float(row.purchases).is_integer():
+                return '월별 구매 변화: 겨울 월별 중복·누락 또는 집계값을 확인해야 합니다.'
+            values[key] = int(row.purchases)
+        if set(values) != {'11','12','01'}:
+            return '월별 구매 변화: 비교할 11월·12월·1월 기록이 모두 필요합니다.'
+        def direction(before, after):
+            return '증가' if after > before else ('감소' if after < before else '동일')
+        series.append((season, direction(values['11'],values['12']),direction(values['12'],values['01'])))
+    if len(series) != 2:
+        return '월별 구매 변화: 두 겨울 시즌의 자료가 필요합니다.'
+    def phrase(index, label):
+        trends = [v[index] for v in series]
+        if trends[0] == trends[1]:
+            return f'두 겨울 시즌 모두 {label} 구매 건수가 {trends[0]}했습니다.' if trends[0] != '동일' else f'두 겨울 시즌 모두 {label} 구매 건수가 같았습니다.'
+        return (f'{label} 구매 건수는 첫 시즌에 {trends[0]}, 두 번째 시즌에 {trends[1]}해 '
+                '시즌별 방향이 달랐습니다.')
+    return '월별 주요 발견: ' + ' '.join([phrase(1,'11월 대비 12월'), phrase(2,'12월 대비 1월')])
+
+
 def summarize(category, hm, market):
+    """상품군 검토 결과: 유형별 네이버 지수·색상·스타일은 이 단계에서 출력하지 않는다."""
     hm = hm if hm.get('category') == category else {}
     market = market if market.get('category') == category else {}
-    colors = list(_counts(hm.get('colour_counts')).items())[:5]
-    tags = list(_counts(hm.get('style_tag_counts')).items())[:5]
-    metrics = {str(k): v for k,v in (market.get('naver_metrics') or {}).items() if isinstance(v,dict) and v.get('category') == category}
-    theme = market.get('theme_candidate')
-    classes = market.get('keyword_classes') or {}
-    if theme not in metrics: theme = None
-    lines = [f'분석 범위: {category} / 저장 결과 정리 (새로운 추천·조회 없음)',
-             '■ 네이버 관심도 근거', f'테마 검토 후보: {theme or "보류 (근거 미확인)"}']
-    if not metrics: lines.append('네이버 해당 카테고리 매핑 지표 미수집 또는 미확인. 관심 부족을 뜻하지 않습니다.')
-    for k,v in metrics.items():
-        g = _num(v.get('growth_percent'))
-        lines.append(f"- {classes.get(k, '분류 미확인')} | 네이버 {k}: {v.get('prior_mean')} → {v.get('recent_mean')} / 변화 {f'{g:+.2f}%' if g is not None else '계산 불가'} / 기준 {v.get('latest_period') or '미확인'}")
-    lines.append('제외: 6단계에서 확인된 제외 근거 없음. 상승의 지속 여부는 미확인.')
-    lines.append('■ H&M 상품 구성 근거')
-    total = hm.get('total_articles')
-    if total is not None:
-        lines.append(f"H&M 상품 구성: 색상별 상품 {total:,}개 / 모델 {hm.get('total_products')}개 / 범위: {hm.get('basis','미확인')}")
-    if hm.get('query'): lines.append('검색 조건: '+hm['query'])
-    lines.append('색상 구성 참고: '+(', '.join(f'{k} {v:,}개' for k,v in colors) or '자료 없음'))
-    lines.append('스타일 구성 참고: '+(', '.join(f'{k} {v:,}개' for k,v in tags) or '자료 없음'))
-    lines.append('H&M 빈도는 구매·인기 순위가 아니며 스타일 태그는 중복될 수 있습니다.')
-    lines.append("■ 무신사 표본 근거")
-    lines.append(f"무신사 전체 카테고리 표본: 상품 {market.get('sample_products','미확인')}개 / 연결 리뷰 {market.get('sample_reviews','미확인')}건")
-    lines.append('리뷰 상세·판매 포인트는 11단계에서 확인합니다. 테마와 H&M 실제 상품의 직접 일치는 미검증입니다.')
-    records = [{'source':'hm_colour','metric':k,'value':v,'unit':'article_count'} for k,v in colors]
-    records += [{'source':'hm_style','metric':k,'value':v,'unit':'article_count'} for k,v in tags]
-    records += [{'source':'musinsa_sample','metric':k,'value':market[k],'unit':'sample_count'} for k in ('sample_products','sample_reviews') if _num(market.get(k)) is not None]
-    records += [{'source':'naver','metric':k,'value':_num(v.get('growth_percent')),'unit':'relative_interest_change_percent','prior_mean':v.get('prior_mean'),'recent_mean':v.get('recent_mean'),'latest_period':v.get('latest_period')} for k,v in metrics.items()]
-    evidence={'category':category,'theme_candidate':theme,'hm':hm,'market':market,'keyword_classes':classes}
-    return {'final_answer':'\n'.join(lines),'dataframe':pd.DataFrame(records),'data_sources':['hm','musinsa','naver'],'data_purpose':f'{category} 5~6단계 결과 정리','category_synthesis':evidence}
+    # 5단계 H&M 수치·6단계 무신사 표본을 7단계에서 그대로 반복하지 않는다.
+    lines = [f'{category} 상품군 분석의 주요 발견']
+    records = [{'source':'musinsa_sample','metric':k,'value':market[k],'unit':'sample_count'}
+               for k in ('sample_products','sample_reviews') if _num(market.get(k)) is not None]
+    evidence = {'category':category,'theme_candidate':None,'hm':hm,'market':market,
+                'keyword_classes':market.get('keyword_classes') or {}}
+    return {'final_answer':'\n'.join(lines),'dataframe':pd.DataFrame(records),
+            'data_sources':['hm','musinsa'],'data_purpose':f'{category} 상품군 근거 정리',
+            'category_synthesis':evidence}
 
 
-def _chart(result, run_id):
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from matplotlib import font_manager
-    # 한글 글꼴이 없는 환경에서는 영문 대체 라벨을 쓰고 원문은 CSV/본문에 유지.
-    font = next((font for font in ('AppleGothic','Malgun Gothic','Noto Sans CJK KR','NanumGothic') if any(f.name == font for f in font_manager.fontManager.ttflist)), None)
-    frame = result['dataframe']
-    if frame.empty: return None
-    evidence = result['category_synthesis']
-    aliases = {'풀집업':'Full zip','후드':'Hood','스탠드칼라':'Stand collar','코튼':'Cotton','울':'Wool','사이즈':'Size','보온성':'Warmth','색감':'Colour','두께감':'Thickness','퀄리티':'Quality','경량패딩':'Lightweight padded outerwear'}
-    def label(x, i):
-        return str(x) if font or str(x).isascii() else aliases.get(str(x), f'Item {i+1} (see table)')
-    groups=[('hm_colour','H&M colour assortment','Article count'),('hm_style','H&M style tags','Article count'),('musinsa_sample','Musinsa sample coverage','Sample count'),('naver','Naver within-keyword change','Relative change %')]
-    with plt.rc_context({'font.family': font or 'DejaVu Sans','axes.unicode_minus':False}):
-        fig, axes=plt.subplots(2,2,figsize=(12,8))
-        try:
-            for ax,(source,title,unit) in zip(axes.flat,groups):
-                rows=frame.loc[frame['source'].eq(source)].dropna(subset=['value'])
-                ax.set_title(title); ax.set_xlabel(unit)
-                if rows.empty:
-                    ax.text(.5,.5,'No data',ha='center',va='center',transform=ax.transAxes); ax.set_yticks([]); continue
-                pairs=[(label(r.metric,i),float(r.value)) for i,r in enumerate(rows.itertuples())]
-                ax.barh([p[0] for p in pairs][::-1],[p[1] for p in pairs][::-1]); ax.margins(x=.18)
-                for i,(_,v) in enumerate(pairs[::-1]): ax.annotate(f'{v:,.1f}' if '%' in unit else f'{v:,.0f}',(v,i),xytext=(3,0),textcoords='offset points',va='center',fontsize=8)
-            fig.suptitle('Campaign evidence | different units and sources, not a combined ranking')
-            fig.tight_layout(rect=(0,0,1,.96))
-            root=Path(__file__).resolve().parents[3]
-            name=re.sub(r'[^a-zA-Z0-9_-]','_',str(run_id)) or 'run'
-            category=re.sub(r'[^\w·-]','_',str(evidence['category']))
-            dest=root/'visualization_output'/'category_synthesis'/name/f'{category}_evidence.png'
-            dest.parent.mkdir(parents=True,exist_ok=True); fig.savefig(dest,dpi=130)
-            return str(dest.resolve())
-        finally: plt.close(fig)
-
-
-def build_category_summary(category, hm, market, run_id):
-    # 결과 정리 단계에서는 누락된 자료도 재조회하지 않는다.
+def build_category_summary(category, hm, market, run_id, *, period_plan=None, period_rows=None):
+    # 조회 실패 시 수치 추측 또는 다른 유형의 그래프로 대체하지 않는다.
     result = summarize(category, hm or {}, market or {})
-    try:
-        path = _chart(result,run_id)
-        if path: result['visualization_path'] = path
-    except Exception as exc:
-        result['final_answer'] += f'\n7단계 그래프 생성 불가 ({type(exc).__name__}); 표와 본문은 유지됩니다.'
+    if period_plan is not None:
+        try:
+            from agent_system.orchestrator.tools.category_planning.seasonal_trends import load_monthly_purchases, verify_monthly_totals
+            from shared_analysis.market.category_comparison import save_monthly_category_chart, save_weekly_campaign_chart
+            monthly = load_monthly_purchases(period_plan)
+            if period_rows:
+                verify_monthly_totals(monthly, period_rows)
+            safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(run_id)) or 'run'
+            folder = Path(__file__).resolve().parents[3] / 'visualization_output' / 'category_synthesis' / safe
+            result['visualization_path'] = save_monthly_category_chart(monthly, folder / 'hm_monthly_category.png', category=category)
+            result['attachments'] = []
+            # 월별 일평균은 총건수와 같은 패턴이므로 그래프 중복 노출을 피하고 CSV에서만 유지한다.
+            from agent_system.orchestrator.tools.category_planning.seasonal_trends import load_aligned_weekly_purchases
+            try:
+                weekly = load_aligned_weekly_purchases(period_plan, categories=[category])
+                weekly_chart = save_weekly_campaign_chart(weekly, folder / 'hm_aligned_weekly.png', category=category)
+                result['attachments'].append(weekly_chart)
+                from agent_system.orchestrator.tools.category_planning.campaign_evidence import summarize_campaign_window
+                evidence = summarize_campaign_window(weekly, [{'category': category}])[category]
+                result['final_answer'] += (f"\n기획전 대응 기간: 과거 두 겨울 시즌 합산 "
+                    f"{evidence['purchases']:,}건, 일평균 {evidence['purchases_per_day']:,.1f}건 "
+                    f"(시즌별 {evidence['days_per_season']}일 관측).")
+                weekly['source'] = 'hm_campaign_aligned_weekly'
+                weekly['metric'] = 'purchases_per_day'
+                result['dataframe'] = pd.concat([result['dataframe'],weekly],ignore_index=True)
+            except Exception as exc:
+                result['final_answer'] += f'\n기획전 대응 주별 구매 추이: 자료 확인 필요 ({type(exc).__name__}: {exc})'
+            monthly = monthly.loc[monthly['category'].eq(category)].copy()
+            result['final_answer'] += '\n' + interpret_monthly_seasons(monthly, category)
+            monthly['source']='hm_monthly'
+            monthly['metric']='purchases'
+            result['dataframe']=pd.concat([result['dataframe'],monthly],ignore_index=True)
+            result['final_answer'] += '\n월별·주별 집계 원자료는 첨부 CSV에 있습니다.'
+        except Exception as exc:
+            result['final_answer'] += f'\n월별 구매 추이 그래프 생성 보류: {type(exc).__name__}: {exc}'
     return result
 
 
@@ -168,8 +178,8 @@ def render_market(market, step):
     frame = pd.DataFrame(market.get('saved_rows') or [])
     if step == 6:
         answer = market['market_summary']
-        if not frame.empty: frame = frame.loc[frame['source'].eq('naver') | frame['metric'].isin(['sample_products','sample_reviews'])]
-        sources = ['musinsa','naver']
+        if not frame.empty: frame = frame.loc[frame['metric'].isin(['sample_products','sample_reviews'])]
+        sources = ['musinsa']
     elif step == 11:
         answer = market['review_summary'] + '\n6단계와 동일한 카테고리 표본을 재사용한 리뷰·판매 포인트 집계입니다.'
         if not frame.empty: frame = frame.loc[frame['source'].ne('naver')]

@@ -220,3 +220,15 @@ def get_duckdb_connection(read_only=True):
         raise
 
     return client
+
+
+def open_local_external_connection(path: Path):
+    """로컬 시장 분석 전용 DB를 직접 읽기 전용으로 연결합니다.
+
+    H&M 등 일반 분석 출처의 ATTACH 또는 모델링 DB 연결과 독립적입니다.
+    호출자는 연결을 닫아야 하며, 파일이 없으면 새 DB를 생성하지 않습니다.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"외부 DuckDB 파일이 없습니다: {path}")
+    return duckdb.connect(str(path), read_only=True)

@@ -43,7 +43,7 @@ def convert_docx_to_pdf(docx: Path, out_dir: Path) -> Path:
     return export_uploaded_docx(Path(docx), Path(out_dir))
 
 
-def _download_slack_docx(client, slack_file: dict, dest: Path) -> None:
+def _download_slack_docx(client, slack_file: dict, dest: Path, *, png=False) -> None:
     file_id = slack_file.get("id")
     if not file_id:
         raise ValueError("Slack 파일 ID가 없습니다.")
@@ -51,11 +51,13 @@ def _download_slack_docx(client, slack_file: dict, dest: Path) -> None:
     if not details.get("ok", True):
         raise ValueError("Slack 파일 정보를 조회할 수 없습니다.")
     info = details.get("file") or {}
-    if str(info.get("name") or "").lower().endswith(".docx") is False:
+    if not str(info.get("name") or "").lower().endswith(".png" if png else ".docx"):
         raise ValueError("DOCX 파일만 지원합니다.")
     size = info.get("size")
-    if not isinstance(size, int) or not 0 < size <= MAX_DOCX_BYTES:
-        raise ValueError("DOCX는 최대 20MB까지 지원합니다.")
+    from agent_system.approval_demo.delivery_r42 import MAX_PNG
+    limit = MAX_PNG if png else MAX_DOCX_BYTES
+    if not isinstance(size, int) or not 0 < size <= limit:
+        raise ValueError("PNG는 최대 3MB, DOCX는 최대 20MB까지 지원합니다.")
     url = str(info.get("url_private_download") or info.get("url_private") or "")
     parsed = urllib.parse.urlsplit(url)
     host = (parsed.hostname or "").lower()
@@ -81,9 +83,13 @@ def _download_slack_docx(client, slack_file: dict, dest: Path) -> None:
             if not block:
                 break
             total += len(block)
-            if total > MAX_DOCX_BYTES:
+            if total > limit:
                 raise ValueError("파일 크기가 20MB를 초과했습니다.")
             output.write(block)
+    if png:
+        from agent_system.approval_demo.delivery_r42 import validate_png
+        validate_png(dest.read_bytes())
+        return
     if not zipfile.is_zipfile(dest):
         raise ValueError("올바른 DOCX 파일이 아닙니다.")
     with zipfile.ZipFile(dest) as z:
@@ -114,7 +120,7 @@ def process_uploaded_docx(client, event: dict, file_info: dict) -> None:
             print("[PDF 업로드] Word 다운로드 완료", flush=True)
             pdf = convert_docx_to_pdf(docx, folder)
             print("[PDF 업로드] PDF 변환 함수 완료", flush=True)
-            client.files_upload_v2(
+            upload_result = client.files_upload_v2(
                 channel=channel,
                 thread_ts=thread_ts,
                 file=str(pdf),
@@ -122,7 +128,14 @@ def process_uploaded_docx(client, event: dict, file_info: dict) -> None:
                 title="CART SIGNAL 최종 보고서",
                 initial_comment="업로드한 Word 수정본을 PDF로 변환했습니다. 최종본을 확인해 주세요.",
             )
+            # Slack SDK의 SlackResponse와 테스트용 dict 모두 get()을 제공한다.
+            if not hasattr(upload_result, 'get') or upload_result.get('ok') is not True:
+                raise RuntimeError('Slack 최종 PDF 공유가 확인되지 않았습니다.')
+            # 성공적으로 Slack에 게시된 최종 PDF만 스레드의 승인 첨부 대상으로 등록
+            from agent_system.approval_demo.recipient_flow import mark_pdf_ready
+            mark_pdf_ready(Path(__file__).resolve().parents[2], event, pdf)
             print("[PDF 업로드] Slack PDF 전송 완료", flush=True)
+            return True
     except Exception as exc:
         # 사용자에게 경고하고, 토큰·URL 등 내부 정보는 노출하지 않음
         import logging
@@ -133,3 +146,28 @@ def process_uploaded_docx(client, event: dict, file_info: dict) -> None:
             text=f"⚠️ Word 수정본을 PDF로 변환하지 못했습니다. ({type(exc).__name__}) "
                  "파일이 정상적인 DOCX인지, LibreOffice가 설치돼 있는지 확인해 주세요.",
         )
+
+
+def process_uploaded_png(client, event, file_info, *, defer=False):
+    from agent_system.approval_demo.delivery_r42 import register_png, prepare_send, post_buttons
+    root = Path(__file__).resolve().parents[2]
+    kwargs = dict(channel=event['channel'], thread_ts=event.get('thread_ts') or event.get('ts'))
+    try:
+        with tempfile.TemporaryDirectory(prefix='cart_png_') as work:
+            dest = Path(work)/'final.png'
+            _download_slack_docx(client,file_info,dest,png=True)
+            register_png(root,event,dest.read_bytes(),file_info.get('id'))
+        client.chat_postMessage(**kwargs,text='최종 PNG 등록 완료. 원본 그대로 발송합니다.')
+        if defer:
+            return True
+        pending = prepare_send(root,event)
+        if pending:
+            post_buttons(client,event,pending)
+        else:
+            from agent_system.approval_demo.recipient_flow import _read_state
+            state = _read_state(root,event)
+            status = (state.get('pending') or {}).get('status')
+            client.chat_postMessage(**kwargs,text='수신자 확인 버튼을 눌러 주세요.' if status=='AWAITING_CONFIRMATION' else '수신자를 지정해 주세요.' if state.get('pdf') else 'Word 수정본을 첨부해 주세요.')
+        return True
+    except Exception as exc:
+        client.chat_postMessage(**kwargs,text='PNG 등록 실패: '+(str(exc) if isinstance(exc,ValueError) else type(exc).__name__))

@@ -19,6 +19,8 @@ def _naver_available(category: str):
     try:
         from agent_system.common_tools.external_data import trend_files
         from shared_analysis.market.category_comparison import KEYWORD_CATEGORY
+        from agent_system.common_tools.external_data.naver_keyword_policy import apply_keyword_policy
+        apply_keyword_policy(KEYWORD_CATEGORY)
         frame = trend_files.load_naver()
         if frame is None or frame.empty or 'keyword' not in frame:
             return [], '네이버 배치에 분석 가능한 키워드가 없습니다.'

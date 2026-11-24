@@ -477,13 +477,14 @@ def build_slack_message(
 
     # 내부 테이블명·재추론 여부 등 전달 계층에 불필요한 반복 문구만 정리합니다.
     # 질문/고객 수에 따른 분기는 두지 않으며 분석 기준·한계·SQL 검증은 유지합니다.
-    from interfaces.slack.message_policy import simplify_slack_lines
+    from interfaces.slack.message_policy import simplify_slack_lines, simplify_page_preview_text
 
-    slack_message = simplify_slack_lines(converted_lines)
+    slack_message = simplify_page_preview_text(simplify_slack_lines(converted_lines))
 
     # 업무 진행 번호는 내부 history/step_index에 그대로 두고 Slack에서만 숨깁니다.
     # 일반 분석 질문에서 단계 번호를 설명할 때는 변경하지 않습니다.
     if (result.get("workflow_display") or result.get("workflow_run")
+            or result.get("page_preview_revision") or "[진행 중인 워크플로]" in slack_message
             or result.get("conversation_reason") == "워크플로 명령"
             or result.get("turn_type") in ("workflow", "approval", "approval_request")):
         from interfaces.slack.message_policy import hide_workflow_stage_labels

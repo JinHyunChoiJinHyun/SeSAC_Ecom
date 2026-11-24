@@ -147,7 +147,8 @@ def write_pdf(doc: ReportDocument, path: Path) -> Path:
             elif isinstance(block, Image):
                 if Path(block.path).is_file():
                     image = RLImage(block.path)
-                    scale = min(1.0, (width * 0.9) / image.imageWidth, (110 * mm) / image.imageHeight)
+                    max_h = (block.max_height_mm or 110) * mm
+                    scale = min(1.0, (width * 0.9) / image.imageWidth, max_h / image.imageHeight)
                     image.drawWidth, image.drawHeight = image.imageWidth * scale, image.imageHeight * scale
                     story.append(KeepTogether([image, P(_esc(block.caption), st["muted"])]))
                 else:
@@ -250,7 +251,16 @@ def write_docx(doc: ReportDocument, path: Path) -> Path:
                     muted(word.add_paragraph(block.note))
             elif isinstance(block, Image):
                 if Path(block.path).is_file():
-                    word.add_picture(block.path, width=Mm(160))
+                    if block.max_height_mm is None:
+                        word.add_picture(block.path, width=Mm(160))
+                    else:
+                        from docx.image.image import Image as WordImage
+                        source = WordImage.from_file(block.path)
+                        width_mm = min(160, block.max_height_mm * source.px_width / source.px_height)
+                        word.add_picture(block.path, width=Mm(width_mm))
+                        paragraph = word.paragraphs[-1]
+                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        paragraph.paragraph_format.keep_with_next = True
                     caption = word.add_paragraph(block.caption)
                     caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     muted(caption)

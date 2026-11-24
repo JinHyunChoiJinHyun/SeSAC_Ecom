@@ -21,7 +21,7 @@ def evaluate_suitability(row: dict, subtype: str | None) -> dict:
     if not key:
         return {'suitability_status': 'category_only', 'suitability_reason': '세부 유형 미지정',
                 'suitability_evidence': '카테고리 및 구매 기록'}
-    candidate = pd.DataFrame([{'prod_name': name, 'detail_desc': description}])
+    candidate = pd.DataFrame([{'prod_name': name, 'detail_desc': description, 'product_type_name': row.get('product_type_name', '')}])
     if not bool(subtype_mask(candidate, key).iloc[0]):
         return {'suitability_status': 'review_required', 'suitability_reason': '선택 세부 유형의 명시적 매칭 근거 부족',
                 'suitability_evidence': '상품명·설명 규칙 불일치'}

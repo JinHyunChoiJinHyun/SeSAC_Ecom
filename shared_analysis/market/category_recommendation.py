@@ -87,14 +87,8 @@ def recommend_with_evidence(rows: list[dict], naver_metrics: dict, ranking_evide
             reasons.append('네이버 비교 가능한 키워드 미확보 (관심도가 낮다는 의미 아님)')
         if per_model is not None:
             reasons.append(f'모델당 구매 기록 약 {per_model:,.1f}건 (상품군 크기 차이 참고)')
-        for k, v in naver_metrics.items():
-            growth = v.get('recent_growth')
-            if (v.get('category') == c and isinstance(growth, (int, float))
-                    and math.isfinite(growth)):
-                percent = v.get('growth_percent')
-                if percent is None:
-                    percent = growth * 100
-                reasons.append(f'네이버 {k} 최근 상대 관심도 변화 {percent:+.2f}% (다른 키워드보다 높다는 의미 아님)')
+        # 네이버 개별 키워드 수치는 후보의 구조화된 naver 필드에 유지하고
+        # Slack 응답에서는 중복 없이 별도 표로 표시합니다.
         me = ranking_evidence.get(c, {})
         if me:
             reasons.append(f'무신사 해당 범주 수집 상품 {me.get("sample_products",0)}개 (판매량 근거 아님)')
@@ -110,3 +104,29 @@ def recommend_with_evidence(rows: list[dict], naver_metrics: dict, ranking_evide
     # 추세가 있는 범주는 '우선 검토'로 올리되, 검증되지 않은 상대 인기 순위를 주장하지 않는다.
     candidates.sort(key=lambda r: (-int(r['recent_positive_signal']), -r['hm_purchases'], r['category']))
     return candidates[:min(top_n, len(candidates))]
+
+
+NAVER_COMPARABILITY_NOTE = '※ 키워드별 독립 정규화 지수로, 키워드 간 검색량 비교는 불가합니다.'
+
+def naver_change_table(metrics: dict, *, include_window: bool = False) -> list[str]:
+    """Slack 표 변환기가 읽는 2열 표. 지표는 키워드별 기간 변화만 표현한다."""
+    if not metrics:
+        return ['네이버 관련 키워드 지표 없음 (관심 부족을 의미하지 않음).']
+    lines = ['keyword  change_pct']
+    for keyword, item in metrics.items():
+        growth = item.get('growth_percent')
+        try:
+            number = float(growth) if growth is not None else None
+        except (TypeError, ValueError):
+            number = None
+        import math
+        label = f'{number:+.2f}%' if number is not None and math.isfinite(number) else 'N/A'
+        lines.append(f'{keyword}  {label}')
+    if include_window:
+        windows = {(v.get('prior_window'), v.get('recent_window')) for v in metrics.values()
+                   if v.get('prior_window') and v.get('recent_window')}
+        if len(windows) == 1:
+            before, after = next(iter(windows))
+            lines.extend(['', f'비교 기간: {before} → {after}'])
+    lines.extend(['', NAVER_COMPARABILITY_NOTE])
+    return lines

@@ -258,7 +258,7 @@ def build_period_product_result(category, plan, subtype_flow=False):
     summary = period_table_note(plan, core_total, before)
     return {'final_answer': f"{category} H&M 상품 분석\n{period_note(plan)}\n{summary}\n"
                             f"핵심 월 거래 확인 상품 {snapshot['total_articles']:,}개 / 모델 {snapshot['total_products']:,}개. "
-                            '색상·스타일 구성은 상품 수 기준입니다.',
+                            '주력 상품 유형 분석은 상품군 선택 이후 진행하며, 색상·스타일은 상품 유형 선택 후 분석합니다.',
             'dataframe': pd.DataFrame([{'category': category, 'core_purchases': core_total, 'before_purchases': before,
                                         'core_days': scope_days(plan, 'core'), 'before_days': scope_days(plan, 'before'),
                                         'core_purchases_per_day': round(core_total/scope_days(plan, 'core'), 2),
@@ -303,5 +303,5 @@ def saved_comparison_note(run):
     comparison = (run or {}).get('hm_period_comparison')
     if not plan or not isinstance(comparison, dict) or type(comparison.get('core_purchases')) is not int:
         return ''
-    return ('선택 대분류 전체 (과거 판매 참고 사례 합계와 별도): '
+    return ('선택한 상품군 전체 (과거 상품 사례별 구매 합계와 별도): '
             + period_table_note(plan, comparison['core_purchases'], comparison.get('before_purchases')))

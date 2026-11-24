@@ -31,7 +31,7 @@ def _market_evidence(result: dict) -> bool:
     return False
 
 
-def _target_evidence(result: dict) -> tuple[bool, list[str]]:
+def _target_evidence(result: dict, question: str = "") -> tuple[bool, list[str]]:
     """추후 모델 출력 스키마가 확정되면 이 어댑터를 확장한다.
 
     민감 고객 식별자는 로그·답변에 넣지 않는다.
@@ -42,6 +42,16 @@ def _target_evidence(result: dict) -> tuple[bool, list[str]]:
     if not isinstance(rows, list) or not rows:
         return False, ["TARGET_STRUCTURED_EVIDENCE_MISSING"]
     errors = []
+    # 사용자 요청은 불신 데이터의 purpose 필드보다 우선한다.
+    # 기존 호출부가 최상위에 purpose를 넣더라도 발송 조건을 건너뛰지 않는다.
+    outer_purpose = result.get("purpose")
+    inner_purpose = data.get("purpose")
+    delivery_requested = bool(re.search(r"발송\s*(?:대상|명단|고객)|발송할|수신\s*대상", question or ""))
+    delivery = delivery_requested or outer_purpose == "send_audience" or inner_purpose == "send_audience"
+    if outer_purpose and inner_purpose and outer_purpose != inner_purpose:
+        errors.append("TARGET_PURPOSE_CONFLICT")
+    if delivery and inner_purpose != "send_audience" and outer_purpose != "send_audience":
+        errors.append("TARGET_PURPOSE_MISSING")
     keys = []
     for row in rows:
         if not isinstance(row, dict):
@@ -56,19 +66,25 @@ def _target_evidence(result: dict) -> tuple[bool, list[str]]:
         if isinstance(score, bool) or not isinstance(score, (float, int)) or not 0 <= score <= 1:
             errors.append("TARGET_SCORE_INVALID")
         # 실제 발송 명단에서만 동의/제외/상한을 필수로 한다.
-        if data.get("purpose") == "send_audience":
+        if delivery:
             if row.get("contact_allowed") is not True or row.get("excluded") is not False:
                 errors.append("TARGET_DELIVERY_ELIGIBILITY_INVALID")
     if len(keys) != len(set(keys)):
         errors.append("TARGET_CUSTOMER_DUPLICATE")
-    if data.get("purpose") == "send_audience" and data.get("send_cap_checked") is not True:
+    if delivery and (data.get("send_cap_checked") is not True and result.get("send_cap_checked") is not True):
         errors.append("TARGET_SEND_CAP_NOT_CHECKED")
     return not errors, sorted(set(errors))
 
 
 def check_selection(route: str, question: str, result: dict) -> dict:
     """독립 특화 Agent 선정 요청의 반환 근거 검증."""
-    if route not in _ROUTES or not _SELECTION.search(question or ""):
+    is_delivery = route == "targeting" and (
+        bool(re.search(r"발송\s*(?:대상|명단|고객)|발송할|수신\s*대상", question or ""))
+        or result.get("purpose") == "send_audience"
+        or isinstance(result.get("target_result"), dict)
+        and result["target_result"].get("purpose") == "send_audience"
+    )
+    if route not in _ROUTES or (not _SELECTION.search(question or "") and not is_delivery):
         return {"status": "NOT_APPLICABLE", "passed": True, "retryable": False, "errors": []}
     if result.get("not_ready") or result.get("error"):
         return {"status": "FAIL", "passed": False, "retryable": False,
@@ -90,11 +106,14 @@ def check_selection(route: str, question: str, result: dict) -> dict:
         if not _market_evidence(result):
             errors.append("MARKET_TOOL_ROWS_MISSING")
     elif route == "targeting":
-        ok, problems = _target_evidence(result)
+        ok, problems = _target_evidence(result, question)
         if not ok:
             errors.extend(problems)
     return {"status": "FAIL" if errors else "PASS", "passed": not errors,
-            "retryable": bool(errors), "errors": sorted(set(errors)),
+            "retryable": bool(errors) and not any(code in errors for code in (
+                "TARGET_DELIVERY_ELIGIBILITY_INVALID", "TARGET_SEND_CAP_NOT_CHECKED",
+                "TARGET_PURPOSE_CONFLICT", "TARGET_PURPOSE_MISSING")),
+            "errors": sorted(set(errors)),
             "scope": "로컬 Tool 근거 및 필수 구조 확인 (LLM 의미 검증 아님)"}
 
 

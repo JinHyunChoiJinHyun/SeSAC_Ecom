@@ -289,3 +289,6 @@ project_agent/
 *.log
 *.zip
 .DS_Store
+
+# 구매 예측 모델 바이너리 (별도 전달)
+/modeling/purchase_model/models/

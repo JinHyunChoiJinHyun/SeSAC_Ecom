@@ -174,3 +174,23 @@ def workflow_section_blocks(text):
             blocks.append({"type": "divider"})
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": group}})
     return blocks
+
+
+def simplify_page_preview_text(text: str) -> str:
+    """페이지 시안 응답에서만 중복 안내를 줄인다. 분석 근거는 건드리지 않는다."""
+    if "기획전 페이지 틀이 확정되었습니다. 준비되시면" in text:
+        return "\n".join(line for line in text.splitlines()
+                         if not line.strip().startswith("[진행 중인 워크플로]")).strip()
+    if "■ 기획전 페이지 틀 미리보기" not in text:
+        return text
+    rows = []
+    for line in text.splitlines():
+        clean = line.strip()
+        if clean.startswith(("구성:", "첨부된 이미지로 페이지 목업을", "재표시:", "[진행 중인 워크플로] 기획전 페이지 틀 승인 대기")):
+            continue
+        if clean.startswith("수정 예시:"):
+            line = "수정할 부분을 말씀해 주세요. 예: 상단 배너를 더 따뜻하게 바꿔줘."
+        elif clean.startswith("승인하면 17단계 타깃 선정"):
+            line = "시안을 승인한 뒤 고객 타깃 분석을 요청할 수 있습니다."
+        rows.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(rows)).strip()

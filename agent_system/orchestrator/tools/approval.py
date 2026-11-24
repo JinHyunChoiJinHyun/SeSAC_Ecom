@@ -169,6 +169,11 @@ def check_approval_node(state) -> dict:
                 and review_run.get("review_category") and "category" not in updates):
             updates["category"] = review_run["review_category"]
         campaign = update_conversation_state(campaign, updates, source=request.get("source", "user"))
+        # 상품군 승인과 워크플로의 선택 상태를 같은 요청에서 함께 갱신한다.
+        synced_run = None
+        if "category" in updates and "products" not in updates:
+            from agent_system.orchestrator.tools.subtype_route_guard import confirm_category_run
+            synced_run = confirm_category_run(review_run, str(updates["category"]))
         if "selling_points" in updates and review_run.get("campaign_summary"):
             from agent_system.orchestrator.tools.campaign_copy import _selected
             points = _selected(updates["selling_points"]).get("points") or []
@@ -189,7 +194,10 @@ def check_approval_node(state) -> dict:
     else:  # cancel
         reply = "승인 요청을 취소했습니다. 확정값은 바꾸지 않았습니다."
 
-    return {
+    if kind == "approve" and synced_run is not None:
+        from agent_system.orchestrator.tools.subtype_route_guard import subtype_status_reply
+        reply += "\n\n" + subtype_status_reply(synced_run)
+    result = {
         "campaign": campaign,
         "pending_approval": {},
         "approval_result": {"kind": kind, "text": text, "title": request.get("title", ""),
@@ -198,3 +206,6 @@ def check_approval_node(state) -> dict:
         "reply": reply,
         "messages": [HumanMessage(content=text), AIMessage(content=reply, name="orchestrator")],
     }
+    if kind == "approve" and synced_run is not None:
+        result["workflow_run"] = synced_run
+    return result

@@ -140,3 +140,118 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+def save_monthly_category_chart(frame, destination, *, category=None, metric='purchases'):
+    """두 겨울 시즌을 독립 패널로 비교한다. 상품군·기간은 데이터로 결정한다."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+    from shared_analysis.product.category_mapping import CATEGORIES
+    if frame is None or frame.empty:
+        raise ValueError('월별 관측값이 없습니다.')
+    labels = ([category] if category is not None else list(CATEGORIES))
+    plot = frame.loc[frame['category'].isin(labels)].copy()
+    if plot.empty:
+        raise ValueError('선택한 상품군의 관측값이 없습니다.')
+    if metric not in ('purchases','purchases_per_day'):
+        raise ValueError('지원하지 않는 분석 지표입니다.')
+    if metric not in plot:
+        if metric == 'purchases_per_day':
+            from agent_system.orchestrator.tools.category_planning.seasonal_trends import monthly_daily_average
+            plot = monthly_daily_average(plot)
+        else:
+            raise ValueError('구매 건수 칼럼이 없습니다.')
+    seasons = sorted(plot['season'].dropna().unique().tolist())
+    if not seasons:
+        raise ValueError('시즌 식별자가 없습니다.')
+    korean = next((x for x in ('AppleGothic','Malgun Gothic','NanumGothic','Noto Sans CJK KR')
+                   if any(f.name==x for f in font_manager.fontManager.ttflist)), None)
+    from agent_system.common_tools.execution_tools import visualization_tools as viz
+    try:
+        viz.configure_korean_font()
+    except (AttributeError, OSError):
+        pass
+    with plt.rc_context({'font.family':korean or 'DejaVu Sans','axes.unicode_minus':False}):
+        fig, axes = plt.subplots(1,len(seasons),figsize=(6.2*len(seasons),5.4),squeeze=False,sharey=True)
+        palette = plt.get_cmap('tab10')
+        try:
+            for ax,season in zip(axes[0], seasons):
+                part=plot.loc[plot['season'].eq(season)].copy()
+                # X축은 겨울 시즌의 상대 월 순서 (11월,12월,1월 등)를 사용한다.
+                months = sorted(part['month'].unique().tolist())
+                months = sorted(months, key=lambda m: (int(m[5:7]) < 7, int(m[5:7])))
+                for idx,label in enumerate(labels):
+                    sub=part.loc[part['category'].eq(label)].set_index('month')
+                    vals=[]
+                    for month in months:
+                        if month not in sub.index:
+                            vals.append(float('nan'))
+                        else:
+                            point=sub.loc[month, metric]
+                            if isinstance(point,pd.Series):
+                                raise ValueError('같은 시즌·월·상품군의 집계가 중복됩니다.')
+                            vals.append(float(point))
+                    ax.plot(range(len(months)),vals,marker='o',linewidth=2,label=label if korean else f'Group {idx+1}',color=palette(idx))
+                ax.set_xticks(range(len(months)),[f'{int(m[5:7])}월' if korean else m for m in months])
+                a,b=months[0],months[-1]
+                ax.set_title(f'{a[:4]}~{b[:4]} 겨울' if korean else f'{a} - {b}')
+                ax.grid(axis='y',alpha=.22)
+                if hasattr(viz,'apply_chart_border'): viz.apply_chart_border(ax)
+            axes[0][0].set_ylabel(('월별 구매 기록(건)' if metric=='purchases' else '일평균 구매 기록(건/일)')
+                                    if korean else ('Monthly transactions' if metric=='purchases' else 'Daily average transactions'))
+            handles, legends=axes[0][-1].get_legend_handles_labels()
+            fig.legend(handles,legends,loc='lower center',ncol=min(len(labels),5),bbox_to_anchor=(.5,-.01))
+            fig.suptitle(('상품군별 과거 겨울 구매 추이' if category is None else f'{category} 과거 겨울 구매 추이')
+                          if korean else 'Historical winter purchases')
+            fig.tight_layout(rect=(0,.07,1,.95))
+            destination=Path(destination);destination.parent.mkdir(parents=True,exist_ok=True)
+            fig.savefig(destination,dpi=150,bbox_inches='tight')
+            return str(destination.resolve())
+        finally: plt.close(fig)
+
+
+def save_weekly_campaign_chart(frame, destination, *, category=None):
+    """실제 기획전 날짜에 대응하는 과거 기간을 주차별로 비교한다."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+    from shared_analysis.product.category_mapping import CATEGORIES
+    labels=[category] if category else list(CATEGORIES)
+    plot=frame.loc[frame['category'].isin(labels)].copy()
+    if plot.empty: raise ValueError('기획전 대응 기간의 주별 구매 기록이 없습니다.')
+    korean=next((x for x in ('AppleGothic','Malgun Gothic','NanumGothic','Noto Sans CJK KR') if any(f.name==x for f in font_manager.fontManager.ttflist)),None)
+    seasons=sorted(plot['season'].unique())
+    # 실제 관측 일수를 기준으로 주차 라벨을 만든다. 숫자축의 1.5주차 같은 보간 눈금을 제거한다.
+    def week_ticks(part):
+        days = part.groupby('week_index')['observed_days'].nunique()
+        if (days > 1).any():
+            raise ValueError('같은 시즌의 주차별 관측 일수가 상품군마다 다릅니다.')
+        counts = part.groupby('week_index')['observed_days'].first().to_dict()
+        numbers = sorted(int(i) for i in counts)
+        names = [f'{i}주차' + (f'({int(counts[i])}일)' if int(counts[i]) != 7 else '') for i in numbers]
+        return numbers, names
+    with plt.rc_context({'font.family':korean or 'DejaVu Sans','axes.unicode_minus':False}):
+        fig,axes=plt.subplots(1,len(seasons),figsize=(6.2*len(seasons),5.1),squeeze=False,sharey=True)
+        try:
+            for ax,season in zip(axes[0],seasons):
+                part=plot.loc[plot.season.eq(season)]
+                for idx,label in enumerate(labels):
+                    sub=part.loc[part.category.eq(label)].sort_values('week_index')
+                    ax.plot(sub['week_index'],sub['purchases_per_day'],label=label if korean else f'Group {idx+1}',marker='o',linewidth=2,color=plt.get_cmap('tab10')(idx))
+                ax.set_title(f'{int(part.start_year.iloc[0])}년 시작 시즌' if korean else f'Season {season+1}')
+                ticks, labels_for_ticks = week_ticks(part)
+                ax.set_xticks(ticks, labels_for_ticks)
+                ax.set_xlim(min(ticks)-0.18, max(ticks)+0.18)
+                ax.set_xlabel('기획전 대응 주차' if korean else 'Campaign-aligned week')
+                ax.grid(axis='y',alpha=.2)
+            axes[0][0].set_ylabel('주차별 일평균 구매 기록(건/일)' if korean else 'Transactions per day')
+            handles,names=axes[0][-1].get_legend_handles_labels()
+            fig.legend(handles,names,loc='lower center',ncol=min(len(labels),5))
+            fig.suptitle('과거 기획전 대응 기간의 주별 구매 추이' if korean else 'Historical campaign-aligned weekly purchases')
+            fig.tight_layout(rect=(0,.07,1,.95))
+            destination=Path(destination);destination.parent.mkdir(parents=True,exist_ok=True)
+            fig.savefig(destination,dpi=150,bbox_inches='tight');return str(destination.resolve())
+        finally:plt.close(fig)

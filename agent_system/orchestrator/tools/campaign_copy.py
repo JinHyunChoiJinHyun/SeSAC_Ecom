@@ -115,7 +115,7 @@ def approval_brief(summary, selected, campaign, market=None):
             + f"운영 일정: {(campaign.get('values') or {}).get('schedule') or '미확정'}\n"
             + '가격·할인: 미확정 값은 광고에 사용하지 않습니다.\n'
             + ('승인 대상은 향후 상품 유형·색상·디자인 방향이며, 과거 사례 상품 ID는 판매 확정 대상이 아닙니다.\n' if summary.get('evidence_role') == 'historical_reference' else '')
-            + '\n이 구성으로 대표 문구 3안을 만들까요?')
+            + '\n\n■ 기획전 구성 승인 대기\n선택한 소구점과 구성 방향을 확정하시겠습니까?\n[승인] 확정 후 대표 문구 3안 생성·검증 단계로 진행합니다.\n[반려]·[승인 요청 취소] 확정하지 않고 검토 단계로 돌아갑니다.')
 
 
 def generate_candidates(summary, campaign):

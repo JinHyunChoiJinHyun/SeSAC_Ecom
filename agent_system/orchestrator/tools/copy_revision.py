@@ -199,8 +199,22 @@ def _has_explicit_copy_field(feedback: str) -> bool:
     )
 
 
+# CART_SIGNAL_R34_STYLE_ROUTING: 명시 필드 + 자연어 스타일 모두 검증 가능한 AI 편집기로 연결.
+_STYLE_REVISION_R34 = re.compile(
+    r'감성|따뜻|포근|프리미엄|고급|세련|미니멀|간결|짧|차분|발랄|캐주얼|'
+    r'매거진|분위기|느낌|톤|스타일|부드럽|고급스럽|트렌디|우아|모던|담백|'
+    r'강렬|귀엽|친근|격식|전문적|세련되게|다듬|재작성|새로\s*작성'
+)
+
+
 def regenerate_copy(base, feedback, previous_revision=0):
-    """정확한 필드 지정은 V4.29P, 일반 스타일 요청은 기존 호환 경로로 처리."""
-    if _has_explicit_copy_field(str(feedback or '')):
-        return _regenerate_copy_v429p(base, feedback, previous_revision)
-    return _regenerate_copy_legacy(base, feedback, previous_revision)
+    """안별 스타일은 제목/본문을 AI로 재작성; 저장 출력으로 수정 이력을 결정적 재생."""
+    request = str(feedback or '')
+    # 3안은 선택 번호가 아니라 세 개 후보라는 뜻일 수 있다.
+    # 예: '좀 더 감성적으로 다시 3안 추천해줘' -> 기존 전체 후보 재생성.
+    targeted = bool(re.search(r'(?<!\d)[123]\s*(?:안|번)(?!\d)', request))
+    broad_three = bool(re.search(r'(?<!\d)(?:3|세)\s*안\s*(?:추천|작성|만들)', request))
+    if _has_explicit_copy_field(request) or (_STYLE_REVISION_R34.search(request) and targeted and not broad_three):
+        return _regenerate_copy_v429p(base, request, previous_revision)
+    # 스타일 지시가 없는 기존 범용 규칙 수정은 호환성 유지.
+    return _regenerate_copy_legacy(base, request, previous_revision)
