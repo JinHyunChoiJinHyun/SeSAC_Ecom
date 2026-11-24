@@ -8,11 +8,11 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # 권한 설정 파일 경로
-PERMISSION_PATH = PROJECT_ROOT / "confing" / "permission.yaml"
+PERMISSION_PATH = PROJECT_ROOT / "config" / "permissions.yml"
 
 @lru_cache(maxsize=1)
 def load_permission_config() -> dict:
-    """permissions.yaml 설정 파일 로드"""
+    """permissions.yml 설정 파일 로드"""
     with PERMISSION_PATH.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
 
@@ -21,7 +21,7 @@ def load_permission_config() -> dict:
 
     return config
 
-def get_agent_scope(agent: str, workflow: str) -> list[str]:
+def get_agent_scopes(agent: str, workflow: str) -> list[str]:
     """Agent와 Workflow의 공통 권한 계산"""
     config = load_permission_config()
 

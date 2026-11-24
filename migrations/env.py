@@ -5,7 +5,12 @@ from sqlalchemy import pool, create_engine, URL
 from alembic import context
 
 from database.operations.base import Base
-from database.operations.orm.knowledge.knowledge_doc import KnowledgeDoc
+from database.operations.orm.knowledge.knowledge_doc import KnowledgeDoc # noqa: F401
+
+from database.operations.orm.run.conversation_thread import ConversationThread # noqa: F401
+from database.operations.orm.run.run import Run # noqa: F401
+from database.operations.orm.run.run_event import RunEvent # noqa: F401
+
 
 import os
 from dotenv import load_dotenv

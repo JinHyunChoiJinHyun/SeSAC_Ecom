@@ -3,9 +3,11 @@ from datetime import datetime, timedelta, timezone
 
 from jose import jwt
 
+from uuid import UUID
+
 def create_agent_token(
         agent: str,
-        run_id: str,
+        run_id: UUID,
         scopes: list[str]
 ) -> tuple[str, int]:
     """Agent 전용 JWT 생성"""

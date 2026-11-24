@@ -27,7 +27,7 @@ router = APIRouter(
 def search_knowledge(
     request: KnowledgeSearchRequest,
     session: Session = Depends(get_operations_session),
-    # _principal: dict = Depends(require_scope("knowledge:read"))
+    _principal: dict = Depends(require_scope("knowledge:read"))
 ):
     return search_business_knowledge(
         session=session,

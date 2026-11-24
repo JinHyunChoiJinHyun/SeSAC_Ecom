@@ -34,29 +34,27 @@ agents:
 # 워크플로별 허용 scope
 workflows:
   trend_planning:
-    allowed_scopes:
-      - run:read
-      - execution:read
-      - market:read
-      - product:read
-      - targeting:compute
-      - audience:write
-      - content:write
-      - knowledge:read
-      - validation:write
-      - report:write
-      - execution:approval_request
-      - execution:page_delivery
-      - execution:url_check
-      - execution:send
-      - execution:schedule
+    - run:read
+    - execution:read
+    - market:read
+    - product:read
+    - targeting:compute
+    - audience:write
+    - content:write
+    - knowledge:read
+    - validation:write
+    - report:write
+    - execution:approval_request
+    - execution:page_delivery
+    - execution:url_check
+    - execution:send
+    - execution:schedule
 
   photography_planning:
-    allowed_scopes:
-      - run:read
-      - market:read
-      - product:read
-      - content:write
-      - knowledge:read
-      - validation:write
-      - report:write
+    - run:read
+    - market:read
+    - product:read
+    - content:write
+    - knowledge:read
+    - validation:write
+    - report:write
