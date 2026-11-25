@@ -267,11 +267,17 @@ def run_workflow_node(state) -> dict:
 
     steps = workflow.steps()
     index = int(run.get("step_index", 0))
-    # R40: 신규 분석은 전체 모집단 정책을 적용하고 검토에서 멈춘다. 기존 R39 세션은 유지한다.
+    # R40/R42.6: 연령 제한 모집단에서 검토까지 진행한다. 기존 R39 세션은 유지한다.
     from agent_system.orchestrator.tools import campaign_target_r39 as target39
     if target39.active(run) and index < len(steps) and steps[index][1].no >= 17:
         try:
             saved = run.get('campaign_target_r39') or {}
+            from .audience_scope_r426 import current_target
+            if run.get('period_plan'):
+                from .category_planning.analysis_scope_r427 import run_scope
+                run_scope(run)
+            if saved and not current_target(saved, campaign, run):
+                raise ValueError('기존 고객 연령 조건 또는 분석 결과가 변경되었습니다. 고객 타깃 다시 선정해줘라고 요청해 주세요.')
             if saved.get('status') == 'confirmed':
                 answer = target39.confirmed_notice(saved)
             elif saved.get('status') == 'review':
@@ -286,7 +292,7 @@ def run_workflow_node(state) -> dict:
             import logging
             logging.getLogger(__name__).exception('기획전 구매 모델 분석 실패')
             run.update(status='paused', waiting_key='', target_start_pending=True)
-            answer = f'고객 구매 예측 분석을 완료하지 못했습니다 ({type(exc).__name__}). ' + (str(exc) if isinstance(exc, ValueError) and any(x in str(exc) for x in ('모델 미지원', '단일 모델 품목', '확정 참고 상품', '확정된 기획전 색상', '동일 품목')) else '모델 파일·DB·확정 품목과 색상을 확인해 주세요.')
+            answer = f'고객 구매 예측 분석을 완료하지 못했습니다 ({type(exc).__name__}). ' + (str(exc) if isinstance(exc, ValueError) and any(x in str(exc) for x in ('모델 미지원', '단일 모델 품목', '확정 참고 상품', '확정된 기획전 색상', '동일 품목', '고객 연령', '연령 조건', '연령 필터', '지정한 연령', '고객 모집단')) else '모델 파일·DB·확정 품목과 색상을 확인해 주세요.')
         store_turn_result(state['turn_id'], {'turn_type':'workflow', 'final_answer':answer, 'completed_steps':[], 'workflow_run': {'workflow':'trend_planning', 'status':'paused'}})
         return {'workflow_run':run, 'turn_type':'workflow', 'reply':answer,
                 'messages':[AIMessage(content=answer, name=WORKFLOW_NODE)]}
@@ -335,8 +341,13 @@ def run_workflow_node(state) -> dict:
                     interpretation = run.get("schedule_interpretation") or {}
                     if interpretation.get("precision") in ("month", "calculated"):
                         plan = {**plan, "schedule_interpretation": dict(interpretation)}
-                    run["period_plan"] = plan
+                    from .category_planning.analysis_scope_r427 import bind_plan
+                    from .audience_scope_r426 import require_scope
+                    run["period_plan"] = bind_plan(plan, require_scope(run))
                 if run.get("period_plan") is not None:
+                    from .category_planning.analysis_scope_r427 import bind_plan
+                    from .audience_scope_r426 import require_scope
+                    run["period_plan"] = bind_plan(run["period_plan"], require_scope(run))
                     result = build_category_result(run.get("request", ""), output, period_plan=run["period_plan"])
                     run["category_period_rows"] = result["rows"]
                 else:
@@ -484,6 +495,8 @@ def run_workflow_node(state) -> dict:
                 and run.get("period_plan")):
             from agent_system.orchestrator.tools.category_planning.period_context import build_period_product_result
             try:
+                from .category_planning.analysis_scope_r427 import run_scope
+                run_scope(run)
                 result = build_period_product_result(run["review_category"], run["period_plan"], bool(run.get("subtype_flow")))
                 expected = next((r['hm_purchases'] for r in run.get('category_period_rows', [])
                                  if r['category'] == run['review_category']), None)
@@ -542,6 +555,9 @@ def run_workflow_node(state) -> dict:
         elif local_step7 and step.no == 7:
             from agent_system.orchestrator.tools.category_synthesis import build_category_summary
             try:
+                if run.get("period_plan"):
+                    from .category_planning.analysis_scope_r427 import run_scope
+                    run_scope(run)
                 result = build_category_summary(run["review_category"], run.get("hm_category_snapshot"),
                                                 run.get("category_market"), state["turn_id"],
                                                 period_plan=run.get("period_plan"), period_rows=run.get("category_period_rows"))
@@ -590,7 +606,12 @@ def run_workflow_node(state) -> dict:
                 else:
                     selection = {}
                 if run.get("period_plan"):
+                    from .category_planning.analysis_scope_r427 import run_scope
+                    run_scope(run)
                     selection["period_plan"] = run["period_plan"]
+                elif run.get('request'):
+                    from .audience_scope_r426 import require_scope
+                    selection['audience'] = require_scope(run)
                 result = build_verified_step8(reviewed_category, **selection)
                 # CART_SIGNAL_PRODUCT_EVIDENCE_V1
                 from agent_system.orchestrator.tools.category_planning.product_evidence import enrich_verified_result
@@ -696,8 +717,12 @@ def run_workflow_node(state) -> dict:
                 from agent_system.orchestrator.tools.category_planning.subtype_selection import build_inventory
                 from agent_system.orchestrator.tools.category_planning.verified_products import load_purchase_inputs
                 try:
-                    articles, purchases = load_purchase_inputs()
+                    from .audience_scope_r426 import require_scope, label
+                    age = require_scope(run)
+                    articles, purchases = load_purchase_inputs(audience=age)
                     run["subtype_inventory"] = build_inventory(run["review_category"], articles, purchases)
+                    for item in run['subtype_inventory'].values():
+                        item['analysis_age_label'] = label(age)
                     note = "5단계 세부 유형별 과거 겨울 온라인 구매 집계 저장 완료. 7단계에서 네이버 상승 근거와 대조합니다."
                     sections.append(note)
                     result["final_answer"] = answer = answer + "\n" + note
@@ -844,6 +869,11 @@ def start_run(workflow_name: str, request: str, campaign: dict | None, previous_
     if workflow_name == "trend_planning":
         from agent_system.orchestrator.tools.category_planning.period_context import interpret_schedule
         run["period_required"] = True
+        from .audience_scope_r426 import initial_scope
+        scope = initial_scope(run)
+        if scope is not None:
+            run['target_audience'] = scope
+            run['audience_revision'] = 0
         try:
             interpreted = interpret_schedule(request)
         except ValueError:

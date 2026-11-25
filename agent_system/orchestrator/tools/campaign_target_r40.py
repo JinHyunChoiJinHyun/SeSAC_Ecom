@@ -1,4 +1,4 @@
-"""R40: 진단과 동일한 전체 모집단 기준 구매 순위·취향 분류. 실제 발송 없음."""
+"""R40: R42.6 연령 조건을 충족한 모집단 내 구매 순위·취향 분류. 실제 발송 없음."""
 from __future__ import annotations
 
 import hashlib
@@ -66,6 +66,11 @@ def score_campaign(campaign, run, root):
     from agent_system.agents.model_targeting_agent import validate_ranked_frame
     if not legacy.active(run):
         raise ValueError('먼저 기획전 페이지 틀을 승인해 주세요.')
+    from . import audience_scope_r426 as audience
+    scope = audience.require_scope(run)
+    if run.get('period_plan'):
+        from .category_planning.analysis_scope_r427 import run_scope
+        run_scope(run)
     values = campaign.get('values') or {}
     ids = list(dict.fromkeys(re.findall(r'(?<!\d)\d{10}(?!\d)', str(values.get('products') or ''))))
     if not ids:
@@ -77,18 +82,22 @@ def score_campaign(campaign, run, root):
         info, logits, tastes = [], [], []
         population = None
         with connect_team(Path(root)) as data:
+            eligible_ids, audience_counts = audience.load_population(data, legacy.DATE, scope)
+            expected_population = set(eligible_ids)
             combos = legacy.campaign_combos(values, article_attributes(data, ids), supported_combos(model))
             # 진단은 동일 품목 내 색상 조합만 평가했으므로 이 범위를 벗어나면 중단한다.
             if len({pt for pt, _ in combos}) != 1:
                 raise ValueError('R40은 동일 품목의 색상 조합만 지원합니다.')
             for pt, color in combos:
-                scored = score_combo(data, pt, color, legacy.DATE)
+                scored = score_combo(data, pt, color, legacy.DATE, customer_ids=eligible_ids)
                 validate_ranked_frame(scored.scores)
                 if str(scored.score_as_of) != legacy.DATE or (scored.product_type, scored.colour) != (pt, color) or str(scored.model_run_id) != str(model.run_id):
                     raise ValueError('모델 결과의 조합·기준일·실행 ID가 다릅니다.')
                 frame = scored.scores[['customer_id', 'score_logit']].copy()
                 frame['customer_id'] = frame.customer_id.astype(str)
                 frame = frame.set_index('customer_id')
+                if len(frame) != len(expected_population) or set(frame.index) != expected_population:
+                    raise ValueError('모델 점수화 고객과 연령 필터 고객 집합이 일치하지 않습니다.')
                 if population is None:
                     population = frame.index.sort_values()
                 if len(frame) != len(population) or not frame.index.difference(population).empty:
@@ -111,7 +120,8 @@ def score_campaign(campaign, run, root):
         path = folder/'r40_scores.csv'
         legacy._write_csv(cache, path)
         target = {'status':'review', 'policy':POLICY, 'fingerprint':legacy.fingerprint(campaign, run), 'folder':str(folder), 'combos':info, 'date':legacy.DATE,
-                  'cache_sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'taste_cutoff':cutoff}
+                  'cache_sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'taste_cutoff':cutoff,
+                  'audience':scope, 'audience_counts':audience_counts}
         return propose(target, campaign, run, root)
     except Exception:
         shutil.rmtree(folder, ignore_errors=True)
@@ -120,7 +130,8 @@ def score_campaign(campaign, run, root):
 
 def _cache(target, campaign, run, root):
     from . import campaign_target_r39 as legacy
-    if not legacy.active(run) or target.get('status') != 'review' or target.get('policy') != POLICY or target.get('fingerprint') != legacy.fingerprint(campaign, run):
+    from .audience_scope_r426 import current_target
+    if not legacy.active(run) or target.get('status') != 'review' or target.get('policy') != POLICY or not current_target(target, campaign, run):
         raise ValueError('현재 기획전과 일치하는 R40 분석 결과가 없습니다.')
     folder = Path(target['folder']).resolve()
     if folder.parent != legacy._folder(run, root) or not folder.is_dir():
@@ -134,7 +145,7 @@ def _cache(target, campaign, run, root):
     return folder, df
 
 
-def _summary(df, cutoff):
+def _summary(df, cutoff, target):
     counts = df.target_segment.value_counts()
     all_groups = [{'key':key,'name':LABELS[key],'count':int(counts.get(key,0)), 'share_percent':round(100*int(counts.get(key,0))/len(df),2)} for key in ('core','cross_sell','reactivation','excluded','unknown_taste')]
     groups = []
@@ -142,12 +153,12 @@ def _summary(df, cutoff):
         if g['key'] in CANDIDATES and g['count']:
             strategy, message = STRATEGIES[g['key']]
             groups.append({**g, 'csv':f"target_{g['key']}.csv", 'strategy':strategy, 'message':message})
-    return {'policy':POLICY,'total':sum(g['count'] for g in groups), 'population':len(df), 'groups':groups,'all_groups':all_groups,'taste_cutoff':cutoff}
+    return {'policy':POLICY,'total':sum(g['count'] for g in groups), 'population':len(df), 'groups':groups,'all_groups':all_groups,'taste_cutoff':cutoff, 'audience':target['audience'], 'audience_counts':target['audience_counts']}
 
 
 def propose(target, campaign, run, root):
     _, df = _cache(target, campaign, run, root)
-    proposal = _summary(df, target['taste_cutoff'])
+    proposal = _summary(df, target['taste_cutoff'], target)
     return {**target, 'proposal':proposal, 'review_token':secrets.token_hex(16)}
 
 
@@ -156,7 +167,7 @@ def review(target, command, campaign, run, root):
     if not target.get('proposal') or not target.get('review_token'):
         raise ValueError('R40 선정 제안을 다시 확인해 주세요.')
     folder, df = _cache(target, campaign, run, root)
-    proposal = _summary(df, target['taste_cutoff'])
+    proposal = _summary(df, target['taste_cutoff'], target)
     if proposal != target['proposal']:
         raise ValueError('검토한 R40 결과가 변경되었습니다. 다시 선정해 주세요.')
     if command == 'evidence':
@@ -179,23 +190,25 @@ def review(target, command, campaign, run, root):
     except Exception:
         shutil.rmtree(out, ignore_errors=True)
         raise
-    return {**result, **proposal, 'status':'confirmed','output_dir':str(out)}
+    return {**result, **proposal, 'status':'confirmed','output_dir':str(out),'evidence_token':target['review_token']}
 
 
 def notice(target, *, evidence=False, confirmed=False):
     p = target if confirmed else target.get('proposal')
     if not p:
         return 'R40 분석 결과를 유지합니다. 다시 검토하려면 “고객 타깃 선정해줘”라고 말씀해 주세요.'
+    from .audience_scope_r426 import audience_text, population_text
     lines = ['고객 타깃 확정' if confirmed else '고객 타깃 선정 제안', '구매 예측 상위 3% · 양수 취향 상위 10%',
              'H&M 2020-09-23 기준 30일 예측 · 실제 구매확률 및 발송 가능 인원 아님',
              f"점수화 고객 {p['population']:,}명 / 마케팅 후보 {p['total']:,}명 (중복 제거)"]
+    lines[3:3] = [audience_text(p), population_text(p), '구매 이력은 기존 모델 정의(전체 채널)이며 연령은 과거 데이터의 저장값입니다.']
     lines += [f"• {g['name']}: {g['count']:,}명 ({g['share_percent']:.2f}%, 전체 기준)" for g in p['all_groups']]
     if evidence:
         cutoff = p['taste_cutoff']
         lines += ['동일 조합 내 평균 동점 백분위 및 조합별 최대 구매 순위·취향 사용. 취향 0점은 높은 취향에서 제외.',
                   f"취향 경계값: {cutoff:.6f}" if cutoff is not None else '양수 취향 없음',
                   '핵심=높은 순위·높은 취향, 교차판매=높은 순위·낮은 취향, 재활성화=낮은 순위·높은 취향. 결측은 미확인.',
-                  'Jacket 두 색상의 과거 검증으로 정한 기본 정책이며 다른 조합에 대한 최적성은 미검증.']
+                  'Jacket 두 색상·전체 연령 모집단의 과거 검증으로 정한 기본 정책입니다. 연령 제한 모집단의 Lift·최적성은 별도 검증 필요.']
     if confirmed:
         lines += ['승인된 마케팅 후보 3개 고객군의 CSV를 로컬에 저장했습니다. 제외·미확인은 집계만 저장합니다.', '준비되시면 “고객군별 마케팅 문구 생성해줘”라고 말씀해 주세요.']
     else:

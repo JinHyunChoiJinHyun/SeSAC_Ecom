@@ -58,13 +58,17 @@ def build_action_blocks(actions: list[dict] | None, thread_id: str, requester_us
     blocks = []
     for item in actions or []:
         kind = item.get("type")
+        if kind == 'final_page_review' and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}final_page_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id}, style) for d,label,style in [('approve','완성본 승인','primary'),('edit','수정 요청',None),('reject','반려','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*기획전 페이지 완성본 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}final_page_review','elements':buttons}]
+            continue
         if kind == 'segment_copy_review' and item.get('run_id') and item.get('token'):
             buttons = [_button(f'{ACTION_PREFIX}segment_copy_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id}, style) for d,label,style in [('approve','문구 승인','primary'),('reject','문구 반려','danger')]]
             blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객군별 문구 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}segment_copy_review','elements':buttons}]
             continue
         if kind == 'target_selection_review'  and item.get('run_id') and item.get('token'):
-            buttons = [_button(f'{ACTION_PREFIX}target_review_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id, **({'view':'open'} if item.get('fixed_policy') and d == 'evidence' else {})}, style) for d,label,style in _TARGET_BUTTONS if not (item.get('fixed_policy') and d == 'resize')]
-            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객 타깃 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}target_selection_review','elements':buttons}]
+            buttons = [_button(f'{ACTION_PREFIX}target_review_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id, **({'view':'open'} if item.get('fixed_policy') and d == 'evidence' else {})}, style) for d,label,style in _TARGET_BUTTONS if not (item.get('fixed_policy') and d == 'resize') and (not item.get('read_only') or d == 'evidence')]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객 타깃 승인 완료*' if item.get('read_only') else '*고객 타깃 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}target_selection_review','elements':buttons}]
             continue
         if kind == 'page_preview_review' and item.get('run_id') and isinstance(item.get('revision'), int):
             buttons = [_button(f"{ACTION_PREFIX}page_preview_{d}", label,
@@ -178,6 +182,9 @@ def parse_action(body: dict) -> dict | None:
         action = {"type": "subtype_suggestion", "run_id": str(value["run"]),
                   "subtype": str(value["subtype"]), "colors": [str(c) for c in value["colors"]]}
         label = "추천 유형·상위 2색 선택"
+    elif value.get('k') == 'final_page_review' and value.get('run') and isinstance(value.get('tok'),str) and re.fullmatch(r'[0-9a-f]{12}',value['tok']) and value.get('d') in ('approve','edit','reject'):
+        action = {'type':'final_page_review','command':value['d'],'run_id':str(value['run']),'token':value['tok']}
+        label = {'approve':'완성본 승인','edit':'수정 요청','reject':'반려'}[value['d']]
     elif value.get('k') == 'segment_copy_review' and value.get('run') and value.get('tok') and value.get('d') in ('approve','reject'):
         action = {'type':'segment_copy_review','command':value['d'],'run_id':str(value['run']),'token':str(value['tok'])}
         label = '문구 승인' if value['d']=='approve' else '문구 반려'

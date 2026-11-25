@@ -16,6 +16,11 @@ def validated_updates(run, category, ids=None):
     if plan:
         from agent_system.orchestrator.tools.category_planning.period_context import scope_text, run_schedule
         rows_by_id = {str(r['article_id']): r for r in run.get('verified_candidate_rows') or []}
+        if 'analysis_audience' in plan:
+            from .category_planning.analysis_scope_r427 import run_scope
+            age = run_scope(run)
+            if any(rows_by_id.get(i, {}).get('analysis_age_min') != age['age_min'] or rows_by_id.get(i, {}).get('analysis_age_max') != age['age_max'] for i in chosen):
+                raise ValueError('승인 후보의 분석 연령이 현재 기획전과 다릅니다.')
         if any(rows_by_id.get(i, {}).get('analysis_period') != scope_text(plan) for i in chosen):
             raise ValueError('승인 후보의 과거 분석 기간이 현재 Run과 일치하지 않습니다.')
         period_updates['schedule'] = run_schedule(run)

@@ -52,8 +52,13 @@ def choose_products(articles, purchases, category, limit=5, *, subtype=None, col
     return merged[columns].reset_index(drop=True)
 
 
-def load_purchase_inputs(*, period_plan=None, scope="core"):
-    """H&M 20~39세·온라인 구매 조회. 기간 계획 미지정 시 기존 겨울 조건."""
+def load_purchase_inputs(*, period_plan=None, scope="core", audience=None):
+    """H&M 공통 연령·온라인 구매 조회. 기간 계획 미지정 시 기존 겨울 조건."""
+    from .analysis_scope_r427 import plan_scope
+    from ..audience_scope_r426 import normalize
+    age = normalize(audience) if audience is not None else plan_scope(period_plan)
+    if period_plan is not None and age != plan_scope(period_plan):
+        raise ValueError("상품 조회 연령과 기간 계획의 연령이 다릅니다.")
     from agent_system.common_tools.local_data import hm_products
     from common.db_client import get_analysis_connection
     articles = hm_products.articles()
@@ -68,17 +73,21 @@ def load_purchase_inputs(*, period_plan=None, scope="core"):
             FROM hm.transactions AS t
             JOIN hm.customers AS c ON c.customer_id = t.customer_id
             WHERE t.sales_channel_id = 2
-              AND c.age BETWEEN 20 AND 39
-        """ + date_sql + " GROUP BY 1", date_params).df()
+              AND c.age BETWEEN ? AND ?
+        """ + date_sql + " GROUP BY 1", [age["age_min"],age["age_max"],*date_params]).df()
     finally:
         connection.close()
     return articles, purchases
 
 
-def build_verified_step8(category: str, *, subtype=None, colors=None, period_plan=None) -> dict:
+def build_verified_step8(category: str, *, subtype=None, colors=None, period_plan=None, audience=None) -> dict:
     from .period_context import purchase_label, scope_text, period_note
     purchase_basis = purchase_label(period_plan)
-    articles, purchases = load_purchase_inputs(period_plan=period_plan) if period_plan is not None else load_purchase_inputs()
+    from .analysis_scope_r427 import plan_scope
+    from ..audience_scope_r426 import label, normalize
+    age = normalize(audience) if audience is not None else plan_scope(period_plan)
+    age_label = label(age)
+    articles, purchases = load_purchase_inputs(period_plan=period_plan, **({'audience':age} if audience is not None else {}))
     rows = choose_products(articles, purchases, category, subtype=subtype, colors=colors)
     review_rows = []
     if subtype:
@@ -97,8 +106,8 @@ def build_verified_step8(category: str, *, subtype=None, colors=None, period_pla
                 "review_candidate_rows": review_rows,
                 "product_result": {"search_products": {"rows": []}}, "data_sources": ["hm"]}
     lines = [f"■ {category} 과거 H&M 판매 참고 사례 ({len(rows)}개)",
-             ("기준: H&M 과거 데이터 / 20~39세 고객 / 온라인 채널 2 / 여성용(Ladieswear·Divided) 상품" + "\n" + period_note(period_plan)
-              if period_plan else "기준: H&M 과거 데이터 / 20~39세 고객 / 온라인 채널 2 / 12~2월 / 여성용(Ladieswear·Divided) 상품"),
+             (f"기준: H&M 과거 데이터 / {age_label} 고객 / 온라인 채널 2 / 여성용(Ladieswear·Divided) 상품" + "\n" + period_note(period_plan)
+              if period_plan else f"기준: H&M 과거 데이터 / {age_label} 고객 / 온라인 채널 2 / 12~2월 / 여성용(Ladieswear·Divided) 상품"),
              "과거 구매 기록순 참고 사례입니다. 현재 기획전에 판매할 상품을 확정하거나 추천하는 목록이 아닙니다.",
              "고객 성별은 확인할 수 없으며, 고객 나이도 거래 시점의 나이로 보증되지 않습니다.",
              f"세부 유형: {subtype or '미지정'} / 색상: {', '.join(colors or []) or '미지정'} / 유형은 상품명·설명 규칙 매칭이며 실측 성능 미검증.",
@@ -112,6 +121,8 @@ def build_verified_step8(category: str, *, subtype=None, colors=None, period_pla
             lines.append(f"- {item['prod_name']} / {item['article_id']} / {item['suitability_reason']}")
     if period_plan is not None:
         rows["analysis_period"] = scope_text(period_plan)
+    rows["analysis_age_min"] = age["age_min"]
+    rows["analysis_age_max"] = age["age_max"]
     rows["keyword_match_verified"] = bool(subtype) & rows["suitability_status"].eq("rule_matched")
     rows["selected_subtype"] = subtype or ""
     # 게이트는 Tool 결과와 같은 구조의 명시적 DB 조회 행에서만 후보를 인정한다.

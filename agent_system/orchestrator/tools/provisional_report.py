@@ -140,6 +140,8 @@ def build_draft(run, campaign):
     )
     validate_report_context(run, campaign)
     plan = run.get('period_plan')
+    from .category_planning.analysis_scope_r427 import report_label, EXTERNAL_NOTE
+    age_label = report_label(run)
     theme = _text(values.get("theme"), f"{'' if plan else '겨울 '}{_text(values.get('category'))} 컬렉션")
     schedule = run_schedule(run, _text(values.get("schedule")))
     basis = purchase_label(plan)
@@ -170,11 +172,11 @@ def build_draft(run, campaign):
             f"승인된 완성형 카피:\n{_full_copy(values.get('page'))}\n"
             "\n2. H&M 과거 판매 참고 사례 및 근거 (현재 판매 상품 아님)\n"
             + "\n".join(product_lines) + "\n"
-            "참고 사례 선정 근거: H&M 상품명·설명 기준 세부 유형 매칭과 20~39세·여성용 상품·"
+            f"참고 사례 선정 근거: H&M 상품명·설명 기준 세부 유형 매칭과 {age_label}·여성용 상품·"
             + ("검증된 핵심 월" if plan else "겨울(12~2월)") + "·온라인 채널의 과거 거래 기록."
             + " 현재 매출이나 재고는 아닙니다.\n"
             + (("\n".join(x for x in period_note(plan).splitlines() if not x.startswith("운영 일정:")) + "\n" + saved_comparison_note(run) + "\n") if plan else "") +
-            initial_evidence
+            initial_evidence + '\n' + EXTERNAL_NOTE + '\n'
             + "\n3. 제안 상품 구성 조건 및 콘텐츠 소구점\n"
             + ("최종 선택 소구점: " + ", ".join(points) if points else "최종 선택 소구점: 확인 필요") + "\n"
             + "\n".join(_selected_point_reasons(points, run)) + "\n"
@@ -183,7 +185,7 @@ def build_draft(run, campaign):
             "[작성 예정] 이 절은 타깃 선정 모델 및 최신 운영 데이터 연동 후 채울 공간입니다. "
             "아래 빈칸은 실제 분석 결과가 아니며, 고객 선정·발송을 수행하지 않았습니다.\n"
             "4.1. 핵심 타깃 정의 및 선정 조건\n"
-            "기획상 목표 고객: 20~39세 온라인 회원 (여성 의류 구매 이력은 참고 조건이며 고객 성별 확인값이 아님)\n"
+            f"기획상 목표 고객: {age_label} 온라인 회원 (여성 의류 구매 이력은 참고 조건이며 고객 성별 확인값이 아님)\n"
             "실제 적용 필터·데이터 기준일: ____________________ [추후 입력]\n"
             "ACTIVE 상태·마케팅 수신 동의 확인: ____________________ [추후 입력]\n"
             "4.2. 고객 점수 및 세그먼트별 선정 결과\n"
@@ -194,7 +196,7 @@ def build_draft(run, campaign):
             "제외 고객 / 대상자 수: ______명 / 제외 사유: ____________________\n"
             "※ 위 세그먼트 명칭은 설계용 목차이며 실제 고객 분류 결과가 아닙니다.\n"
             "4.3. 발송 규모 및 연령대 구성\n"
-            "최종 발송 가능 인원: ______명 / 20대: ______명 / 30대: ______명\n"
+            "최종 발송 가능 인원: ______명 / 연령 구성: ______\n"
             "발송 채널·연락 가능 여부: ____________________ [추후 입력]\n"
             "4.4. 대조군 및 실험 설계\n"
             "대조군 비율·인원: ____________________ [추후 입력]\n"

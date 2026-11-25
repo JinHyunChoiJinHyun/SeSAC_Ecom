@@ -62,7 +62,8 @@ def load_monthly_purchases(plan):
     articles = hm_products.articles()
     if 'analysis_as_of' in plan and str(plan['analysis_as_of']) != str(hm_products.data_as_of()):
         raise ValueError('H&M 기준일이 변경돼 기간별 구매 추이 분석을 중단합니다.')
-    clauses, args = [], []
+    from .analysis_scope_r427 import query_args
+    clauses, args = [], query_args(plan)
     for p in windows:
         clauses.append('(CAST(t.t_dat AS DATE) >= ? AND CAST(t.t_dat AS DATE) <= ?)')
         args.extend([p['start'].isoformat(), p['end'].isoformat()])
@@ -70,7 +71,7 @@ def load_monthly_purchases(plan):
            "CAST(t.article_id AS VARCHAR) AS article_id, COUNT(*) AS purchases "
            "FROM hm.transactions AS t "
            "JOIN hm.customers AS c ON c.customer_id = t.customer_id "
-           "WHERE t.sales_channel_id = 2 AND c.age BETWEEN 20 AND 39 AND ("
+           "WHERE t.sales_channel_id = 2 AND c.age BETWEEN ? AND ? AND ("
            + ' OR '.join(clauses) + ") GROUP BY 1, 2")
     conn = get_analysis_connection()
     try:
@@ -188,13 +189,14 @@ def load_aligned_weekly_purchases(plan, categories=None):
     links=pd.concat([eligible.loc[masks[c],['article_id']].assign(category=c) for c in cats],ignore_index=True)
     if links.article_id.duplicated().any():
         raise ValueError('H&M 상품군 분류가 중복되었습니다.')
-    clauses=[];args=[]
+    from .analysis_scope_r427 import query_args
+    clauses=[];args=query_args(plan)
     for w in windows:
         clauses.append('(CAST(t.t_dat AS DATE) BETWEEN ? AND ?)')
         args.extend([w['start'].isoformat(),w['end'].isoformat()])
     sql=('SELECT CAST(t.t_dat AS DATE) AS purchase_day, CAST(t.article_id AS VARCHAR) AS article_id, COUNT(*) AS purchases '
          'FROM hm.transactions t JOIN hm.customers c ON c.customer_id=t.customer_id '
-         'WHERE t.sales_channel_id=2 AND c.age BETWEEN 20 AND 39 AND ('+' OR '.join(clauses)+') '
+         'WHERE t.sales_channel_id=2 AND c.age BETWEEN ? AND ? AND ('+' OR '.join(clauses)+') '
          'GROUP BY 1,2')
     conn=get_analysis_connection()
     try: tx=conn.execute(sql,args).df()

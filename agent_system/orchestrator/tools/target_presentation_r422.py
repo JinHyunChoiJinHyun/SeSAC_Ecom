@@ -40,6 +40,7 @@ def evidence_lines(target):
     combos = ' / '.join(f"{c['product_type']} × {c['colour']}" for c in target.get('combos', []))
     cutoff = p.get('taste_cutoff')
     cutoff_text = f'{cutoff:.6f}' if cutoff is not None else '양수 취향 없음'
+    from .audience_scope_r426 import audience_text, population_text
     lines = [
         '분석 대상: ' + (combos or '확정 기획전 조합'),
         'H&M 과거 구매 데이터 · 기준일 2020-09-23 · 예측 기간 30일 · 취향 집계 180일',
@@ -49,6 +50,9 @@ def evidence_lines(target):
         '핵심=구매·취향 높음 / 교차판매=구매 높음·취향 낮음 / 재활성화=구매 낮음·취향 높음 / 제외=두 기준 미충족 / 미확인=취향 결측.',
         '정책 선정 근거: Jacket × Black·Greenish Khaki의 과거 두 기준일에서 각 4,000개 정책을 비교했습니다. 구매율과 고객군 규모를 함께 고려한 기본 정책입니다.',
     ]
+    if p.get('audience'):
+        lines[1:1] = [audience_text(p), population_text(p), '순위·취향 경계는 연령 제한 모집단 내에서 산출합니다.']
+    lines.append('다음 백테스트는 연령을 제한하지 않은 모집단의 정책 선정 결과입니다. 현재 연령 제한 모집단의 Lift는 미측정입니다.')
     for day,n,b,cn,cb,xn,xb,rn,rb,en,eb in BACKTEST:
         lines.append(f'{day} 정책 선정용 검증: 전체 {b/n*100:.2f}% / 핵심 {cb/cn*100:.2f}% / 교차판매 {xb/xn*100:.2f}% / 재활성화 {rb/rn*100:.2f}% / 제외 {eb/en*100:.2f}% / 핵심 Lift {(cb/cn)/(b/n):.2f}배.')
     lines += ['한계: 위 수치는 현재 실행 성능이나 독립 테스트, 실제 캠페인 전환 개선율이 아닙니다. 다른 상품 조합의 최적성은 미검증이며 재활성화 고객의 휴면 여부는 확인하지 않았습니다. 실제 고객 발송은 하지 않습니다.']
@@ -72,7 +76,9 @@ def render(target, path):
         d.text((x,y),text,font=font(size,bold),fill=color,anchor='mm')
     center(600,48,'고객 타깃 선정 결과',46,bold=True)
     center(600,106,f"전체 {p['population']:,}명   /   마케팅 후보 {p['total']:,}명",34,bold=True)
-    center(600,155,'R40 · 구매 예측 상위 3% × 양수 취향 상위 10%',25,muted)
+    from .audience_scope_r426 import label
+    age_label = label(p['audience'])+' · ' if p.get('audience') else ''
+    center(600,155,age_label+'R40 · 구매 예측 상위 3% × 양수 취향 상위 10%',25,muted)
     tiles=[('cross_sell','교차판매','새로운 스타일 제안','#DBEAFE','#1E40AF',150,235),
            ('core','핵심 타깃','구매 결정 촉진','#DCFCE7','#166534',665,235),
            ('excluded','제외','마케팅 대상 제외','#F1F5F9','#475569',150,485),

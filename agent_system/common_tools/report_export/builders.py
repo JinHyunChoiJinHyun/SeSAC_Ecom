@@ -413,6 +413,8 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
 
     values = (campaign or {}).get('values') or {}
     run = run or {}
+    from agent_system.orchestrator.tools.category_planning.analysis_scope_r427 import report_label, EXTERNAL_NOTE
+    age_label = report_label(run)
     # 동일 Run의 검증된 승인 카피가 존재하면 보고서 생성 직전 재검사한다.
     # legacy Run의 미검증 상태를 PASS로 표현하지는 않는다.
     from agent_system.validation.campaign_evidence_gate import require_approved_copy_for_report
@@ -498,10 +500,11 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
             ['실제 발송 규모', '추후 작성 (타깃 모델 미연결)']])]),
         Section('3. 상품 선정 및 시장 분석 근거', [
             Paragraph('3.1 H&M 과거 구매 근거', 'subheading'),
-            Paragraph('H&M 과거 20~39세 고객·여성용 상품·' + ('검증된 핵심 월' if plan else '겨울(12~2월)') + '·온라인 구매 기록을 참고했습니다. 고객 성별과 현재 수요·재고는 확인되지 않았습니다.'),
+            Paragraph(f'H&M 과거 {age_label} 고객·여성용 상품·' + ('검증된 핵심 월' if plan else '겨울(12~2월)') + '·온라인 구매 기록을 참고했습니다. 고객 성별과 현재 수요·재고는 확인되지 않았습니다.'),
             *([Paragraph(line) for line in period_note(plan).splitlines() if not line.startswith("운영 일정:")] if plan else []),
             *([Paragraph(saved_comparison_note(run))] if saved_comparison_note(run) else []),
             Paragraph(total_note + ' (현재 판매량 아님)'),
+            Paragraph(EXTERNAL_NOTE),
             Paragraph("3.2 네이버 검색 관심도 분석", "subheading"),
             *_draft_blocks(naver_notes),
             Paragraph("3.3 무신사 경쟁 시장 근거", "subheading"),
@@ -536,7 +539,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
     target.extend([
         Paragraph('6.1 핵심 타깃 정의 및 선정 조건'),
         Table(['항목', '확인 결과'], [
-            ['기획상 목표', '20~39세 온라인 회원 (성별 확인값 아님)'],
+            ['기획상 목표', f'{age_label} 온라인 회원 (성별 확인값 아님)'],
             ['적용 필터·데이터 기준일', '________________ [추후 입력]'],
             ['회원 상태·마케팅 수신 동의', '________________ [추후 입력]']]),
         Paragraph('6.2 고객 점수 및 세그먼트별 선정 결과'),
@@ -547,7 +550,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
             ['교차 판매 후보', '____명', '________________'],
             ['제외 고객', '____명', '________________']]),
         Paragraph('6.3 발송 규모 및 연령대 구성'),
-        Paragraph('최종 발송 가능 인원: ____명 / 20대: ____명 / 30대: ____명'),
+        Paragraph('최종 발송 가능 인원: ____명 / 연령 구성: ____'),
         Paragraph('발송 채널·연락처 확인: ____________________ [추후 입력]'),
         Paragraph('6.4 대조군 및 실험 설계'),
         Paragraph('대조군 인원·비율: ____________________ / 색상 노출·메시지 실험: ____________________'),
@@ -578,6 +581,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
     selected = confirmed_for_report(run, campaign or {})
     if selected:
         groups = selected['groups']
+        from agent_system.orchestrator.tools.audience_scope_r426 import audience_text, population_text
         from agent_system.orchestrator.tools.campaign_copy_r41 import approved as approved_copy41
         package41 = approved_copy41(run, campaign or {}) if selected.get('policy') == 'r40_v1' else None
         if selected.get('policy') == 'r40_v1' and run.get('segment_copy_r41') and not package41:
@@ -590,12 +594,13 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
         sections[5] = Section('6. 고객 타깃 선정 및 메시지 운영', [
             Paragraph('6.1 고객 분석 및 선정 기준', 'subheading'),
             Paragraph('분석 기준: H&M 과거 구매 데이터 기반 시뮬레이션 (2020.09.23 기준)'),
-            Paragraph('직전 90일 구매 고객 전체의 조합별 30일 예측 순위와 180일 취향을 사용합니다. 동점은 평균 백분위로 처리하며 구매 순위·취향 각각 조합별 최대값을 사용합니다. 과거 자료의 순위 기반 후보이며 실제 발송 가능 인원은 아닙니다.' if selected.get('policy') == 'r40_v1' else '직전 90일 구매 고객 전체(연령 필터 미적용)의 품목·색상별 30일 구매 예측 순위입니다. 색상별 상위 고객을 선정하고 중복 고객을 별도 그룹으로 분리했습니다.'),
+            *([Paragraph(audience_text(selected)), Paragraph(population_text(selected)), Paragraph(f'시장·상품 분석의 저장 연령 범위: {age_label}. 저장된 연령은 구매 당시 또는 현재 연령이 아닙니다. 연령 제한 모집단의 정책 Lift는 미검증입니다.')] if selected.get('audience') else []),
+            Paragraph('직전 90일 구매 고객 중 연령 조건을 충족한 모집단의 조합별 30일 예측 순위와 180일 취향을 사용합니다. 구매 이력은 전체 채널 기준입니다. 동점은 평균 백분위로 처리하며 구매 순위·취향 각각 조합별 최대값을 사용합니다. 과거 자료의 순위 기반 후보이며 실제 발송 가능 인원은 아닙니다.' if selected.get('policy') == 'r40_v1' else '직전 90일 구매 고객 전체(연령 필터 미적용)의 품목·색상별 30일 구매 예측 순위입니다. 색상별 상위 고객을 선정하고 중복 고객을 별도 그룹으로 분리했습니다.'),
             Table(['모델 분석 품목', '색상', '점수 산출 고객'], [[c['product_type'], c['colour'], f"{c['total']:,}명"] for c in selected['combos']]),
             Paragraph(f"선정 기준: {selection_basis(selected)} / 전체 중복 제거 {selected['total']:,}명"),
             *([Paragraph(f"전체 점수화 고객: {selected['population']:,}명 / 취향 경계값: {selected['taste_cutoff']:.6f}" if selected['taste_cutoff'] is not None else f"전체 점수화 고객: {selected['population']:,}명 / 양수 취향 없음"),
                Table(['전체 고객군', '고객 수', '전체 대비 비율'], [[g['name'], f"{g['count']:,}명", f"{g['share_percent']:.2f}%"] for g in selected['all_groups']]),
-               Paragraph('제외·취향 미확인은 집계만 제공하고 후보 CSV에는 포함하지 않습니다. 재활성화는 취향 높음·구매 순위 낮음의 분류명이며 휴면 여부는 확인하지 않았습니다. Jacket 두 색상 백테스트에서 선정한 기본 정책이며 다른 조합의 최적성은 미검증입니다.')] if selected.get('policy') == 'r40_v1' else []),
+               Paragraph('제외·취향 미확인은 집계만 제공하고 후보 CSV에는 포함하지 않습니다. 재활성화는 취향 높음·구매 순위 낮음의 분류명이며 휴면 여부는 확인하지 않았습니다. Jacket 두 색상·전체 연령 모집단 백테스트에서 선정한 기본 정책이며 연령 제한 모집단과 다른 조합의 최적성은 미검증입니다.')] if selected.get('policy') == 'r40_v1' else []),
             Paragraph('6.2 고객군별 선정 결과', 'subheading'),
             Table(['고객군', '고객 수', '전체 대비 비율' if selected.get('policy') == 'r40_v1' else '비율'], [[g['name'], f"{g['count']:,}명", f"{g['share_percent']:.2f}%"] for g in groups]),
             Paragraph('6.3 고객군별 메시지 및 운영 방향', 'subheading'),

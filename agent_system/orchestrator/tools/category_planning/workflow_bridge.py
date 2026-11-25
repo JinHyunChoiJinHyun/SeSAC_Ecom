@@ -11,10 +11,9 @@ from shared_analysis.market.category_comparison_v2 import save_recent_chart  # �
 
 
 def parse_scope(request: str) -> dict:
-    """지원하지 않는 고객조건은 묵시적으로 20~39세로 바꾸지 않는다."""
+    from ..audience_scope_r426 import parse_age
     txt = str(request or '')
-    if not re.search(r'20\s*[·,~/~-]\s*30\s*대|20\s*~\s*39\s*세|20\s*30\s*대|2030\s*대|20대\s*(?:와|및|,|·|/|~)\s*30대', txt):
-        raise ValueError('현재 연결된 카테고리 분석은 20~39세 조건만 검증됐습니다. 요청한 연령 필터를 임의 대체하지 않습니다.')
+    age = parse_age(txt)
     if '온라인' in txt and '오프라인' in txt:
         raise ValueError('온라인·오프라인 혼합 요청은 아직 연결되지 않았습니다.')
     if '온라인' in txt:
@@ -23,11 +22,17 @@ def parse_scope(request: str) -> dict:
         channel = 'offline'
     else:
         raise ValueError('요청에 온라인/오프라인 채널 조건을 명시해 주세요.')
-    return {'age_min': 20, 'age_max': 39, 'channel': channel, 'winter_only': True}
+    return {**age, 'channel': channel, 'winter_only': True}
 
 
 def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, *, period_plan=None) -> dict:
     scope = parse_scope(request)
+    from .analysis_scope_r427 import bind_plan, EXTERNAL_NOTE
+    from ..audience_scope_r426 import label
+    age = {k:scope[k] for k in ('age_min','age_max')}
+    age_label = label(age)
+    if period_plan is not None:
+        period_plan = bind_plan(period_plan, age)
     from agent_system.common_tools.local_data.category_sales import category_sales
     from agent_system.common_tools.external_data import musinsa_sample
     output = Path(output_dir)
@@ -58,8 +63,8 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, 
         if period_plan is not None and not r['hm_purchases']:
             continue
         models = int(r.get('hm_product_count') or 0)
-        notes = [f"H&M 과거 핵심 월 온라인 구매 기록 {r['hm_purchases']:,}건 (20~39세, 여성용 상품)" if period_plan else
-                 f"H&M 과거 겨울 온라인 구매 기록 {r['hm_purchases']:,}건 (20~39세, 여성용 상품)"]
+        notes = [f"H&M 과거 핵심 월 온라인 구매 기록 {r['hm_purchases']:,}건 ({age_label}, 여성용 상품)" if period_plan else
+                 f"H&M 과거 겨울 온라인 구매 기록 {r['hm_purchases']:,}건 ({age_label}, 여성용 상품)"]
         if models:
             notes.append(f"모델당 구매 기록 약 {r['hm_purchases']/models:,.1f}건 (상품군 크기 참고)")
         if r['musinsa_sample_products']:
@@ -128,10 +133,12 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, 
     if weekly is not None:
         week_csv=weekly.copy();week_csv['source']='hm_campaign_aligned_weekly';week_csv['metric']='purchases_per_day'
         frame=pd.concat([frame,week_csv],ignore_index=True)
+    frame['analysis_age_min'] = age['age_min']
+    frame['analysis_age_max'] = age['age_max']
     lines = ['■ 5개 상품군 비교 및 주력 상품군 추천',
-             '조건: 20~39세 고객 / ' + ('온라인' if scope['channel'] == 'online' else '오프라인') +
+             f'조건: {age_label} 고객 / ' + ('온라인' if scope['channel'] == 'online' else '오프라인') +
              (' / H&M 여성용 상품 / 과거 핵심 월 거래' if period_plan else ' / H&M 여성용 상품 / 과거 12~2월 거래'),
-             '고객 성별은 H&M DB에서 확인할 수 없습니다. 과거 거래 기록과 현재 외부 동향은 별도 근거입니다.',
+             '고객 성별은 H&M DB에서 확인할 수 없습니다. 과거 거래 기록과 현재 외부 동향은 별도 근거입니다.', EXTERNAL_NOTE,
              '', '추천 후보 (검토 순서, 확정된 시장 인기 순위 아님)']
     if period_plan is not None:
         lines.insert(2, period_note(period_plan))

@@ -230,6 +230,10 @@ def build_period_product_result(category, plan, subtype_flow=False):
     from .verified_products import load_purchase_inputs, purchase_candidates
     from .subtype_selection import build_inventory, PATTERNS, subtype_mask
 
+    from .analysis_scope_r427 import plan_scope
+    from ..audience_scope_r426 import label
+    age = plan_scope(plan)
+    age_label = label(age)
     articles, core = load_purchase_inputs(period_plan=plan, scope='core')
     selected = purchase_candidates(articles, core, category)
     core_total = int(selected['winter_online_purchases'].sum())
@@ -245,18 +249,18 @@ def build_period_product_result(category, plan, subtype_flow=False):
                                   for key in PATTERNS}
     inventory = build_inventory(category, articles, core) if subtype_flow else {}
     for key, value in inventory.items():
-        value.update(period_label=purchase_label(plan), period_description=scope_text(plan),
+        value.update(analysis_age_label=age_label, period_label=purchase_label(plan), period_description=scope_text(plan),
                      before_purchases=previous_inventory.get(key, 0) if before is not None else None,
                      core_days=scope_days(plan, 'core'), before_days=scope_days(plan, 'before'))
     tags = Counter(tag for values in selected.get('style_tags', []) if isinstance(values, (list, tuple, set)) for tag in set(values))
     colors = selected['colour_group_name'].dropna().value_counts().to_dict()
-    snapshot = {'basis': '핵심 분석 월 구매 기록이 있는 여성용 상품 구성 (20~39세·온라인)',
+    snapshot = {'basis': f'핵심 분석 월 구매 기록이 있는 여성용 상품 구성 ({age_label}·온라인)',
                 'total_articles': int(selected['article_id'].nunique()),
                 'total_products': int(selected['product_code'].nunique()),
                 'colour_counts': {str(k): int(v) for k,v in colors.items()},
                 'style_tag_counts': dict(tags)}
     summary = period_table_note(plan, core_total, before)
-    return {'final_answer': f"{category} H&M 상품 분석\n{period_note(plan)}\n{summary}\n"
+    return {'final_answer': f"{category} H&M 상품 분석 ({age_label})\n{period_note(plan)}\n{summary}\n"
                             f"핵심 월 거래 확인 상품 {snapshot['total_articles']:,}개 / 모델 {snapshot['total_products']:,}개. "
                             '주력 상품 유형 분석은 상품군 선택 이후 진행하며, 색상·스타일은 상품 유형 선택 후 분석합니다.',
             'dataframe': pd.DataFrame([{'category': category, 'core_purchases': core_total, 'before_purchases': before,
@@ -276,6 +280,12 @@ def validate_report_context(run, campaign):
     values = (campaign or {}).get('values') or {}
     if not plan or not complete_scope(plan, 'core'):
         raise ValueError('검증된 과거 분석 기간이 없습니다. 현재 Run의 분석을 먼저 완료하세요.')
+    if 'analysis_audience' in plan:
+        from .analysis_scope_r427 import run_scope
+        age = run_scope(run)
+        if any(r.get('analysis_age_min') != age['age_min'] or r.get('analysis_age_max') != age['age_max']
+               for r in run.get('verified_candidate_rows') or []):
+            raise ValueError('확정 상품의 분석 연령이 현재 기획전과 다릅니다. 새 분석을 시작하세요.')
     if not schedule_matches(run, values.get('schedule')):
         raise ValueError('승인된 운영 일정과 분석 기간이 일치하지 않습니다.')
     if any(not confirmed_since(campaign, key, run.get('started_at', '')) for key in ('products', 'schedule', 'page')):

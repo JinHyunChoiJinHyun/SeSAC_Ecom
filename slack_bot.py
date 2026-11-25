@@ -739,11 +739,11 @@ class SlackBridge:
                         from agent_system.orchestrator.graph import get_graph, pending_interrupt
                         from interfaces.slack.target_review_r422 import toggle_blocks
                         message_key = (event['channel'], parsed['message_ts'])
-                        if message_key in self._resolved_target_messages:
-                            raise ValueError('이미 선택한 제안입니다.')
                         graph = get_graph()
                         snap = graph.get_state({'configurable':{'thread_id':_current_session}})
                         values = getattr(snap, 'values', None) or {}
+                        if message_key in self._resolved_target_messages and (values.get('workflow_run') or {}).get('campaign_target_r39',{}).get('status') != 'confirmed':
+                            raise ValueError('승인 처리 중이거나 반려된 제안입니다.')
                         blocks = toggle_blocks(parsed, values.get('workflow_run') or {},
                                                values.get('campaign') or {},
                                                values.get('pending_approval') or pending_interrupt(graph,_current_session))
@@ -762,9 +762,19 @@ class SlackBridge:
 
     def _resolve_and_enqueue(self, client, event, parsed, resolved_blocks):
         try:
+            blocks=resolved_blocks(parsed["blocks"], parsed["label"], event["user"])
+            if parsed['action'].get('type')=='target_selection_review' and parsed['action'].get('command')=='approve':
+                import json, uuid
+                for block in parsed['blocks']:
+                    for button in block.get('elements',[]):
+                        if str(button.get('action_id','')).endswith('_evidence'):
+                            value=json.loads(button['value'])
+                            if value.get('view') not in ('open','close'): continue
+                            value['view']='open'
+                            evidence={**button,'value':json.dumps(value,ensure_ascii=False),'text':{'type':'plain_text','text':'선정 근거 보기'}}
+                            blocks.append({'type':'actions','block_id':'cartsignal_target_evidence_'+uuid.uuid4().hex,'elements':[evidence]})
             client.chat_update(channel=event["channel"], ts=parsed["message_ts"],
-                               text=f"선택: {parsed['label']}",
-                               blocks=resolved_blocks(parsed["blocks"], parsed["label"], event["user"]))
+                               text=f"선택: {parsed['label']}", blocks=blocks)
         except Exception as exc:  # 버튼을 못 지워도 처리는 계속 (같은 버튼 두 번째 클릭은 아래에서 차단)
             LOGGER.error("버튼 메시지 수정 실패 (%s)", type(exc).__name__)
         event = {**event, "cart_signal_action": parsed["action"]}
@@ -1207,7 +1217,9 @@ class SlackBridge:
                 LOGGER.exception('R39_REPORT_REGISTER_FAILED')
                 self._notify(client, event, '사내 보고 등록에 실패했습니다. 보고서를 다시 요청해 주세요.')
         # 승인 대기·워크플로 멈춤이면 확인 버튼을 붙입니다 (글자로 '승인'을 쓰지 않아도 됨)
-        self._post_actions(client, event, result)
+        final_review = any(a.get('type')=='final_page_review' for a in (result.get('actions') or []))
+        if not (final_review and result.get('visualization_path') and (delivery_status!='success' or delivery_result.get('share_confirmation') is False)):
+            self._post_actions(client, event, result)
         # 승인 수신자 확인은 별도 네/아니요 버튼으로 표시
         confirmation = result.get('recipient_confirmation') if isinstance(result, dict) else None
         if isinstance(result, dict) and result.get("recipient_choose"):
@@ -1467,6 +1479,16 @@ def main():
 
         # CART_SIGNAL_R32_INTEGRATED: 모든 CART_SIGNAL 버튼은 승인자/메일 라우터보다 먼저 처리합니다.
         # 일반 채팅과 cartrecipient_* 이메일 승인 버튼의 동작은 변경하지 않습니다.
+        if (event.get('cart_signal_action') or {}).get('type') == 'final_page_review':
+            from agent_system.orchestrator.tools import campaign_page_final_r428 as final428
+            try:
+                snapshot = conversation_graph.get_state({'configurable':{'thread_id':_active_id}})
+                values = getattr(snapshot,'values',None) or {}
+                result = final428.handle_button(event['cart_signal_action'],BASE_DIR,event,values.get('workflow_run') or {},values.get('campaign') or {})
+                return {**result,'thread_id':_active_id}
+            except Exception as exc:
+                LOGGER.warning('R4282 final page button failed (%s)',type(exc).__name__)
+                return {'turn_type':'chitchat','final_answer':'완성본 검토 상태를 확인할 수 없습니다. 최신 완성본을 다시 조회해 주세요.','completed_steps':[]}
         if "cart_signal_action" in event:
             from agent_system.orchestrator.tools.button_dispatch_r32 import dispatch_cart_signal_button
             from env.model_settings import get_request_config
@@ -1552,8 +1574,37 @@ def main():
         from agent_system.orchestrator.tools import campaign_target_r39 as target39
         from agent_system.approval_demo import recipient_flow as recipient39
         _target_run = (_target_values.get('workflow_run') or {}) if '_target_values' in locals() else {}
+        from agent_system.orchestrator.tools import campaign_page_final_r428 as final428
+        from interfaces.slack.target_review_r422 import evidence_request, replay
+        prior_messages = (_target_values.get('messages') or []) if '_target_values' in locals() else []
+        previous = str(getattr(prior_messages[-1], 'content', '')) if prior_messages else ''
+        try:
+            final_record428 = final428.read(BASE_DIR,event,_target_run) if _target_run.get('run_id') else None
+        except (ValueError,OSError):
+            final_record428 = None
+        kind428 = final428.intent(question, previous, reviewing=bool(final_record428 and final_record428.get('status')=='review'))
+        if kind428:
+            return {**final428.handle(kind428,question,BASE_DIR,event,_target_run,_target_campaign),'thread_id':_active_id}
+        if evidence_request(question):
+            try: return replay(_target_run,_target_campaign,_active_id,event.get('user',''))
+            except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
         if re.fullmatch(r'(?:최종본(?:으로)?\s*(?:만들어|변환해)|PDF\s*(?:로)?\s*변환해)(?:줘|주세요)[.!]?',str(question).strip(),re.I):
             return {'turn_type':'chitchat','final_answer':'수정한 Word 파일을 첨부해 주세요. 첨부한 파일을 PDF로 변환합니다.','completed_steps':[]}
+        from agent_system.orchestrator.tools import audience_scope_r426 as audience426
+        if (_target_run.get('workflow') == 'trend_planning' and _target_run.get('status') != 'cancelled'
+                and (audience426.age_change_request(question) or audience426.reselection_request(question) or audience426.confirmation_request(question)
+                     or (target39.target_request(question) and (_target_run.get('campaign_target_r39') or {}).get('policy') == 'r40_v1'
+                         and not audience426.current_target(_target_run.get('campaign_target_r39'), _target_campaign, _target_run)))):
+            # 발송 중/결과 불명확 상태를 덮어쓰지 않는다. 원래 스레드와 다른 스레드도 검사.
+            try:
+                if recipient39.campaign_delivery_busy(BASE_DIR,event,_target_run.get('run_id')):
+                    return {'turn_type':'chitchat','final_answer':'이메일 발송 중이거나 결과 확인이 필요합니다. 결과 확인 후 고객 타깃을 변경해 주세요.','completed_steps':[]}
+            except (ValueError,OSError):
+                return {'turn_type':'chitchat','final_answer':'기존 발송 상태를 확인하지 못해 고객 타깃을 변경하지 않았습니다.','completed_steps':[]}
+            from env.model_settings import get_request_config
+            return run_slack_question(question=question, graph_runner=lambda q: run_conversation_turn(
+                question=q, thread_id=_active_id, llm_config=get_request_config().public(), graph=conversation_graph,
+                action=event.get('cart_signal_action'), metadata={'source':'slack','slack_channel':event.get('channel',''),'slack_user':event.get('user','')}))
         if target39.in_campaign(_target_run) or target39.delivery_allowed(_target_run):
             from agent_system.approval_demo.mail_copy_r424 import is_edit
             selected_for_mail=target39.confirmed_for_report(_target_run,_target_campaign)
@@ -1577,6 +1628,8 @@ def main():
                     except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
                 if not selected39 or not recipient39.matches_campaign_report(BASE_DIR, event, target39.email_summary(_target_run, selected39)):
                     return {'turn_type':'chitchat', 'final_answer':'현재 기획전의 Word 보고서를 만든 스레드에서 수정본을 PDF로 변환한 뒤 사내 보고 대상을 지정해 주세요. 고객에게 직접 발송하지 않습니다.', 'completed_steps':[]}
+                try: final428.sync_delivery(BASE_DIR,event,_target_run,_target_campaign)
+                except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
                 recipient_result = recipient39.start_recipient_confirmation(question, event, BASE_DIR)
                 if recipient_result is not None:
                     return recipient_result
@@ -1910,6 +1963,12 @@ def main():
                                 return
                             if not selected or saved.get('run_id') != run.get('run_id') or saved.get('fingerprint') != selected['fingerprint']:
                                 client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text='현재 기획전과 일치하지 않는 보고 요청입니다. 이메일은 전송하지 않았습니다.')
+                                return
+                        if saved.get('kind')=='r39' and action.get('action_id')=='cartrecipient_send':
+                            from agent_system.orchestrator.tools.campaign_page_final_r428 import sync_delivery
+                            try: sync_delivery(BASE_DIR,evt,run,values.get('campaign') or {},sending=True)
+                            except ValueError as exc:
+                                client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text=str(exc))
                                 return
                         from agent_system.approval_demo.delivery_r42 import ROLE_KEYS, prepare_send, post_buttons
                         action_id = action['action_id']

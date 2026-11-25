@@ -35,7 +35,7 @@ _UNDO_RE = re.compile(
     re.I,
 )
 _EDIT_RE = re.compile(
-    r"(?:페이지|기획전\s*페이지|페이지\s*틀|배너|히어로|상품\s*카드|CTA|버튼|상단|하단|전체\s*톤|배경|디자인).*(?:수정|바꿔|변경|다듬|줄여|늘려|강조|키워|넣어|빼줘)",
+    r"(?:페이지|기획전\s*페이지|페이지\s*틀|배너|히어로|제목|상품\s*카드|CTA|버튼|상단|하단|전체\s*톤|배경|디자인).*(?:수정|바꿔|변경|복원|다듬|줄여|늘려|강조|키워|넣어|빼줘)",
     re.I,
 )
 
@@ -114,17 +114,31 @@ def _apply_feedback(spec: dict, feedback: str) -> dict:
     lower = text.lower()
     updated["feedback_note"] = text
 
-    # 명시적으로 지정한 배너 문구는 추측 없이 그대로 반영한다.
-    explicit = re.search(r"""(?:배너|히어로)(?:\s*(?:제목|문구))?(?:\s*[을를])?\s*["“‘']([^"”’']{1,60})["”’']\s*(?:로|으로)""", text)
+    # 제목 유지 조건을 스타일 규칙보다 우선한다.
+    keep_title = bool(re.search(r"제목(?:은|을|이|만)?\s*(?:그대로|유지|보존|변경하지|바꾸지|수정하지)", text))
+    keep_rest = bool(re.search(r"(?:나머지|그\s*외).*?(?:그대로|유지|보존)", text))
+    explicit = re.search(r"""(?:배너|히어로|제목)(?:\s*(?:제목|문구))?(?:\s*[을를])?\s*["“‘']([^"”’']{1,60})["”’']\s*(?:으로|로)""", text)
+    # 이미 선택한 원래 제목을 지칭한 유지 요청은 잘못 변경된 시안에서도 복구한다.
+    preserved_title = spec.get("hero_title", "")
+    if keep_title and spec.get("headline") and spec["headline"] in text:
+        preserved_title = spec["headline"]
     if explicit:
-        # 지정 문구 내부의 스타일 단어는 별도 수정 지시로 해석하지 않는다.
         text = text[:explicit.start()] + text[explicit.end():]
         lower = text.lower()
+    elif keep_title:
+        # 제목 자체에 포함된 스타일 단어를 수정 지시로 오인하지 않는다.
+        if preserved_title:
+            text = text.replace(preserved_title, "")
+        lower = text.lower()
+    # 명시적 제목 교체 + 나머지 유지 요청은 다른 요소를 건드리지 않는다.
+    if explicit and keep_rest and not keep_title:
+        updated["hero_title"] = explicit.group(1)
+        return updated
     if re.search(r"따뜻|감성|포근|부드럽", text):
         updated["theme"] = "warm"
         updated["hero_badge"] = "WINTER MOOD"
         updated["hero_body"] = _shorten(updated["hero_body"] or "", 55)
-        if "겨울" not in updated["hero_title"]:
+        if not keep_title and re.search(r"제목(?:을|도|만)?\s*.*(?:따뜻|감성|포근|부드럽)", text) and "겨울" not in updated["hero_title"]:
             updated["hero_title"] = "포근한 겨울의 스타일링"
     if re.search(r"세련|프리미엄|고급|미니멀", text):
         updated["theme"] = "premium"
@@ -136,7 +150,8 @@ def _apply_feedback(spec: dict, feedback: str) -> dict:
     if re.search(r"밝게|화이트\s*배경|깔끔|심플", text):
         updated["theme"] = "modern"
     if re.search(r"짧게|간결|한줄|짧은", text):
-        updated["hero_title"] = _shorten(updated["hero_title"], 20)
+        if not keep_title:
+            updated["hero_title"] = _shorten(updated["hero_title"], 20)
         updated["hero_body"] = _shorten(updated["hero_body"], 42)
         updated["hero_note"] = _shorten(updated["hero_note"], 42)
     if re.search(r"상단|히어로|배너", text):
@@ -154,7 +169,9 @@ def _apply_feedback(spec: dict, feedback: str) -> dict:
         updated["layout_variant"] = 2
     if re.search(r"작게|간단히", text):
         updated["layout_variant"] = 3
-    if explicit:
+    if keep_title:
+        updated["hero_title"] = preserved_title
+    elif explicit:
         updated["hero_title"] = explicit.group(1)
     if updated == spec or all(updated[k] == spec[k] for k in ("theme", "layout_variant", "hero_title", "hero_badge", "hero_body", "hero_note", "cta", "section_titles")):
         raise ValueError("어떤 페이지 요소를 바꿔야 할지 확인되지 않았습니다. 예: '상단 배너를 프리미엄 톤으로 바꿔줘', '배너 제목 \"겨울의 새로운 스타일\"로 바꿔줘'")
@@ -261,7 +278,22 @@ def _wrap(draw, text: str, font, width: int) -> list[str]:
 
 
 
-def render_preview_image(spec: dict, path: Path) -> str:
+def _paste_asset(canvas, asset, box, radius, *, cover):
+    from PIL import ImageOps
+    x,y,x2,y2 = box
+    size=(x2-x,y2-y)
+    if cover:
+        fitted=ImageOps.fit(asset.convert('RGB'),size,method=Image.Resampling.LANCZOS)
+    else:
+        fitted=Image.new('RGB',size,(245,241,236))
+        contained=ImageOps.contain(asset.convert('RGB'),size,method=Image.Resampling.LANCZOS)
+        fitted.paste(contained,((size[0]-contained.width)//2,(size[1]-contained.height)//2))
+    mask=Image.new('L',size,0)
+    ImageDraw.Draw(mask).rounded_rectangle((0,0,size[0]-1,size[1]-1),radius=radius,fill=255)
+    canvas.paste(fitted,(x,y),mask)
+
+
+def render_preview_image(spec: dict, path: Path, *, final_assets=None) -> str:
     """간단한 페이지 목업 PNG를 생성한다."""
     if Image is None:
         raise RuntimeError("Pillow가 설치되어 있지 않아 페이지 이미지를 생성할 수 없습니다. pip install Pillow 실행 후 재시도하세요.")
@@ -279,8 +311,9 @@ def render_preview_image(spec: dict, path: Path) -> str:
 
     # Outer panel
     draw.rounded_rectangle((60, 40, width - 60, height - 40), radius=30, fill=pal["panel"])
-    draw.text((95, 75), "CART SIGNAL — 기획전 페이지 틀 미리보기", font=h2_f, fill=pal["ink"])
-    draw.text((95, 120), f"선택 카피 기반 시안 · revision {spec.get('revision', 1)} · layout {spec.get('layout_variant', 1)}", font=small_f, fill=pal["muted"])
+    if not final_assets:
+        draw.text((95, 75), "CART SIGNAL — 기획전 페이지 틀 미리보기", font=h2_f, fill=pal["ink"])
+        draw.text((95, 120), f"선택 카피 기반 시안 · revision {spec.get('revision', 1)} · layout {spec.get('layout_variant', 1)}", font=small_f, fill=pal["muted"])
 
     # Hero block
     hero = (95, 180, width - 95, 780)
@@ -300,12 +333,18 @@ def render_preview_image(spec: dict, path: Path) -> str:
         draw.text((hero[0] + 52, note_y), line, font=small_f, fill=pal["muted"])
         note_y += 32
 
+    if final_assets and note_y > hero[3]-20:
+        raise ValueError("승인 문구가 배너 영역을 초과합니다. 시안을 수정해 주세요.")
+
     # hero visual placeholder
     image_box = (hero[0] + 760, hero[1] + 54, hero[2] - 50, hero[3] - 54)
-    draw.rounded_rectangle(image_box, radius=28, outline=pal["accent"], width=4, fill=pal["panel"])
-    draw.line((image_box[0] + 20, image_box[1] + 20, image_box[2] - 20, image_box[3] - 20), fill=pal["accent"], width=3)
-    draw.line((image_box[2] - 20, image_box[1] + 20, image_box[0] + 20, image_box[3] - 20), fill=pal["accent"], width=3)
-    draw.text((image_box[0] + 42, image_box[1] + 38), "HERO VISUAL\n(실제 상품 이미지 확정 전 자리표시자)", font=small_f, fill=pal["muted"])
+    if final_assets:
+        _paste_asset(img, final_assets['hero'], image_box, 28, cover=True)
+    else:
+        draw.rounded_rectangle(image_box, radius=28, outline=pal["accent"], width=4, fill=pal["panel"])
+        draw.line((image_box[0] + 20, image_box[1] + 20, image_box[2] - 20, image_box[3] - 20), fill=pal["accent"], width=3)
+        draw.line((image_box[2] - 20, image_box[1] + 20, image_box[0] + 20, image_box[3] - 20), fill=pal["accent"], width=3)
+        draw.text((image_box[0] + 42, image_box[1] + 38), "HERO VISUAL\n(실제 상품 이미지 확정 전 자리표시자)", font=small_f, fill=pal["muted"])
 
     # Color chips
     y = 835
@@ -320,7 +359,7 @@ def render_preview_image(spec: dict, path: Path) -> str:
 
     # Product cards
     y = 980
-    draw.text((95, y), spec.get("section_titles", {}).get("cards", "상품 카드 미리보기"), font=h2_f, fill=pal["ink"])
+    draw.text((95, y), "상품 컬렉션" if final_assets else spec.get("section_titles", {}).get("cards", "상품 카드 미리보기"), font=h2_f, fill=pal["ink"])
     card_y = y + 58
     gap = 24
     card_w = (width - 190 - gap * 3) // 4
@@ -328,11 +367,21 @@ def render_preview_image(spec: dict, path: Path) -> str:
         x1 = 95 + i * (card_w + gap)
         x2 = x1 + card_w
         draw.rounded_rectangle((x1, card_y, x2, card_y + 360), radius=24, fill=pal["chip"] if spec.get("layout_variant") == 2 else pal["panel"], outline=pal["accent"] if spec.get("layout_variant") == 2 else pal["chip"], width=4 if spec.get("layout_variant") == 2 else 3)
-        draw.rounded_rectangle((x1 + 18, card_y + 18, x2 - 18, card_y + 210), radius=18, fill=pal["card"])
-        draw.text((x1 + 36, card_y + 42), f"PRODUCT {i + 1}", font=small_f, fill=pal["accent"])
-        draw.text((x1 + 26, card_y + 240), "상품명 자리", font=small_f, fill=pal["ink"])
-        draw.text((x1 + 26, card_y + 277), "디자인 포인트 비교", font=tiny_f, fill=pal["muted"])
-        draw.text((x1 + 26, card_y + 304), "색상/디테일/실루엣", font=tiny_f, fill=pal["muted"])
+        if final_assets:
+            card = final_assets['cards'][i]
+            _paste_asset(img, card['image'], (x1+18,card_y+18,x2-18,card_y+245), 18, cover=False)
+            cy = card_y + 258
+            for line in _wrap(draw, card['name'], small_f, card_w-48):
+                draw.text((x1+24,cy),line,font=small_f,fill=pal['ink']); cy+=27
+            if cy > card_y + 325:
+                raise ValueError('상품명 길이가 카드 배치 범위를 초과합니다.')
+            draw.text((x1+24,cy+5),card['color'],font=tiny_f,fill=pal['muted'])
+        else:
+            draw.rounded_rectangle((x1 + 18, card_y + 18, x2 - 18, card_y + 210), radius=18, fill=pal["card"])
+            draw.text((x1 + 36, card_y + 42), f"PRODUCT {i + 1}", font=small_f, fill=pal["accent"])
+            draw.text((x1 + 26, card_y + 240), "상품명 자리", font=small_f, fill=pal["ink"])
+            draw.text((x1 + 26, card_y + 277), "디자인 포인트 비교", font=tiny_f, fill=pal["muted"])
+            draw.text((x1 + 26, card_y + 304), "색상/디테일/실루엣", font=tiny_f, fill=pal["muted"])
 
     # Compare block
     y = 1415
@@ -351,18 +400,25 @@ def render_preview_image(spec: dict, path: Path) -> str:
 
     # CTA
     y = 1715
-    draw.text((95, y), spec.get("section_titles", {}).get("cta", "기획전 CTA"), font=h2_f, fill=pal["ink"])
+    if not final_assets:
+        draw.text((95, y), spec.get("section_titles", {}).get("cta", "기획전 CTA"), font=h2_f, fill=pal["ink"])
     cta_y = y + 60
     draw.rounded_rectangle((95, cta_y, width - 95, cta_y + 180), radius=28, fill=pal["ink"])
-    draw.text((130, cta_y + 34), "선택한 카피와 상품 비교 포인트를 반영한 최종 진입 영역", font=small_f, fill=(255, 255, 255))
+    if final_assets:
+        draw.text((130, cta_y + 66), "기획전 컬렉션", font=h2_f, fill=(255,255,255))
+    else:
+        draw.text((130, cta_y + 34), "선택한 카피와 상품 비교 포인트를 반영한 최종 진입 영역", font=small_f, fill=(255, 255, 255))
     draw.rounded_rectangle((95 + 900, cta_y + 54, width - 140, cta_y + 126), radius=26, fill=pal["panel"])
     draw.text((95 + 938, cta_y + 77), spec.get("cta") or "기획전 보기", font=small_f, fill=pal["ink"])
 
     # Footer note
     footer = spec.get("feedback_note") or ""
-    if footer:
+    if footer and not final_assets:
         draw.text((95, 2045), "마지막 반영 요청: " + _shorten(footer, 70), font=tiny_f, fill=pal["muted"])
-    draw.text((95, 2085), "※ 실제 판매 상품 이미지/가격/혜택 미확정. 본 시안은 레이아웃 검토용입니다.", font=tiny_f, fill=pal["muted"])
+    if final_assets:
+        draw.text((95, 2085), "AI 생성 콘셉트 이미지 · 실제 판매 상품 아님", font=tiny_f, fill=pal["muted"])
+    else:
+        draw.text((95, 2085), "※ 실제 판매 상품 이미지/가격/혜택 미확정. 본 시안은 레이아웃 검토용입니다.", font=tiny_f, fill=pal["muted"])
 
     path.parent.mkdir(parents=True, exist_ok=True)
     img.save(path)
@@ -457,6 +513,7 @@ def preview_message(preview: dict, intro: str = "기획전 페이지 틀 시안�
         "■ 기획전 페이지 틀 미리보기",
         f"선택 카피: {copy_no}안 · {current.get('selected_headline') or spec.get('headline') or ''}",
         f"현재 시안: {current.get('revision', 1)}차 버전",
+        f"현재 배너 제목: {spec.get('hero_title') or ''}",
         f"구성: {' / '.join(sections)}",
         "첨부된 이미지로 페이지 목업을 확인해 주세요.",
         "",

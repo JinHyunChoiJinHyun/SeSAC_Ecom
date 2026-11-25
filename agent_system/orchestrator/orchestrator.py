@@ -110,6 +110,73 @@ def orchestrator_node(state) -> dict:
                 'standalone_question': '', 'route': '', 'route_reason': '',
                 'messages': trim + [AIMessage(content=notice, name='orchestrator')]}
 
+    # R42.6: 고객 연령 변경 및 기존 전체 모집단 결과의 명시적 재선정.
+    from agent_system.orchestrator.tools import audience_scope_r426 as audience426
+    from agent_system.orchestrator.tools import campaign_target_r39 as target426
+    age_change = audience426.age_change_request(question)
+    reselect = audience426.reselection_request(question)
+    confirm426 = audience426.confirmation_request(question)
+    old_target = run.get('campaign_target_r39') or {}
+    stale_target = bool(old_target and not audience426.current_target(old_target, campaign, run))
+    # 이전 R39 검토 세션의 기존 마이그레이션 분기는 유지한다.
+    stale_r40 = stale_target and old_target.get('policy') == 'r40_v1'
+    scoped_legacy = stale_target and bool(audience426.effective_scope(run))
+    if (run.get('workflow') == 'trend_planning' and run.get('status') not in ('cancelled', None)
+            and (age_change or reselect or confirm426 or ((stale_r40 or scoped_legacy) and target426.target_request(question)))):
+        try:
+            if pending:
+                raise ValueError('다른 승인 요청을 먼저 처리하거나 취소해 주세요.')
+            from agent_system.orchestrator.tools.category_planning.analysis_scope_r427 import plan_scope
+            if age_change:
+                requested_age = audience426.parse_age(question)
+                if requested_age != audience426.effective_scope(run):
+                    raise ValueError('연령 변경은 시장·상품·고객 분석 전체에 영향을 줍니다. 기존 기획전은 보존하고 새 분석 시작 후 새 연령을 포함한 기획전 요청을 입력해 주세요.')
+            if run.get('period_plan') and plan_scope(run['period_plan']) != audience426.require_scope(run):
+                raise ValueError('기존 시장·상품 분석과 고객 연령이 다릅니다. 새 분석을 시작해 주세요.')
+            if not target426.approved(run):
+                raise ValueError('고객 재선정 전에 현재 기획전의 상품·페이지 승인부터 완료해 주세요.')
+            from agent_system.workflows.registry import get_workflow
+            step17 = next(i for i, (_, step) in enumerate(get_workflow('trend_planning').steps()) if step.no == 17)
+            if confirm426:
+                proposal426 = run.get('audience_reselect_pending') or {}
+                if not proposal426 or proposal426.get('fingerprint') != target426.fingerprint(campaign,run):
+                    raise ValueError('현재 기획전의 재선정 요청이 없습니다. 다시 요청해 주세요.')
+                if str(question).strip().endswith('취소'):
+                    revised_run = dict(run)
+                    revised_run.pop('audience_reselect_pending',None)
+                    notice426 = '재선정을 취소했습니다. 기존 고객 선정과 발송 이력은 유지됩니다.'
+                    return {**common,'turn_type':'chitchat','reply':notice426,'standalone_question':'','route':'',
+                            'workflow_run':revised_run,'messages':trim+[AIMessage(content=notice426,name='orchestrator')]}
+                if proposal426.get('scope') != audience426.require_scope(run):
+                    raise ValueError('이전 연령 변경 요청은 새 분석이 필요합니다. 현재 재선정 요청을 다시 생성해 주세요.')
+                from agent_system.orchestrator.tools import campaign_target_r40 as target40
+                try:
+                    revised_run,revised_campaign = audience426.prepare_reselection(run,campaign,proposal426['scope'],step17,target40.score_campaign,target426.ROOT)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).exception('R426 고객 재선정 실패')
+                    raise ValueError('고객 재선정에 실패했습니다. 기존 상태와 파일은 보존했습니다. 모델·DB를 확인한 뒤 재선정 승인을 다시 요청해 주세요.')
+                return {**common,'turn_type':'workflow','reply':'','standalone_question':'','route':'',
+                        'workflow_run':revised_run,'campaign':revised_campaign,'messages':trim}
+            if age_change:
+                scope426 = audience426.parse_age(question)
+            else:
+                scope426 = audience426.require_scope(run)
+            revised_run = dict(run, audience_reselect_pending={'scope':scope426,'fingerprint':target426.fingerprint(campaign,run)})
+            notice426 = ('고객 타깃 재선정 요청: '+audience426.label(scope426)+' (기존 시장·상품 분석 연령 유지). '
+                         '새 분석이 성공하면 기존 타깃·고객군 문구·보고서·발송 승인이 무효화됩니다. 기존 파일과 발송 이력은 보존합니다. '
+                         '진행하려면 “고객 타깃 재선정 승인”, 취소하려면 “고객 타깃 재선정 취소”라고 입력해 주세요.')
+            return {**common,'turn_type':'chitchat','reply':notice426,'standalone_question':'','route':'',
+                    'workflow_run':revised_run,'messages':trim+[AIMessage(content=notice426,name='orchestrator')]}
+        except (ValueError, TypeError, KeyError, StopIteration) as exc:
+            notice426 = str(exc)
+            return {**common,'turn_type':'chitchat','reply':notice426,'standalone_question':'','route':'',
+                    'messages':trim+[AIMessage(content=notice426,name='orchestrator')]}
+    if stale_target and (stale_r40 or scoped_legacy) and (target426.target_result_request(question) or str(question).startswith('__cart_target_review__:')):
+        notice426 = '이전 고객 선정은 현재 연령 조건으로 검증되지 않았습니다. “고객 타깃 다시 선정해줘”라고 요청해 주세요.'
+        return {**common,'turn_type':'chitchat','reply':notice426,'standalone_question':'','route':'',
+                'messages':trim+[AIMessage(content=notice426,name='orchestrator')]}
+
     # R41: 승인된 R40 타깃의 고객군별 문구 전용 경로.
     from agent_system.orchestrator.tools import campaign_copy_r41 as copy41
     if copy41.is_request(question) and ((run.get('campaign_target_r39') or {}).get('policy') == 'r40_v1' or str(question).startswith(copy41.PREFIX) or '고객군별' in str(question) or '세그먼트별' in str(question)):
@@ -654,9 +721,9 @@ def orchestrator_node(state) -> dict:
     # ── 보고서 요청: 일반 분석 보고서 / 기획전 실행 계획 보고서 (PDF + Word, 규칙 판단)
     report_kind = report.detect(question)
     if report_kind:
-        if target39.active(run):
+        if target39.active(run) or target39.delivery_allowed(run):
             if not target39.confirmed_for_report(run, campaign):
-                notice = '고객 타깃 분석과 선정 결과 승인을 먼저 완료해 주세요.'
+                notice = '현재 고객 연령 조건으로 타깃을 선정하고 승인해 주세요. 기존 결과라면 “고객 타깃 다시 선정해줘”라고 요청해 주세요.'
                 return {**common, 'turn_type':'chitchat', 'reply':notice, 'standalone_question':'', 'route':'', 'messages':trim+[AIMessage(content=notice,name='orchestrator')]}
             if (run.get('campaign_target_r39') or {}).get('policy') == 'r40_v1' and not copy41.approved(run, campaign):
                 notice = '고객군별 마케팅 문구를 생성하고 승인해 주세요. “고객군별 마케팅 문구 생성해줘”라고 입력하면 검토안을 생성합니다.'
@@ -679,7 +746,7 @@ def orchestrator_node(state) -> dict:
         report_result = {"turn_type": "report", "final_answer": made["reply"],
                          "attachments": made["attachments"], "report_kind": report_kind,
                          "report_errors": made["errors"]}
-        selected39 = target39.confirmed_for_report(run, campaign) if target39.active(run) else None
+        selected39 = target39.confirmed_for_report(run, campaign) if target39.delivery_allowed(run) else None
         if selected39 and made['attachments'] and not made['errors']:
             report_result['r39_report'] = dict(target39.email_summary(run, selected39), campaign_theme=str((campaign.get('values') or {}).get('subtype') or '기획전'))
             report_result['final_answer'] += '\n최종 Word를 이 스레드에 다시 첨부하면 PDF로 변환됩니다. 이후 과장·팀장·대리·사원 중 보고 대상을 지정해 주세요.'

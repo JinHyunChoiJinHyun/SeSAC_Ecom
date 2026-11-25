@@ -67,6 +67,19 @@ def _delivery_busy(state):
     return (state.get('pending') or {}).get('status') in ('SENDING', 'UNKNOWN')
 
 
+def campaign_delivery_busy(root, event, run_id):
+    """같은 사용자·채널·기획전의 모든 발송 상태에서 진행/불명확 여부를 검사한다."""
+    if not run_id: raise ValueError('기획전 ID를 확인할 수 없습니다.')
+    for path in (_private(root)/'threads').glob('*.json'):
+        state=json.loads(path.read_text(encoding='utf-8'))
+        target=state.get('target') or {}
+        if (not state.get('archived') and target.get('kind')=='r39' and target.get('run_id')==run_id
+                and target.get('owner')==event.get('user') and target.get('channel')==event.get('channel')
+                and _delivery_busy(state)):
+            return True
+    return False
+
+
 def _check_delivery_state(state, event):
     target = state.get('target') or {}
     if state.get('archived'):
@@ -435,7 +448,18 @@ def register_campaign_report(root, event, summary):
             resolve(root,event,summary)
             old = _read_state(root,event); old_target = old.get('target') or {}
         except ValueError:
-            pass
+            candidates=[]
+            for path in (_private(root)/'threads').glob('*.json'):
+                saved=json.loads(path.read_text(encoding='utf-8'))
+                t=saved.get('target') or {}
+                if (not saved.get('archived') and t.get('kind')=='r39' and t.get('run_id')==summary.get('run_id')
+                        and t.get('owner')==owner and t.get('channel')==event.get('channel') and re.fullmatch('[0-9a-f]{32}',path.stem)):
+                    candidates.append(path.stem)
+            if len(candidates)>1:
+                raise ValueError('이전 기획전의 발송 이력이 여러 스레드에 있습니다. 원래 보고서 스레드에서 새 보고서를 생성해 주세요.')
+            if candidates:
+                event['_r424_state_key']=candidates[0]
+                old=_read_state(root,event); old_target=old.get('target') or {}
     if old_target.get('kind') == 'r39' and old_target.get('owner') != owner:
         raise ValueError('다른 요청자의 보고서 스레드입니다.')
     return _register_campaign_report_locked(root, event, summary)

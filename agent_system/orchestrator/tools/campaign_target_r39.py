@@ -47,6 +47,12 @@ def fingerprint(campaign, run):
     values = campaign.get('values') or {}
     data = {k: values.get(k) for k in ('category', 'subtype', 'colors', 'products', 'selling_points', 'page', 'schedule')}
     data['revision'] = (run.get('page_preview') or {}).get('revision')
+    from .audience_scope_r426 import effective_scope
+    scope = effective_scope(run)
+    # 범위가 없던 과거 결과와 새 범위의 해시를 분리한다.
+    if scope is not None or run.get('request') or 'target_audience' in run:
+        data['audience_r426'] = scope
+        data['audience_revision'] = run.get('audience_revision', 0)
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -286,8 +292,9 @@ def confirmed_notice(target):
 
 def confirmed_for_report(run, campaign):
     target = run.get('campaign_target_r39') or {}
+    from .audience_scope_r426 import current_target
     if ((run.get('page_preview') or {}).get('status') != 'approved'
-            or target.get('status') != 'confirmed' or target.get('fingerprint') != fingerprint(campaign, run)):
+            or target.get('status') != 'confirmed' or not current_target(target, campaign, run)):
         return None
     groups = target.get('groups') or []
     if (not groups or not target.get('combos') or type(target.get('total')) is not int
@@ -315,10 +322,14 @@ def selection_basis(target):
 
 def email_summary(run, target):
     # 사내 보고서 전달용 집계만 별도 승인 상태에 저장한다. 고객 식별자는 전달하지 않는다.
+    from .audience_scope_r426 import audience_text
+    scope_label = ' / '.join(f"{c['product_type']} × {c['colour']}" for c in target['combos'])
+    if target.get('audience'):
+        scope_label += ' / ' + audience_text(target)
     return {'kind': 'r39', 'run_id': run['run_id'], 'fingerprint': target['fingerprint'],
             **({'segment_copy_hash': (run.get('segment_copy_r41') or {}).get('approved_hash')} if target.get('policy') == 'r40_v1' and (run.get('segment_copy_r41') or {}).get('approved_hash') else {}),
             'source_date': DATE, 'selection_basis': selection_basis(target) if target.get('policy') == 'r40_v1' else '품목·색상별 모델 순위와 중복 제거',
-            'scope_label': ' / '.join(f"{c['product_type']} × {c['colour']}" for c in target['combos']),
+            'scope_label': scope_label,
             'candidate_count': target['total'], 'preview_count': target['total'], 'control_count': 0,
             'total_scored_customers': max(c['total'] for c in target['combos']),
             'groups': [{'name': g['name'], 'count': g['count']} for g in target['groups']]}
