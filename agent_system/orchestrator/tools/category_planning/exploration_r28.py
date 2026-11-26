@@ -36,7 +36,7 @@ def render_subtype_review(option: dict) -> str:
     else:
         musinsa = '무신사 유형별 연결 근거 미확보'
     return (f'■ {subtype} 상세 분석 (미선택·미승인)\n'
-            f'H&M 과거 핵심 월 온라인 구매: {count:,}건\n'
+            f'H&M {option.get("period_label") or "과거 핵심 월 온라인 구매"}: {count:,}건\n'
             f'{naver}\n{musinsa}\n'
             '색상별 구매 그래프와 표를 함께 제공합니다. 다른 유형도 계속 분석할 수 있습니다.\n'
             '확정할 때만 유형 1개와 색상 1~3개를 함께 말씀하세요. '

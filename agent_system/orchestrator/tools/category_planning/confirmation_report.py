@@ -35,7 +35,8 @@ def build_confirmation_evidence(run):
     options = run.get('subtype_options') or []
     from .period_context import period_note, purchase_label
     plan = run.get('period_plan')
-    label = '과거핵심월온라인구매(건)' if plan else '과거겨울온라인구매(건)'
+    from ..campaign_scope_r43 import labels
+    label = '과거핵심월'+labels(plan)[1]+'구매(건)' if plan else '과거겨울온라인구매(건)'
     rows = []
     for rank, option in enumerate(options, 1):
         growth = option.get('growth')
@@ -172,16 +173,16 @@ def build_selected_color_chart(run, path):
     import matplotlib.pyplot as plt
     top = option['colors'][:10]
     with _korean_font_context():
-        return _render_selected_color_chart(selected, path, top, plt)
+        return _render_selected_color_chart(selected, path, top, plt, period_plan=run.get('period_plan'))
 
 
-def _render_selected_color_chart(selected, path, top, plt):
+def _render_selected_color_chart(selected, path, top, plt, period_plan=None):
     fig, ax = plt.subplots(figsize=(9, 5))
     try:
         names = [c['name'] for c in top][::-1]
         counts = [int(c['purchases']) for c in top][::-1]
         ax.barh(names, counts)
-        ax.set_title(f'{selected}: H&M 색상별 과거 겨울 구매 기록')
+        ax.set_title(f"{selected}: H&M 색상별 과거 {'핵심 월' if period_plan else '겨울'} 구매 기록")
         ax.set_xlabel('구매 기록 (건)')
         ax.margins(x=.20)
         for i, n in enumerate(counts):

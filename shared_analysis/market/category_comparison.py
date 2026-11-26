@@ -79,7 +79,13 @@ def save_charts(rows, naver, out, *, period_plan=None):
     ax.bar(range(len(rows)), values)
     ax.set_xticks(range(len(rows)), labels, rotation=15, ha='right')
     ax.set_ylabel('H&M historical transaction records')
-    ax.set_title('H&M historical core months / online / ages 20–39 / womenswear' if period_plan else 'H&M past winter / online / ages 20–39 / womenswear')
+    if period_plan:
+        from agent_system.orchestrator.tools.category_planning.analysis_scope_r427 import plan_scope as age_scope
+        from agent_system.orchestrator.tools.campaign_scope_r43 import plan_scope, GROUPS
+        age = age_scope(period_plan); condition = plan_scope(period_plan)
+        ax.set_title(f"H&M historical core months / {condition['channel']} / ages {age['age_min']}–{age['age_max']} / {'+'.join(GROUPS[condition['product_gender']])}")
+    else:
+        ax.set_title('H&M past winter / online / ages 20–39 / Ladieswear+Divided (legacy)')
     if period_plan:
         ranges = ', '.join(f"{season['core']['start']}~{season['core']['end']}" for season in period_plan['seasons'])
         ax.set_xlabel(ranges, fontsize=8)
@@ -143,7 +149,7 @@ if __name__ == '__main__':
 
 
 def save_monthly_category_chart(frame, destination, *, category=None, metric='purchases'):
-    """두 겨울 시즌을 독립 패널로 비교한다. 상품군·기간은 데이터로 결정한다."""
+    """두 관측 기간을 독립 패널로 비교한다. 상품군·기간은 데이터로 결정한다."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -179,9 +185,8 @@ def save_monthly_category_chart(frame, destination, *, category=None, metric='pu
         try:
             for ax,season in zip(axes[0], seasons):
                 part=plot.loc[plot['season'].eq(season)].copy()
-                # X축은 겨울 시즌의 상대 월 순서 (11월,12월,1월 등)를 사용한다.
+                # YYYY-MM의 실제 시간 순서: 6~8월 및 연도 경계도 역전되지 않는다.
                 months = sorted(part['month'].unique().tolist())
-                months = sorted(months, key=lambda m: (int(m[5:7]) < 7, int(m[5:7])))
                 for idx,label in enumerate(labels):
                     sub=part.loc[part['category'].eq(label)].set_index('month')
                     vals=[]
@@ -196,15 +201,21 @@ def save_monthly_category_chart(frame, destination, *, category=None, metric='pu
                     ax.plot(range(len(months)),vals,marker='o',linewidth=2,label=label if korean else f'Group {idx+1}',color=palette(idx))
                 ax.set_xticks(range(len(months)),[f'{int(m[5:7])}월' if korean else m for m in months])
                 a,b=months[0],months[-1]
-                ax.set_title(f'{a[:4]}~{b[:4]} 겨울' if korean else f'{a} - {b}')
+                ax.set_title(f'{a} ~ {b}')
                 ax.grid(axis='y',alpha=.22)
                 if hasattr(viz,'apply_chart_border'): viz.apply_chart_border(ax)
             axes[0][0].set_ylabel(('월별 구매 기록(건)' if metric=='purchases' else '일평균 구매 기록(건/일)')
                                     if korean else ('Monthly transactions' if metric=='purchases' else 'Daily average transactions'))
             handles, legends=axes[0][-1].get_legend_handles_labels()
             fig.legend(handles,legends,loc='lower center',ncol=min(len(labels),5),bbox_to_anchor=(.5,-.01))
-            fig.suptitle(('상품군별 과거 겨울 구매 추이' if category is None else f'{category} 과거 겨울 구매 추이')
-                          if korean else 'Historical winter purchases')
+            title = ('상품군별 과거 구매 추이' if category is None else f'{category} 과거 구매 추이') if korean else 'Historical monthly purchases'
+            if {'analysis_product_gender','analysis_channel'}.issubset(plot.columns):
+                conditions = plot[['analysis_product_gender','analysis_channel']].drop_duplicates()
+                if len(conditions)!=1:
+                    raise ValueError('서로 다른 분석 범위가 혼합된 차트입니다.')
+                gender, channel = conditions.iloc[0]
+                title += f' / {gender} / {channel}'
+            fig.suptitle(title)
             fig.tight_layout(rect=(0,.07,1,.95))
             destination=Path(destination);destination.parent.mkdir(parents=True,exist_ok=True)
             fig.savefig(destination,dpi=150,bbox_inches='tight')
@@ -250,7 +261,14 @@ def save_weekly_campaign_chart(frame, destination, *, category=None):
             axes[0][0].set_ylabel('주차별 일평균 구매 기록(건/일)' if korean else 'Transactions per day')
             handles,names=axes[0][-1].get_legend_handles_labels()
             fig.legend(handles,names,loc='lower center',ncol=min(len(labels),5))
-            fig.suptitle('과거 기획전 대응 기간의 주별 구매 추이' if korean else 'Historical campaign-aligned weekly purchases')
+            title = '과거 기획전 대응 기간의 주별 구매 추이' if korean else 'Historical campaign-aligned weekly purchases'
+            if {'analysis_product_gender','analysis_channel'}.issubset(plot.columns):
+                conditions = plot[['analysis_product_gender','analysis_channel']].drop_duplicates()
+                if len(conditions)!=1:
+                    raise ValueError('서로 다른 분석 범위가 혼합된 차트입니다.')
+                gender, channel = conditions.iloc[0]
+                title += f' / {gender} / {channel}'
+            fig.suptitle(title)
             fig.tight_layout(rect=(0,.07,1,.95))
             destination=Path(destination);destination.parent.mkdir(parents=True,exist_ok=True)
             fig.savefig(destination,dpi=150,bbox_inches='tight');return str(destination.resolve())

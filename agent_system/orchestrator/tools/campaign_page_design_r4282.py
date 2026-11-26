@@ -9,6 +9,22 @@ def designs(subtype):
                 ('퀼팅 디자인','collarless diamond quilting with snap front','다이아몬드 퀼팅을 활용한 단정한 레이어드 스타일'),
                 ('스탠드 칼라','stand collar and clean horizontal quilting','깔끔한 칼라와 단정한 실루엣의 컬러 스타일'),
                 ('후드 디자인','hooded silhouette with horizontal quilting','후드 디테일을 중심으로 한 캐주얼 스타일')]
+    key = subtype.casefold()
+    if any(k in key for k in ('니트','스웨터','knit','sweater','cardigan','가디건')):
+        return [('간결한 스타일','clean knitwear silhouette concept','간결한 실루엣을 중심으로 한 니트 스타일 제안'),
+                ('레이어드 스타일','layering-friendly knitwear styling concept','레이어드 코디 방향 제안'),
+                ('텍스처 스타일','visually distinct knit surface concept','표면의 시각적 차이를 비교하는 디자인 제안'),
+                ('데일리 스타일','relaxed knitwear design concept','일상 코디에 어울리는 디자인 제안')]
+    if any(k in key for k in ('셔츠','블라우스','blouse','shirt')) and not any(k in key for k in ('티셔츠','t-shirt','tee','tshirt')):
+        return [('클린 디자인','clean shirt or blouse silhouette concept','간결한 실루엣 중심의 코디 제안'),
+                ('칼라 포인트','distinct neckline or collar styling concept','목선과 칼라 표현의 비교 제안'),
+                ('디테일 디자인','subtle placket or garment detail concept','상품 디테일 비교 제안'),
+                ('캐주얼 스타일','relaxed shirt or blouse styling concept','일상 코디 방향 제안')]
+    if any(k in key for k in ('티셔츠','t-shirt','tshirt','tee','긴소매','반소매')):
+        return [('베이직 스타일','clean T-shirt silhouette, preserve selected sleeve length','기본 실루엣의 디자인 제안'),
+                ('넥라인 스타일','neckline variation appropriate to selected garment','목선 디자인 비교 제안'),
+                ('레이어드 스타일','layering-friendly T-shirt design, preserve sleeve length','레이어드 코디 방향 제안'),
+                ('캐주얼 스타일','casual T-shirt styling, preserve selected sleeve length','일상 스타일링 제안')]
     # 기타 상품 유형은 확인되지 않은 소재·구조를 강제하지 않는다.
     return [('미니멀 스타일','minimal clean styling, simple silhouette','간결한 디자인을 중심으로 한 데일리 스타일'),
             ('디테일 스타일','subtle decorative design details appropriate to this garment','디테일에 포인트를 준 스타일링 제안'),
@@ -16,17 +32,22 @@ def designs(subtype):
             ('캐주얼 스타일','relaxed casual styling appropriate to this garment','일상 코디에 맞춘 캐주얼 스타일링 제안')]
 
 
-def hero_prompt(context,constraint,variant=''):
+def hero_prompt(context,constraint,variant='', *, product_gender='legacy'):
+    from .campaign_scope_r43 import image_terms
+    _, models = image_terms(product_gender)
     return (context+' ONE single coherent editorial fashion photograph, not a collage, not a grid, no split screen, no inset or montage. '
-            'One or two adult female fashion models ONLY, wearing the selected garment and selected colors, natural pose, cohesive scene, '
+            f'One or two {models} ONLY, wearing the selected garment and selected colors, natural pose, cohesive scene, '
             'medium or three-quarter framing, clear garment silhouette, realistic fashion photography. Match the specified season and theme. '
             +variant+constraint)
 
 
-def card_prompt(context,constraint,subtype,color,design):
-    return (context+f' Single isolated women’s {subtype} in exactly {color}, design concept: {design}. '
+def card_prompt(context,constraint,subtype,color,design,*,theme='modern',product_gender='legacy'):
+    from .campaign_scope_r43 import image_terms
+    apparel, _ = image_terms(product_gender)
+    backdrop={'warm':'warm ivory','modern':'neutral white','premium':'muted charcoal'}.get(theme,'neutral white')
+    return (context+f' Single isolated {subtype} ({apparel}) in exactly {color}, design concept: {design}. '
             'One garment only, no person, no mannequin, no hands, no collage, no grid, front-facing studio product photography, '
-            'entire garment visible with generous margins, same warm ivory seamless backdrop, soft diffused light, consistent scale and centered composition.'+constraint)
+            f'entire garment visible with generous margins, same {backdrop} seamless backdrop, soft diffused light, consistent scale and centered composition.'+constraint)
 
 
 def compare_details(data):

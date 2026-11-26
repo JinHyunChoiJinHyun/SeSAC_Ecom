@@ -53,6 +53,9 @@ def fingerprint(campaign, run):
     if scope is not None or run.get('request') or 'target_audience' in run:
         data['audience_r426'] = scope
         data['audience_revision'] = run.get('audience_revision', 0)
+    if 'campaign_scope' in run:
+        from .campaign_scope_r43 import run_scope
+        data['campaign_scope'] = run_scope(run)
     return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

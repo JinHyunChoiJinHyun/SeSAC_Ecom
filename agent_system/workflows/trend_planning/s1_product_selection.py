@@ -26,7 +26,7 @@ STAGE = Stage(
             "시장 데이터가 미연결이면 원하는 카테고리를 직접 말씀해 주세요.")),
         # CART_SIGNAL_DEMO_OUTER_V1: H&M 속성은 트렌드가 아닌 상품 구성 근거
         Step(5, "상품군 구매 기록 및 시계열 분석", owner="product_analysis", instruction=(
-            "검토 상품군 '{category}'의 검증된 겨울 시즌 H&M 구매 기록과 상품 규모를 분석하세요. 색상·스타일은 상품 유형 선택 이후에 분석하세요. "
+            "검토 상품군 '{category}'의 검증된 과거 분석 기간 H&M 구매 기록과 상품 규모를 분석하세요. 색상·스타일은 상품 유형 선택 이후에 분석하세요. "
             "상품 수가 많다는 이유만으로 인기·유행·성장이라고 말하지 마세요. "
             "이 값은 과거 H&M 상품 구성 정보이며 고객 성별은 확인되지 않습니다.")),
         Step(6, "무신사 상품군 표본 분석", owner="market_analysis", instruction=(
@@ -41,7 +41,7 @@ STAGE = Stage(
         Step(7, "상품군 구매·표본 근거 정리", owner="reporting", optional=True, instruction=(
             "H&M 상품군 구매 기록과 무신사 수집 표본을 정리하세요. 네이버 상품 유형별 추세·색상은 이 단계에서 중복 출력하지 마세요.")),
         Step(8, "H&M 과거 판매 사례 분석", owner="product_analysis", instruction=(
-            "검토 카테고리 '{category}'에서 H&M의 검증된 과거 분석 기간 온라인 구매 기록을 이용해 최대 5개 후보를 비교하세요. "
+            "검토 카테고리 '{category}'에서 H&M의 검증된 과거 분석 기간 및 확정 채널 구매 기록을 이용해 최대 5개 후보를 비교하세요. "
             "실제 article_id와 구매 기록·고객 수를 제시하고, 외부 테마와 상품의 직접 일치는 검증하지 않았다면 명시하세요.")),
         Step(9, "과거 판매 참고 사례 시각화", owner="reporting", optional=True, instruction=(
             "8단계의 검증 상품 후보, 구매 기록과 스타일 태그, 실제 상품 이미지를 정리해 시각화해 주세요. 미검증 테마 일치는 명시하세요.\n{previous}")),

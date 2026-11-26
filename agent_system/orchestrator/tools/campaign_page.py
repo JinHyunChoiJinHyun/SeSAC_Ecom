@@ -74,7 +74,11 @@ def _base_spec(choice: dict, package: dict, campaign: dict) -> dict:
     color_text = " · ".join(colors) if colors else "Selected Colors"
     points = list(package.get("points") or [])
     subtype = str(package.get("subtype") or (campaign.get("values") or {}).get("subtype")
-                  or (campaign.get("values") or {}).get("category") or "경량패딩")
+                  or (campaign.get("values") or {}).get("category") or "").strip()
+    from .campaign_season import from_campaign, season_words
+    season_context = package.get('season_context') or from_campaign(campaign=campaign)
+    _, season_en, _ = season_words(season_context)
+    badge = season_en + (' EDITION' if season_en != 'COLLECTION' else '')
     keywords = list(package.get("keywords") or [])
     subs = [str(x).strip() for x in (choice.get("subcopies") or []) if str(x).strip()]
     hero_body = subs[0] if subs else str(choice.get("description") or "").strip()
@@ -83,7 +87,8 @@ def _base_spec(choice: dict, package: dict, campaign: dict) -> dict:
         "theme": "modern",
         "layout_variant": 1,
         "headline": str(choice.get("headline") or "").strip(),
-        "hero_badge": f"WINTER EDITION · {subtype}",
+        "hero_badge": f"{badge} · {subtype}" if subtype else badge,
+        "season_context": season_context,
         "hero_title": str(choice.get("headline") or "").strip(),
         "hero_body": hero_body,
         "hero_note": detail_body,
@@ -136,13 +141,15 @@ def _apply_feedback(spec: dict, feedback: str) -> dict:
         return updated
     if re.search(r"따뜻|감성|포근|부드럽", text):
         updated["theme"] = "warm"
-        updated["hero_badge"] = "WINTER MOOD"
+        from .campaign_season import season_words
+        season, season_en, _ = season_words(updated.get('season_context'))
+        updated["hero_badge"] = f"{season_en} MOOD" if season_en != 'COLLECTION' else 'DAILY MOOD'
         updated["hero_body"] = _shorten(updated["hero_body"] or "", 55)
-        if not keep_title and re.search(r"제목(?:을|도|만)?\s*.*(?:따뜻|감성|포근|부드럽)", text) and "겨울" not in updated["hero_title"]:
-            updated["hero_title"] = "포근한 겨울의 스타일링"
+        if not keep_title and re.search(r"제목(?:을|도|만)?\s*.*(?:따뜻|감성|포근|부드럽)", text):
+            updated["hero_title"] = f"감성적인 {season}의 스타일링" if season != '겨울' else '포근한 겨울의 스타일링'
     if re.search(r"세련|프리미엄|고급|미니멀", text):
         updated["theme"] = "premium"
-        updated["hero_badge"] = "PREMIUM OUTER CURATION"
+        updated["hero_badge"] = "PREMIUM CURATION"
         updated["cta"] = "컬렉션 보기"
         updated["hero_body"] = _shorten(updated["hero_body"] or "", 42)
     if re.search(r"어둡|다크|검정\s*배경|블랙\s*배경", text):
@@ -319,7 +326,7 @@ def render_preview_image(spec: dict, path: Path, *, final_assets=None) -> str:
     hero = (95, 180, width - 95, 780)
     draw.rounded_rectangle(hero, radius=34, fill=pal["card"])
     draw.rounded_rectangle((hero[0] + 34, hero[1] + 34, hero[0] + 320, hero[1] + 82), radius=20, fill=pal["chip"])
-    draw.text((hero[0] + 52, hero[1] + 45), spec.get("hero_badge") or "WINTER EDITION", font=small_f, fill=pal["accent"])
+    draw.text((hero[0] + 52, hero[1] + 45), spec.get("hero_badge") or "COLLECTION", font=small_f, fill=pal["accent"])
     title_y = hero[1] + 120
     for line in _wrap(draw, spec.get("hero_title") or "", title_f, 680):
         draw.text((hero[0] + 52, title_y), line, font=title_f, fill=pal["ink"])

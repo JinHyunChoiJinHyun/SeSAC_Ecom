@@ -16,7 +16,7 @@ def summarize_campaign_window(weekly: pd.DataFrame, rows: list[dict]) -> dict:
             raise ValueError(f'{category} 시즌·주차 기록 누락 또는 중복')
         seasons = sorted(subset['season'].unique().tolist())
         if len(seasons) != 2:
-            raise ValueError(f'{category} 겨울 시즌 두 개가 모두 필요합니다.')
+            raise ValueError(f'{category} 과거 대응 기간 두 개가 모두 필요합니다.')
         totals = []
         for season in seasons:
             s = subset.loc[subset['season'].eq(season)].sort_values('week_index')

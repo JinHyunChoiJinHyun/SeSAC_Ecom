@@ -21,6 +21,11 @@ def validated_updates(run, category, ids=None):
             age = run_scope(run)
             if any(rows_by_id.get(i, {}).get('analysis_age_min') != age['age_min'] or rows_by_id.get(i, {}).get('analysis_age_max') != age['age_max'] for i in chosen):
                 raise ValueError('승인 후보의 분석 연령이 현재 기획전과 다릅니다.')
+        if 'campaign_scope' in plan:
+            from .campaign_scope_r43 import run_scope as campaign_scope
+            scope = campaign_scope(run)
+            if any(rows_by_id.get(i, {}).get('analysis_product_gender') != scope['product_gender'] or rows_by_id.get(i, {}).get('analysis_channel') != scope['channel'] for i in chosen):
+                raise ValueError('승인 후보의 상품군·채널이 현재 기획전과 다릅니다.')
         if any(rows_by_id.get(i, {}).get('analysis_period') != scope_text(plan) for i in chosen):
             raise ValueError('승인 후보의 과거 분석 기간이 현재 Run과 일치하지 않습니다.')
         period_updates['schedule'] = run_schedule(run)

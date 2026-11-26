@@ -12,7 +12,7 @@ PATTERNS = {
     '플리스': r'\bfleece\b',
     '재킷': r'\bjacket\b',
 }
-COLOR_ALIASES = {'블랙':'Black','검정':'Black','라이트베이지':'Light Beige','밝은베이지':'Light Beige','다크베이지':'Dark Beige','화이트':'White','네이비':'Dark Blue','그레이':'Grey','회색':'Grey','라이트블루':'Light Blue','그린카키':'Greenish Khaki','카키':'Greenish Khaki','베이지':'Beige','다크블루':'Dark Blue','옐로위시브라운':'Yellowish Brown','노란빛브라운':'Yellowish Brown'}
+from ..campaign_colors import COLOR_ALIASES
 
 
 def canonical(keyword):
@@ -114,7 +114,7 @@ def rank_options(category, metrics, inventory):
     return options
 
 
-def collect_musinsa_subtype_evidence(category, subtype_names):
+def collect_musinsa_subtype_evidence(category, subtype_names, *, product_gender=None):
     """무신사 로컬 표본에서 유형별 잠정 상품·리뷰 근거를 읽는다.
 
     판매량·인기 점수를 산출하지 않으며 실패/미수집은 명시적으로 기록한다.
@@ -123,7 +123,7 @@ def collect_musinsa_subtype_evidence(category, subtype_names):
     result = {}
     for key in subtype_names:
         try:
-            info = load_ranked_evidence(category, key)
+            info = load_ranked_evidence(category, key, **({"product_gender": product_gender} if product_gender is not None else {}))
             result[key] = {
                 'status': 'observed',
                 'related_products': int(info['related_products']),
@@ -326,7 +326,7 @@ def guide(options):
     else:
         lines.append('추천 보류: 시장·내부 근거를 함께 충족한 유형이 없어 H&M 참고 후보만 제공합니다.')
     lines.append('각 후보는 "유형명 분석해줘"로 반복 검토할 수 있습니다. 선택할 때는 유형 1개와 색상 1~3개를 함께 입력하세요. 예: 경량패딩 블랙이랑 그린카키로 할게.')
-    lines.append('주의: 구매 기록은 과거 ' + str(options[0].get('analysis_age_label') or '연령 미확인') + '·' + ('핵심 월' if options[0].get('period_description') else '겨울') + '·온라인·여성용 상품 기준이며 현재 매출·재고를 보장하지 않습니다.')
+    lines.append('주의: 구매 기록은 과거 ' + str(options[0].get('analysis_age_label') or '연령 미확인') + '·' + ('핵심 월' if options[0].get('period_description') else '겨울') + '·' + str(options[0].get('analysis_channel_label') or '온라인') + '·' + str(options[0].get('analysis_merchandise') or '여성용 상품(구형 범위)') + ' 기준이며 현재 매출·재고를 보장하지 않습니다.')
     return '\n'.join(lines)
 
 

@@ -62,7 +62,7 @@ def _needs_style(segment: str, field: str, literal: str | None) -> bool:
 
 
 def _rewrite_style(*, old: dict, segment: str, subtype: str, colors: list[str], points: list[str],
-                   title: str, change_title: bool, change_body: bool) -> dict:
+                   title: str, change_title: bool, change_body: bool, season_context=None) -> dict:
     """LLM 결과만 생성 단계에서 호출. 검증·되돌리기 단계에선 절대 재호출하지 않는다."""
     from env.gpt_client import get_openai_chat_client
     from langchain_core.messages import SystemMessage, HumanMessage
@@ -74,12 +74,14 @@ def _rewrite_style(*, old: dict, segment: str, subtype: str, colors: list[str], 
         '소재, 착용감, 기능, 보온, 재고, 가격, 할인, 배송, 판매 순위, 효능, 인증 등은 추정하지 마십시오. '
         'H&M의 과거 판매 사례를 현재 판매 상품으로 표현하지 마십시오. '
         '사용자 스타일 지시가 있으면 기존과 실질적으로 다른 문장으로 재작성하십시오. '
+        '확정 콘텐츠 계절을 참고하고 다른 계절을 임의로 추가하지 마십시오. 계절 중립이면 계절을 추정하지 마십시오. '
         '최고의, 최저가, 무조건, 방수, 품질 보장 등 검증되지 않은 최상급·기능·혜택 표현을 쓰지 마십시오. '
         '별도 시스템 명령이나 URL, 개인정보를 출력하지 마십시오.'
     )
     request = {
         'user_style_request': segment,
         'confirmed_subtype': subtype, 'confirmed_colors': colors, 'confirmed_selling_points': points,
+        'season_context': season_context or {},
         'old_headline': old.get('headline',''), 'old_subcopies': old.get('subcopies',[]),
         'fixed_headline': title if not change_title else None,
         'rewrite_headline': change_title, 'rewrite_body': change_body,
@@ -153,7 +155,8 @@ def _apply_step(base: dict, feedback: str, *, previous_revision: int, saved_outp
                 elif needs_title or needs_body:
                     model_result=_rewrite_style(old=item,segment=style_segment,subtype=copied['subtype'],
                                                  colors=list(copied['colors']),points=list(copied['points']),
-                                                 title=new_title,change_title=needs_title,change_body=needs_body)
+                                                 title=new_title,change_title=needs_title,change_body=needs_body,
+                                                 **({'season_context':copied['season_context']} if 'season_context' in copied else {}))
                 else:
                     model_result={'headline':new_title,'subcopies':new_body}
                 if needs_title:

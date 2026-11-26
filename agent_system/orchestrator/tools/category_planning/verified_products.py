@@ -14,7 +14,10 @@ def purchase_candidates(articles: pd.DataFrame, purchases: pd.DataFrame, categor
     required = {"article_id", "product_code", "index_group_name", "product_type_name", "garment_group_name", "prod_name", "detail_desc"}
     if required - set(articles.columns):
         raise ValueError(f"상품 컬럼 누락: {sorted(required - set(articles.columns))}")
-    products = articles.loc[category_masks(articles)[category] & articles["index_group_name"].isin(["Ladieswear", "Divided"])].copy()
+    from ..campaign_scope_r43 import eligible_articles, LEGACY
+    # load_purchase_inputs는 원본 캐시를 수정하지 않고 신규 범위를 명시한다.
+    eligible = eligible_articles(articles, articles.attrs.get('campaign_scope', LEGACY))
+    products = eligible.loc[category_masks(eligible)[category]].copy()
     if subtype:
         from agent_system.orchestrator.tools.category_planning.subtype_selection import subtype_mask
         products = products.loc[subtype_mask(products, subtype)].copy()
@@ -61,7 +64,12 @@ def load_purchase_inputs(*, period_plan=None, scope="core", audience=None):
         raise ValueError("상품 조회 연령과 기간 계획의 연령이 다릅니다.")
     from agent_system.common_tools.local_data import hm_products
     from common.db_client import get_analysis_connection
+    from ..campaign_scope_r43 import plan_scope as campaign_scope, channel_sql
     articles = hm_products.articles()
+    if period_plan and "campaign_scope" in period_plan:
+        from ..campaign_scope_r43 import eligible_articles
+        articles = eligible_articles(articles, campaign_scope(period_plan))
+        articles.attrs["campaign_scope"] = campaign_scope(period_plan)
     from agent_system.common_tools.local_data.campaign_period import purchase_date_filter
     date_sql, date_params = purchase_date_filter(hm_products.data_as_of(), period_plan=period_plan, scope=scope)
     connection = get_analysis_connection()
@@ -72,7 +80,7 @@ def load_purchase_inputs(*, period_plan=None, scope="core", audience=None):
                    COUNT(DISTINCT t.customer_id) AS winter_online_customers
             FROM hm.transactions AS t
             JOIN hm.customers AS c ON c.customer_id = t.customer_id
-            WHERE t.sales_channel_id = 2
+            WHERE """ + channel_sql(period_plan) + """
               AND c.age BETWEEN ? AND ?
         """ + date_sql + " GROUP BY 1", [age["age_min"],age["age_max"],*date_params]).df()
     finally:
@@ -83,6 +91,8 @@ def load_purchase_inputs(*, period_plan=None, scope="core", audience=None):
 def build_verified_step8(category: str, *, subtype=None, colors=None, period_plan=None, audience=None) -> dict:
     from .period_context import purchase_label, scope_text, period_note
     purchase_basis = purchase_label(period_plan)
+    from ..campaign_scope_r43 import labels, plan_scope as campaign_scope
+    merchandise, channel_label = labels(period_plan)
     from .analysis_scope_r427 import plan_scope
     from ..audience_scope_r426 import label, normalize
     age = normalize(audience) if audience is not None else plan_scope(period_plan)
@@ -106,8 +116,8 @@ def build_verified_step8(category: str, *, subtype=None, colors=None, period_pla
                 "review_candidate_rows": review_rows,
                 "product_result": {"search_products": {"rows": []}}, "data_sources": ["hm"]}
     lines = [f"■ {category} 과거 H&M 판매 참고 사례 ({len(rows)}개)",
-             (f"기준: H&M 과거 데이터 / {age_label} 고객 / 온라인 채널 2 / 여성용(Ladieswear·Divided) 상품" + "\n" + period_note(period_plan)
-              if period_plan else f"기준: H&M 과거 데이터 / {age_label} 고객 / 온라인 채널 2 / 12~2월 / 여성용(Ladieswear·Divided) 상품"),
+             (f"기준: H&M 과거 데이터 / {age_label} 고객 / {channel_label} / {merchandise}" + "\n" + period_note(period_plan)
+              if period_plan else f"기준: H&M 과거 데이터 / {age_label} 고객 / {channel_label} / 12~2월 / {merchandise}"),
              "과거 구매 기록순 참고 사례입니다. 현재 기획전에 판매할 상품을 확정하거나 추천하는 목록이 아닙니다.",
              "고객 성별은 확인할 수 없으며, 고객 나이도 거래 시점의 나이로 보증되지 않습니다.",
              f"세부 유형: {subtype or '미지정'} / 색상: {', '.join(colors or []) or '미지정'} / 유형은 상품명·설명 규칙 매칭이며 실측 성능 미검증.",
@@ -121,6 +131,9 @@ def build_verified_step8(category: str, *, subtype=None, colors=None, period_pla
             lines.append(f"- {item['prod_name']} / {item['article_id']} / {item['suitability_reason']}")
     if period_plan is not None:
         rows["analysis_period"] = scope_text(period_plan)
+    if period_plan and "campaign_scope" in period_plan:
+        rows["analysis_product_gender"] = campaign_scope(period_plan)["product_gender"]
+        rows["analysis_channel"] = campaign_scope(period_plan)["channel"]
     rows["analysis_age_min"] = age["age_min"]
     rows["analysis_age_max"] = age["age_max"]
     rows["keyword_match_verified"] = bool(subtype) & rows["suitability_status"].eq("rule_matched")

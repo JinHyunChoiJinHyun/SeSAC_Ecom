@@ -224,7 +224,7 @@ def _report_market_evidence(run, draft):
     subtype = evidence.get('subtype') or run.get('selected_subtype') or '선택 세부 유형'
     if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
            for v in (total, eligible, related, reviews)):
-        parts = [f"무신사 {market.get('category') or summary.get('category') or run.get('review_category') or '해당 카테고리'} 랭킹 수집 상품 {total}개 중 여성·공용 비교 대상 "
+        parts = [f"무신사 {market.get('category') or summary.get('category') or run.get('review_category') or '해당 카테고리'} 랭킹 수집 상품 {total}개 중 {evidence.get('gender_scope') or '성별 범위 미확인'} 비교 대상 "
                  f"{eligible}개, '{subtype}' 관련 상품명 기반 잠정 후보 "
                  f"{related}개 및 연결 리뷰 {reviews}건을 확인했습니다."]
         shapes = {str(item.get('label')): item.get('products')
@@ -435,8 +435,12 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
     )
     validate_report_context(run, campaign)
     plan = run.get('period_plan')
+    from agent_system.orchestrator.tools.campaign_scope_r43 import labels
+    merchandise, channel_label = labels(plan)
     basis = purchase_label(plan)
     schedule = run_schedule(run, _missing(values.get('schedule')))
+    from agent_system.orchestrator.tools.campaign_season import from_campaign
+    season_context = (run.get('campaign_summary') or {}).get('season_context') or from_campaign(run,campaign)
     from agent_system.orchestrator.tools.merchandising_direction import is_reference, build_direction
     reference_only = is_reference(run) or is_reference(run.get('campaign_summary'))
     direction = (selling.get('merchandising_direction') or
@@ -490,17 +494,19 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
             Paragraph(f'대표 문구: {title}'),
             Paragraph('과거 H&M 상품은 디자인 참고 사례이며, 유형·색상·디자인 특징을 향후 기획전 편성 조건으로 제안합니다. 현재 판매 상품·타깃 선정·발송은 미확정입니다.' if reference_only else '확정된 상품·색상·콘텐츠를 바탕으로 한 기획안이며 타깃 선정·발송은 미완료입니다.', 'notice')]),
         Section('2. 기획전 기본안', [Table(['항목', '제안 내용'], [
-            ['기획전 형태', '온라인 회원 대상 기획전 (기획 목표)' if plan else '온라인 회원 대상 겨울 기획전 (기획 목표)'],
+            ['기획전 형태', f'{channel_label} 채널 대상 기획전 (기획 목표)'],
             ['대분류 / 세부 유형', f'{_missing(values.get("category"))} / {_missing(values.get("subtype"))}'],
             ['기획전 주제', theme],
             ['운영 기간', schedule],
+            ['콘텐츠 계절', season_context['season']],
+            ['상품 분석 범위', merchandise],
             ['색상', ', '.join(colors) if colors else '미확정'],
             ['상품 수', (f'{len(confirmed_ids)}개 (과거 판매 참고 사례; 실제 편성 상품 미확정)' if reference_only else f'{len(confirmed_ids)}개 (확정 상품 ID 기준)')],
             ['대표 문구', title],
             ['실제 발송 규모', '추후 작성 (타깃 모델 미연결)']])]),
         Section('3. 상품 선정 및 시장 분석 근거', [
             Paragraph('3.1 H&M 과거 구매 근거', 'subheading'),
-            Paragraph(f'H&M 과거 {age_label} 고객·여성용 상품·' + ('검증된 핵심 월' if plan else '겨울(12~2월)') + '·온라인 구매 기록을 참고했습니다. 고객 성별과 현재 수요·재고는 확인되지 않았습니다.'),
+            Paragraph(f'H&M 과거 {age_label} 고객·{merchandise}·' + ('검증된 핵심 월' if plan else '겨울(12~2월)') + f'·{channel_label} 구매 기록을 참고했습니다. 고객 성별과 현재 수요·재고는 확인되지 않았습니다.'),
             *([Paragraph(line) for line in period_note(plan).splitlines() if not line.startswith("운영 일정:")] if plan else []),
             *([Paragraph(saved_comparison_note(run))] if saved_comparison_note(run) else []),
             Paragraph(total_note + ' (현재 판매량 아님)'),
@@ -539,7 +545,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
     target.extend([
         Paragraph('6.1 핵심 타깃 정의 및 선정 조건'),
         Table(['항목', '확인 결과'], [
-            ['기획상 목표', f'{age_label} 온라인 회원 (성별 확인값 아님)'],
+            ['기획상 목표', f'{age_label} 고객 / {channel_label} (고객 성별 확인값 아님)'],
             ['적용 필터·데이터 기준일', '________________ [추후 입력]'],
             ['회원 상태·마케팅 수신 동의', '________________ [추후 입력]']]),
         Paragraph('6.2 고객 점수 및 세그먼트별 선정 결과'),
@@ -595,7 +601,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
             Paragraph('6.1 고객 분석 및 선정 기준', 'subheading'),
             Paragraph('분석 기준: H&M 과거 구매 데이터 기반 시뮬레이션 (2020.09.23 기준)'),
             *([Paragraph(audience_text(selected)), Paragraph(population_text(selected)), Paragraph(f'시장·상품 분석의 저장 연령 범위: {age_label}. 저장된 연령은 구매 당시 또는 현재 연령이 아닙니다. 연령 제한 모집단의 정책 Lift는 미검증입니다.')] if selected.get('audience') else []),
-            Paragraph('직전 90일 구매 고객 중 연령 조건을 충족한 모집단의 조합별 30일 예측 순위와 180일 취향을 사용합니다. 구매 이력은 전체 채널 기준입니다. 동점은 평균 백분위로 처리하며 구매 순위·취향 각각 조합별 최대값을 사용합니다. 과거 자료의 순위 기반 후보이며 실제 발송 가능 인원은 아닙니다.' if selected.get('policy') == 'r40_v1' else '직전 90일 구매 고객 전체(연령 필터 미적용)의 품목·색상별 30일 구매 예측 순위입니다. 색상별 상위 고객을 선정하고 중복 고객을 별도 그룹으로 분리했습니다.'),
+            Paragraph('직전 90일 구매 고객 중 연령 조건을 충족한 모집단의 조합별 30일 예측 순위와 180일 취향을 사용합니다. 구매 이력은 전체 채널 기준이며 모델은 상품 유형×색상 점수로 상품 성별별·채널별 구매 예측이 아닙니다. 동점은 평균 백분위로 처리하며 구매 순위·취향 각각 조합별 최대값을 사용합니다. 과거 자료의 순위 기반 후보이며 실제 발송 가능 인원은 아닙니다.' if selected.get('policy') == 'r40_v1' else '직전 90일 구매 고객 전체(연령 필터 미적용)의 품목·색상별 30일 구매 예측 순위입니다. 색상별 상위 고객을 선정하고 중복 고객을 별도 그룹으로 분리했습니다.'),
             Table(['모델 분석 품목', '색상', '점수 산출 고객'], [[c['product_type'], c['colour'], f"{c['total']:,}명"] for c in selected['combos']]),
             Paragraph(f"선정 기준: {selection_basis(selected)} / 전체 중복 제거 {selected['total']:,}명"),
             *([Paragraph(f"전체 점수화 고객: {selected['population']:,}명 / 취향 경계값: {selected['taste_cutoff']:.6f}" if selected['taste_cutoff'] is not None else f"전체 점수화 고객: {selected['population']:,}명 / 양수 취향 없음"),

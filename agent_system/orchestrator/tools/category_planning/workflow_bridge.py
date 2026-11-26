@@ -26,7 +26,15 @@ def parse_scope(request: str) -> dict:
 
 
 def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, *, period_plan=None) -> dict:
-    scope = parse_scope(request)
+    if period_plan and 'campaign_scope' in period_plan:
+        from .analysis_scope_r427 import plan_scope
+        from ..campaign_scope_r43 import plan_scope as campaign_scope, parse_scope as parse_campaign_scope
+        selected = campaign_scope(period_plan)
+        if selected != parse_campaign_scope(request):
+            raise ValueError('최초 요청과 상품군·채널 계획이 다릅니다.')
+        scope = {**plan_scope(period_plan), 'channel': selected['channel'], 'winter_only': False}
+    else:
+        scope = parse_scope(request)
     from .analysis_scope_r427 import bind_plan, EXTERNAL_NOTE
     from ..audience_scope_r426 import label
     age = {k:scope[k] for k in ('age_min','age_max')}
@@ -38,8 +46,13 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     from .period_context import complete_scope, period_note, scope_days, scope_text, period_table_note
-    if period_plan is not None and scope['channel'] != 'online':
+    if period_plan is not None and 'campaign_scope' not in period_plan and scope['channel'] != 'online':
         raise ValueError('기간 연동 상품 선정은 온라인 채널만 지원합니다. 다른 채널로 임의 대체하지 않습니다.')
+    from ..campaign_scope_r43 import labels
+    merchandise, channel_label = labels(period_plan)
+    if period_plan is None:
+        from ..campaign_scope_r43 import CHANNEL_LABELS
+        channel_label = CHANNEL_LABELS[scope['channel']]
     sales = category_sales(**scope, period_plan=period_plan) if period_plan is not None else category_sales(**scope)
     before = {}
     if period_plan is not None and complete_scope(period_plan, 'before'):
@@ -58,13 +71,16 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, 
             row['hm_before_purchases_per_day'] = (round(row['hm_before_purchases']/row['hm_before_days'], 2)
                                                   if row['hm_before_purchases'] is not None else None)
             row['analysis_period'] = scope_text(period_plan)
+            if 'campaign_scope' in period_plan:
+                row['analysis_product_gender'] = period_plan['campaign_scope']['product_gender']
+                row['analysis_channel'] = period_plan['campaign_scope']['channel']
     candidates = []
     for r in sorted(rows, key=lambda row: (-int(row.get('hm_purchases', 0)), row['category'])):
         if period_plan is not None and not r['hm_purchases']:
             continue
         models = int(r.get('hm_product_count') or 0)
-        notes = [f"H&M 과거 핵심 월 온라인 구매 기록 {r['hm_purchases']:,}건 ({age_label}, 여성용 상품)" if period_plan else
-                 f"H&M 과거 겨울 온라인 구매 기록 {r['hm_purchases']:,}건 ({age_label}, 여성용 상품)"]
+        notes = [f"H&M 과거 핵심 월 {channel_label} 구매 기록 {r['hm_purchases']:,}건 ({age_label}, {merchandise})" if period_plan else
+                 f"H&M 과거 겨울 {channel_label} 구매 기록 {r['hm_purchases']:,}건 ({age_label}, {merchandise})"]
         if models:
             notes.append(f"모델당 구매 기록 약 {r['hm_purchases']/models:,.1f}건 (상품군 크기 참고)")
         if r['musinsa_sample_products']:
@@ -136,9 +152,10 @@ def build_category_result(request: str, output_dir: str | Path, top_n: int = 3, 
     frame['analysis_age_min'] = age['age_min']
     frame['analysis_age_max'] = age['age_max']
     lines = ['■ 5개 상품군 비교 및 주력 상품군 추천',
-             f'조건: {age_label} 고객 / ' + ('온라인' if scope['channel'] == 'online' else '오프라인') +
-             (' / H&M 여성용 상품 / 과거 핵심 월 거래' if period_plan else ' / H&M 여성용 상품 / 과거 12~2월 거래'),
+             f'조건: {age_label} 고객 / {channel_label} / H&M {merchandise} / ' +
+             ('과거 핵심 월 거래' if period_plan else '과거 12~2월 거래'),
              '고객 성별은 H&M DB에서 확인할 수 없습니다. 과거 거래 기록과 현재 외부 동향은 별도 근거입니다.', EXTERNAL_NOTE,
+             '상품군별 외부 시장 전체 표본은 상품 성별 및 거래 채널로 제한된 판매 실적이 아닙니다.',
              '', '추천 후보 (검토 순서, 확정된 시장 인기 순위 아님)']
     if period_plan is not None:
         lines.insert(2, period_note(period_plan))

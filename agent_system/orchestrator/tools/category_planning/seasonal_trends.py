@@ -21,13 +21,14 @@ def period_windows(plan):
     return result
 
 
-def aggregate_months(articles, transactions, windows, categories=None):
+def aggregate_months(articles, transactions, windows, categories=None, *, plan=None):
     """범위별 월 집계. 동일 상품이 여러 상품군에 귀속되면 오류로 처리한다."""
     from shared_analysis.product.category_mapping import CATEGORIES, category_masks
     categories = tuple(categories or CATEGORIES)
     if not windows or transactions is None or transactions.empty:
         return pd.DataFrame(columns=['season', 'scope', 'month', 'category', 'purchases'])
-    eligible = articles.loc[articles['index_group_name'].isin(['Ladieswear', 'Divided'])].copy()
+    from ..campaign_scope_r43 import eligible_articles, plan_scope
+    eligible = eligible_articles(articles, plan_scope(plan))
     eligible['article_id'] = eligible['article_id'].astype(str).str.zfill(10)
     masks = category_masks(eligible)
     category_frames = []
@@ -46,7 +47,7 @@ def aggregate_months(articles, transactions, windows, categories=None):
         raise ValueError('구매 건수가 음수입니다.')
     joined = tx.merge(links, how='inner', on='article_id', validate='many_to_one')
     if joined.empty:
-        raise ValueError('H&M 월별 거래와 여성 상품군을 연결하지 못했습니다.')
+        raise ValueError('H&M 월별 거래와 선택 상품군을 연결하지 못했습니다.')
     out = joined.groupby(['month', 'category'], as_index=False)['purchases'].sum()
     # 날짜 필터는 SQL에서 period_windows로 적용. 반올림하거나 없는 달을 지어내지 않는다.
     return out
@@ -63,6 +64,7 @@ def load_monthly_purchases(plan):
     if 'analysis_as_of' in plan and str(plan['analysis_as_of']) != str(hm_products.data_as_of()):
         raise ValueError('H&M 기준일이 변경돼 기간별 구매 추이 분석을 중단합니다.')
     from .analysis_scope_r427 import query_args
+    from ..campaign_scope_r43 import channel_sql
     clauses, args = [], query_args(plan)
     for p in windows:
         clauses.append('(CAST(t.t_dat AS DATE) >= ? AND CAST(t.t_dat AS DATE) <= ?)')
@@ -71,14 +73,14 @@ def load_monthly_purchases(plan):
            "CAST(t.article_id AS VARCHAR) AS article_id, COUNT(*) AS purchases "
            "FROM hm.transactions AS t "
            "JOIN hm.customers AS c ON c.customer_id = t.customer_id "
-           "WHERE t.sales_channel_id = 2 AND c.age BETWEEN ? AND ? AND ("
+           "WHERE " + channel_sql(plan) + " AND c.age BETWEEN ? AND ? AND ("
            + ' OR '.join(clauses) + ") GROUP BY 1, 2")
     conn = get_analysis_connection()
     try:
         tx = conn.execute(sql, args).df()
     finally:
         conn.close()
-    monthly = aggregate_months(articles, tx, windows)
+    monthly = aggregate_months(articles, tx, windows, plan=plan)
     monthly['month_date'] = pd.to_datetime(monthly['month'] + '-01').dt.date
     records = []
     for window in windows:
@@ -98,7 +100,8 @@ def load_monthly_purchases(plan):
             if str(month) in months_seen:
                 raise ValueError('서로 다른 기간에 같은 월이 중복되어 있습니다.')
             months_seen.add(str(month))
-    return add_observed_days(pd.DataFrame(records, columns=['season','scope','month','category','purchases']), plan)
+    result = add_observed_days(pd.DataFrame(records, columns=['season','scope','month','category','purchases']), plan)
+    return annotate_scope(result, plan)
 
 
 def verify_monthly_totals(frame, category_rows):
@@ -182,7 +185,8 @@ def load_aligned_weekly_purchases(plan, categories=None):
     if 'analysis_as_of' in plan and str(plan['analysis_as_of'])!=str(hm_products.data_as_of()):
         raise ValueError('H&M 데이터 기준일이 달라졌습니다.')
     articles=hm_products.articles()
-    eligible=articles.loc[articles['index_group_name'].isin(['Ladieswear','Divided'])].copy()
+    from ..campaign_scope_r43 import eligible_articles, plan_scope, channel_sql
+    eligible=eligible_articles(articles, plan_scope(plan))
     eligible['article_id']=eligible['article_id'].astype(str).str.zfill(10)
     cats=tuple(categories or CATEGORIES)
     masks=category_masks(eligible)
@@ -196,7 +200,7 @@ def load_aligned_weekly_purchases(plan, categories=None):
         args.extend([w['start'].isoformat(),w['end'].isoformat()])
     sql=('SELECT CAST(t.t_dat AS DATE) AS purchase_day, CAST(t.article_id AS VARCHAR) AS article_id, COUNT(*) AS purchases '
          'FROM hm.transactions t JOIN hm.customers c ON c.customer_id=t.customer_id '
-         'WHERE t.sales_channel_id=2 AND c.age BETWEEN ? AND ? AND ('+' OR '.join(clauses)+') '
+         'WHERE '+channel_sql(plan)+' AND c.age BETWEEN ? AND ? AND ('+' OR '.join(clauses)+') '
          'GROUP BY 1,2')
     conn=get_analysis_connection()
     try: tx=conn.execute(sql,args).df()
@@ -224,4 +228,13 @@ def load_aligned_weekly_purchases(plan, categories=None):
                 rows.append({'season':w['season'],'start_year':w['start_year'],'category':cat,'week_index':week_index,
                              'week_start':str(week_start),'week_end':str(week_end),'observed_days':days,
                              'purchases':n,'purchases_per_day':n/days})
-    return pd.DataFrame(rows)
+    return annotate_scope(pd.DataFrame(rows), plan)
+
+
+def annotate_scope(frame, plan):
+    """신규 Run의 차트/CSV에도 원래 조회 범위를 남긴다."""
+    if 'campaign_scope' in (plan or {}):
+        from ..campaign_scope_r43 import plan_scope
+        scope = plan_scope(plan)
+        frame = frame.assign(analysis_product_gender=scope['product_gender'], analysis_channel=scope['channel'])
+    return frame

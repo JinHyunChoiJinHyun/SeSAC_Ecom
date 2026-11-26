@@ -208,7 +208,8 @@ def period_note(plan):
 
 
 def purchase_label(plan):
-    return '과거 핵심 월 온라인 구매' if plan else '과거 겨울 온라인 구매'
+    from ..campaign_scope_r43 import labels
+    return f'과거 핵심 월 {labels(plan)[1]} 구매' if plan else '과거 겨울 온라인 구매'
 
 
 def run_schedule(run, fallback='미확정'):
@@ -254,7 +255,12 @@ def build_period_product_result(category, plan, subtype_flow=False):
                      core_days=scope_days(plan, 'core'), before_days=scope_days(plan, 'before'))
     tags = Counter(tag for values in selected.get('style_tags', []) if isinstance(values, (list, tuple, set)) for tag in set(values))
     colors = selected['colour_group_name'].dropna().value_counts().to_dict()
-    snapshot = {'basis': f'핵심 분석 월 구매 기록이 있는 여성용 상품 구성 ({age_label}·온라인)',
+    from ..campaign_scope_r43 import labels
+    merchandise, channel_label = labels(plan)
+    for value in inventory.values():
+        value['analysis_merchandise'] = merchandise
+        value['analysis_channel_label'] = channel_label
+    snapshot = {'basis': f'핵심 분석 월 구매 기록이 있는 {merchandise} 구성 ({age_label}·{channel_label})',
                 'total_articles': int(selected['article_id'].nunique()),
                 'total_products': int(selected['product_code'].nunique()),
                 'colour_counts': {str(k): int(v) for k,v in colors.items()},
@@ -286,6 +292,11 @@ def validate_report_context(run, campaign):
         if any(r.get('analysis_age_min') != age['age_min'] or r.get('analysis_age_max') != age['age_max']
                for r in run.get('verified_candidate_rows') or []):
             raise ValueError('확정 상품의 분석 연령이 현재 기획전과 다릅니다. 새 분석을 시작하세요.')
+    if 'campaign_scope' in plan:
+        from ..campaign_scope_r43 import run_scope as campaign_scope
+        scope = campaign_scope(run)
+        if any(r.get('analysis_product_gender') != scope['product_gender'] or r.get('analysis_channel') != scope['channel'] for r in run.get('verified_candidate_rows') or []):
+            raise ValueError('확정 상품의 상품군·채널이 현재 기획전과 다릅니다.')
     if not schedule_matches(run, values.get('schedule')):
         raise ValueError('승인된 운영 일정과 분석 기간이 일치하지 않습니다.')
     if any(not confirmed_since(campaign, key, run.get('started_at', '')) for key in ('products', 'schedule', 'page')):

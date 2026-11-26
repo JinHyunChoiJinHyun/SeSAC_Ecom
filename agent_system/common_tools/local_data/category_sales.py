@@ -10,7 +10,7 @@ def winter_dates(years=(2018, 2019, 2020)) -> list[tuple[str, str]]:
     return [(f'{year}-12-01', f'{year + 1}-02-28') for year in years]
 
 
-def category_sales(age_min: int | None = None, age_max: int | None = None, channel: str = 'online',
+def category_sales(age_min: int | None = None, age_max: int | None = None, channel: str | None = None,
                    winter_only: bool = True, *, period_plan: dict | None = None, scope: str = "core") -> dict:
     """실측 과거 구매 집계. 고객 성별은 원본 DB에 없으므로 필터하지 않습니다.
 
@@ -26,9 +26,19 @@ def category_sales(age_min: int | None = None, age_max: int | None = None, chann
         raise ValueError('카테고리 연령과 기간 계획의 연령이 다릅니다.')
     if type(age_min) is not int or type(age_max) is not int or not (0 <= age_min <= age_max <= 120):
         raise ValueError('연령 조건이 올바르지 않습니다')
+    requested_channel = channel
+    channel = 'online' if channel is None else channel
     if channel not in hm_products.CHANNELS:
         raise ValueError('알 수 없는 구매 채널입니다')
-    products = categorize(hm_products.articles())
+    from agent_system.orchestrator.tools.campaign_scope_r43 import plan_scope as campaign_scope, eligible_articles, labels
+    if period_plan and 'campaign_scope' in period_plan:
+        selected_scope = campaign_scope(period_plan)
+        if requested_channel is not None and requested_channel != selected_scope['channel']:
+            raise ValueError('기간 계획과 채널이 다릅니다.')
+        channel = selected_scope['channel']
+        products = categorize(eligible_articles(hm_products.articles(), selected_scope), female_merchandise=False)
+    else:
+        products = categorize(hm_products.articles())
     chosen = products.loc[products['musinsa_category'].notna(), ['article_id', 'musinsa_category', 'product_code']]
     from agent_system.common_tools.local_data.campaign_period import purchase_date_filter
     cutoff = hm_products.data_as_of()
@@ -65,7 +75,7 @@ def category_sales(age_min: int | None = None, age_max: int | None = None, chann
     return {'rows': rows, 'channel': channel, 'age_min': age_min, 'age_max': age_max,
             'winter_only': winter_only if period_plan is None else False, 'data_as_of': str(cutoff),
             **({'period_plan': period_plan, 'period_scope': scope} if period_plan is not None else {}),
-            'note': (f'{age_min}~{age_max}세 고객이 {channel} 채널에서 구매한 여성용 상품의 과거 구매 건수. '
+            'note': (f'{age_min}~{age_max}세 고객이 {channel} 채널에서 구매한 {labels(period_plan)[0]}의 과거 구매 건수. '
                      '성별·구매 당시 나이는 확인 불가. ' +
                      (f'과거 월 단위 분석 기간({scope}). ' if period_plan is not None else '겨울=12·1·2월. ' if winter_only else '전체 관측 기간. ') +
                      '구매건수는 거래 레코드 수이며 수량과 완전히 같다고 보장하지 않음.')}

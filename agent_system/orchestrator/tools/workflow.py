@@ -344,10 +344,16 @@ def run_workflow_node(state) -> dict:
                     from .category_planning.analysis_scope_r427 import bind_plan
                     from .audience_scope_r426 import require_scope
                     run["period_plan"] = bind_plan(plan, require_scope(run))
+                    if "campaign_scope" in run:
+                        from .campaign_scope_r43 import bind_plan as bind_campaign_scope
+                        run["period_plan"] = bind_campaign_scope(run["period_plan"], run["campaign_scope"])
                 if run.get("period_plan") is not None:
                     from .category_planning.analysis_scope_r427 import bind_plan
                     from .audience_scope_r426 import require_scope
                     run["period_plan"] = bind_plan(run["period_plan"], require_scope(run))
+                    if "campaign_scope" in run:
+                        from .campaign_scope_r43 import bind_plan as bind_campaign_scope
+                        run["period_plan"] = bind_campaign_scope(run["period_plan"], run["campaign_scope"])
                     result = build_category_result(run.get("request", ""), output, period_plan=run["period_plan"])
                     run["category_period_rows"] = result["rows"]
                 else:
@@ -570,7 +576,7 @@ def run_workflow_node(state) -> dict:
                     from agent_system.orchestrator.tools.category_planning.subtype_selection import review_options
                     from agent_system.orchestrator.tools.category_planning.subtype_selection import collect_musinsa_subtype_evidence
                     inventory = run.get("subtype_inventory") or {}
-                    market_evidence = collect_musinsa_subtype_evidence(run["review_category"], inventory.keys())
+                    market_evidence = collect_musinsa_subtype_evidence(run["review_category"], inventory.keys(), **({"product_gender": run["campaign_scope"]["product_gender"]} if "campaign_scope" in run else {}))
                     run["musinsa_subtype_evidence"] = market_evidence
                     options = review_options(run["review_category"], (run.get("category_market") or {}).get("naver_metrics") or {}, inventory, market_evidence)
                     run["subtype_options"] = options
@@ -659,7 +665,7 @@ def run_workflow_node(state) -> dict:
             subtype = ((campaign.get("values") or {}).get("subtype") or run.get("selected_subtype")
                        or (campaign.get("values") or {}).get("category"))
             try:
-                ranked = load_ranked_evidence(market.get("category") or "", str(subtype or ""))
+                ranked = load_ranked_evidence(market.get("category") or "", str(subtype or ""), **({"product_gender": run["campaign_scope"]["product_gender"]} if "campaign_scope" in run else {}))
                 market["ranked_evidence"] = ranked
                 run["category_market"] = market
                 scoped = render_ranked(ranked)
@@ -723,7 +729,7 @@ def run_workflow_node(state) -> dict:
                     run["subtype_inventory"] = build_inventory(run["review_category"], articles, purchases)
                     for item in run['subtype_inventory'].values():
                         item['analysis_age_label'] = label(age)
-                    note = "5단계 세부 유형별 과거 겨울 온라인 구매 집계 저장 완료. 7단계에서 네이버 상승 근거와 대조합니다."
+                    note = "5단계 세부 유형별 과거 " + ("핵심 월" if run.get('period_plan') else "겨울") + " 온라인 구매 집계 저장 완료. 7단계에서 네이버 상승 근거와 대조합니다."
                     sections.append(note)
                     result["final_answer"] = answer = answer + "\n" + note
                 except Exception as exc:
@@ -857,6 +863,11 @@ def start_run(workflow_name: str, request: str, campaign: dict | None, previous_
     workflow = get_workflow(workflow_name)
     if workflow is None:
         return {}, f"등록되지 않은 워크플로입니다: {workflow_name}"
+    if workflow_name == 'trend_planning':
+        from .campaign_scope_r43 import unsupported_scope
+        reason = unsupported_scope(request)
+        if reason:
+            return {}, reason
     if base.is_active(previous_run):
         return {}, ("이미 진행 중인 워크플로가 있습니다.\n" + run_status_text(previous_run, campaign)
                     + "\n새로 시작하려면 먼저 아래 [워크플로 취소] 버튼으로 진행 중인 워크플로를 끝내 주세요.")
@@ -869,6 +880,10 @@ def start_run(workflow_name: str, request: str, campaign: dict | None, previous_
     if workflow_name == "trend_planning":
         from agent_system.orchestrator.tools.category_planning.period_context import interpret_schedule
         run["period_required"] = True
+        from .campaign_season import explicit_seasons
+        run['marketing_seasons'] = explicit_seasons(request)
+        from .campaign_scope_r43 import parse_scope as parse_campaign_scope
+        run['campaign_scope'] = parse_campaign_scope(request)
         from .audience_scope_r426 import initial_scope
         scope = initial_scope(run)
         if scope is not None:
@@ -901,10 +916,28 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
             return str(exc) + "\n" + date_prompt(run), None, False
         if not interpreted:
             return date_prompt(run), None, False
+        if 'campaign_scope' in run and re.search(r'여성|남성|남자|여자|남녀|공용|키즈|아동|온라인|오프라인|매장|유니섹스', message):
+            from .campaign_scope_r43 import parse_scope as parse_campaign_scope
+            try:
+                # 날짜 답변에 명시된 조건만 비교한다. 미명시는 기존 범위를 유지한다.
+                new = parse_campaign_scope(message)
+                old = run['campaign_scope']
+                if re.search(r'여성|남성|남자|여자|남녀|공용|키즈|아동|유니섹스', message) and new['product_gender'] != old['product_gender']:
+                    raise ValueError('최초 상품군 조건과 다릅니다.')
+                if re.search(r'온라인|오프라인|매장', message) and new['channel'] != old['channel']:
+                    raise ValueError('최초 채널 조건과 다릅니다.')
+            except ValueError as exc:
+                return str(exc) + ' 조건 변경은 새 기획전으로 요청해 주세요.', None, False
         dates = interpreted["dates"]
         revised = dict(run, campaign_dates=dates, schedule_interpretation=interpreted,
                        period_proposal=None, status="running", waiting_key="", blocked_reason="")
+        from .campaign_season import explicit_seasons
+        seasons = explicit_seasons(message)
+        if seasons:
+            revised['marketing_seasons'] = seasons
         return "", base.record_run_event(revised, "campaign_period_resolved", **dates, precision=interpreted["precision"]), True
+    if 'campaign_scope' in run and re.search(r'(?:상품\s*성별|상품군\s*성별|판매\s*채널|분석\s*채널|고객\s*성별|기획전\s*대상|기획전\s*조건)', message) and re.search(r'변경|수정|바꿔|다시', message):
+        return '확정된 상품군·채널·고객 조건은 분석 중 바꾸지 않습니다. 현재 워크플로 취소 후 새 요청으로 시작하세요.', None, False
     # 기간 변경으로 승인 근거를 조용히 바꾸지 않는다.
     if run.get("period_plan") and re.search(r"(?:기획전|운영)\s*(?:일정|기간)", message) and re.search(r"변경|수정|다시", message):
         return "현재 분석의 운영 일정은 고정되어 있습니다. 날짜를 변경하려면 워크플로 취소 후 새 분석을 시작하세요.", None, False

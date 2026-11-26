@@ -37,6 +37,8 @@ def build_summary(run, campaign, details):
     ]
     candidates = []
     for label, aspect, pattern in feature_specs:
+        if values.get('category') != '아우터':
+            label = label.replace('아우터', '상품')
         matched = {}
         for i in ids:
             row = rows[i]
@@ -75,7 +77,10 @@ def build_summary(run, campaign, details):
     category = values['category']
     from agent_system.orchestrator.tools.category_planning.period_context import purchase_label
     plan = run.get('period_plan')
-    themes = [f'{category} 컬렉션' if plan else f'겨울 {category} 컬렉션', f'나에게 맞는 {category} 스타일']
+    from .campaign_season import from_campaign
+    season_context = from_campaign(run, campaign)
+    season_prefix = '' if season_context['source']=='neutral' else season_context['season']+' '
+    themes = [f'{season_prefix}{category} 컬렉션', f'나에게 맞는 {category} 스타일']
     # 참고 사례 Run에서는 이미 승인된 세부 유형만 기획전 주제로 제공한다.
     if run.get('reference_product_role') == 'historical_reference':
         themes = [str(values.get('subtype') or run.get('selected_subtype') or '').strip()]
@@ -101,6 +106,7 @@ def build_summary(run, campaign, details):
             verified_designs.append({'label': label, 'matched_ids': matched_ids, 'products': len(matched_ids)})
     # 상위 랭킹 관련 상품의 근거를 저장하되 기존 공통 소구점의 검증 조건은 유지한다.
     ranked = market.get('ranked_evidence') or {}
+    summary['season_context'] = season_context
     summary['verified_designs'] = verified_designs
     if ranked:
         summary['ranked_evidence'] = ranked
@@ -136,7 +142,7 @@ def build_summary(run, campaign, details):
         related_count = ranked.get('related_reviews', 0)
         ranking_count = ranked.get('related_products', 0)
         ranked_lines.append(
-            f"무신사 랭킹에서 여성·공용 우선 비교한 '{subtype}' 관련 잠정 후보 {ranking_count}개와 "
+            f"무신사 랭킹에서 {ranked.get('gender_scope') or '성별 범위 미확인'} 기준으로 비교한 '{subtype}' 관련 잠정 후보 {ranking_count}개와 "
             f"그 상품에 연결된 리뷰 {related_count}건을 별도로 분석했어요. "
             f"상품명 규칙 분류이므로 실제 {subtype} 제품인지 최종 인증한 결과는 아닙니다.")
         shapes = [x for x in ranked.get('related_shapes', [])

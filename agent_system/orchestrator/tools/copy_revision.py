@@ -78,7 +78,7 @@ def _feedback_profile(feedback):
     return short, emotional, korean, phrase
 
 
-def regenerate_copy(base, feedback, previous_revision=0):
+def _regenerate_copy_r4283(base, feedback, previous_revision=0):
     """지정 안만 재작성한다. 변경 이력은 그대로 재생 가능한 형태로 보관한다."""
     from copy import deepcopy
     # 입력 전체의 안전 검사는 유지하되, 수정 안별 스타일은 독립 적용한다.
@@ -96,7 +96,7 @@ def regenerate_copy(base, feedback, previous_revision=0):
     subtype = base['subtype']
     colors = base['colors']
     instructions = _numbered_instructions(feedback)
-    from agent_system.orchestrator.tools.fashion_copy import make_fashion_copy
+    from .campaign_legacy_r4283 import make_fashion_copy
     for number in targets:
         segment = instructions.get(number) or feedback
         short, emotional, korean, phrase = _feedback_profile(segment)
@@ -122,6 +122,70 @@ def regenerate_copy(base, feedback, previous_revision=0):
             raise ValueError(f'{number}안의 요청 글자 수로 문구를 만들 수 없습니다.')
         creative = make_fashion_copy(subtype=subtype, colors=colors, points=base['points'],
                                      mood='감성' if emotional and not short else '간결' if short else '일상', korean=korean)
+        candidate = base['candidates'][number-1]
+        subcopies = creative['options'][number-1]['subcopies']
+        candidate.update(headline=headline, description=subcopies[0], subcopies=subcopies,
+                         tone=creative['options'][number-1]['tone'], basis=list(base['points']), verified=True)
+    # 공유 키워드는 전체 안의 기준이므로 별도 수정을 요청하지 않으면 보존한다.
+    base['copy_style'] = 'fashion_v422a'
+    base['revision'] = previous_revision + 1
+    base['revision_feedback'] = feedback.strip()
+    base['revision_targets'] = targets
+    steps = list(base.get('revision_steps') or [])
+    steps.append({'feedback': feedback.strip(), 'targets': targets})
+    base['revision_steps'] = steps
+    base['status'] = 'draft'
+    return base
+
+
+def regenerate_copy(base, feedback, previous_revision=0):
+    """지정 안만 재작성한다. 변경 이력은 그대로 재생 가능한 형태로 보관한다."""
+    if 'season_context' not in base:
+        return _regenerate_copy_r4283(base, feedback, previous_revision)
+    from copy import deepcopy
+    # 입력 전체의 안전 검사는 유지하되, 수정 안별 스타일은 독립 적용한다.
+    _feedback_profile(feedback)
+    if base.get('status') not in ('draft', 'verified') or len(base.get('candidates') or []) != 3:
+        raise ValueError('검증된 기존 문구 3안이 필요합니다.')
+    if not isinstance(previous_revision, int) or not 0 <= previous_revision <= 30:
+        raise ValueError('문구 수정 횟수 정보가 올바르지 않습니다.')
+    if previous_revision >= 30:
+        raise ValueError('문구 수정은 최대 30회까지 지원합니다.')
+    base = deepcopy(base)
+    targets = parse_revision_targets(feedback)
+    if not targets:
+        raise ValueError('모든 안을 유지하도록 요청했습니다. 수정할 안을 지정해 주세요.')
+    from .campaign_season import season_words
+    from .campaign_colors import korean_color
+    season, _, _ = season_words(base.get('season_context'))
+    subtype = base['subtype']
+    colors = base['colors']
+    instructions = _numbered_instructions(feedback)
+    from agent_system.orchestrator.tools.fashion_copy import make_fashion_copy
+    for number in targets:
+        segment = instructions.get(number) or feedback
+        short, emotional, korean, phrase = _feedback_profile(segment)
+        premium = bool(re.search(r'프리미엄|고급|럭셔리|미니멀', segment))
+        color_text = '·'.join(colors)
+        if korean:
+            color_text = '·'.join(korean_color(x) for x in colors)
+        if short and premium:
+            headline = [f'{season}, {subtype}', f'{color_text} 컬렉션', f'{color_text} 무드'][number-1]
+        elif short:
+            headline = [f'{subtype}, 취향대로', f'{color_text} {subtype}', f'나다운 {subtype}'][number-1]
+        elif emotional:
+            headline = [f'{season}의 순간마다, 나다운 {subtype}', f'취향으로 완성하는 {subtype}',
+                        f'{color_text}, 나만의 {season} 스타일'][number-1]
+        else:
+            headline = [f'{color_text}로 고르는 {subtype}', f'취향을 담은 {subtype} 컬렉션',
+                        f'디자인으로 비교하는 {subtype}'][number-1]
+        if phrase and number == targets[0]:
+            headline = f'{phrase} — {subtype}'
+        length = re.search(r'(\d{1,2})\s*자\s*이내', segment)
+        if length and len(headline) > int(length.group(1)):
+            raise ValueError(f'{number}안의 요청 글자 수로 문구를 만들 수 없습니다.')
+        creative = make_fashion_copy(subtype=subtype, colors=colors, points=base['points'],
+                                     mood='감성' if emotional and not short else '간결' if short else '일상', korean=korean, season_context=base.get('season_context'))
         candidate = base['candidates'][number-1]
         subcopies = creative['options'][number-1]['subcopies']
         candidate.update(headline=headline, description=subcopies[0], subcopies=subcopies,

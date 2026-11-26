@@ -140,9 +140,13 @@ def build_draft(run, campaign):
     )
     validate_report_context(run, campaign)
     plan = run.get('period_plan')
+    from .campaign_scope_r43 import labels
+    merchandise, channel_label = labels(plan)
     from .category_planning.analysis_scope_r427 import report_label, EXTERNAL_NOTE
     age_label = report_label(run)
-    theme = _text(values.get("theme"), f"{'' if plan else '겨울 '}{_text(values.get('category'))} 컬렉션")
+    from .campaign_season import from_campaign
+    season_context = from_campaign(run,campaign)
+    theme = _text(values.get("theme"), f"{_text(values.get('category'))} 컬렉션")
     schedule = run_schedule(run, _text(values.get("schedule")))
     basis = purchase_label(plan)
     points = _selling_points(values.get("selling_points"))
@@ -159,7 +163,7 @@ def build_draft(run, campaign):
     ranked = market.get("ranked_evidence") or (run.get("campaign_summary") or {}).get("ranked_evidence") or {}
     market_note = "무신사 상위 랭킹 및 관련 리뷰: 해당 데이터의 수집 시점·표본·분류 한계를 확인해야 합니다."
     if ranked:
-        market_note = (f"무신사 {market.get('category') or values.get('category') or '해당 카테고리'} 상위 {ranked.get('total_products', '미확인')}개 수집 표본에서 여성·공용 상품의 관련 잠정 후보 "
+        market_note = (f"무신사 {market.get('category') or values.get('category') or '해당 카테고리'} 상위 {ranked.get('total_products', '미확인')}개 수집 표본에서 {ranked.get('gender_scope') or '성별 범위 미확인'} 관련 잠정 후보 "
                        f"{ranked.get('related_products', '미확인')}개와 연결 리뷰 "
                        f"{ranked.get('related_reviews', '미확인')}건을 참고했습니다. "
                        "상품명 기반 잠정 분류이며 판매량·시장 선호도 순위가 아닙니다.")
@@ -169,11 +173,12 @@ def build_draft(run, campaign):
             f"대분류·소분류: {_text(values.get('category'))} / {subtype}\n"
             f"선정 색상: {', '.join(colors) if colors else '미확정'}\n"
             f"기간: {schedule}\n"
+            f"콘텐츠 계절: {season_context['season']} ({'사용자 명시' if season_context['source']=='explicit' else '운영 기간 기준' if season_context['source']=='period' else '미지정'})\n"
             f"승인된 완성형 카피:\n{_full_copy(values.get('page'))}\n"
             "\n2. H&M 과거 판매 참고 사례 및 근거 (현재 판매 상품 아님)\n"
             + "\n".join(product_lines) + "\n"
-            f"참고 사례 선정 근거: H&M 상품명·설명 기준 세부 유형 매칭과 {age_label}·여성용 상품·"
-            + ("검증된 핵심 월" if plan else "겨울(12~2월)") + "·온라인 채널의 과거 거래 기록."
+            f"참고 사례 선정 근거: H&M 상품명·설명 기준 세부 유형 매칭과 {age_label}·{merchandise}·"
+            + ("검증된 핵심 월" if plan else "겨울(12~2월)") + f"·{channel_label} 채널의 과거 거래 기록."
             + " 현재 매출이나 재고는 아닙니다.\n"
             + (("\n".join(x for x in period_note(plan).splitlines() if not x.startswith("운영 일정:")) + "\n" + saved_comparison_note(run) + "\n") if plan else "") +
             initial_evidence + '\n' + EXTERNAL_NOTE + '\n'
@@ -185,7 +190,7 @@ def build_draft(run, campaign):
             "[작성 예정] 이 절은 타깃 선정 모델 및 최신 운영 데이터 연동 후 채울 공간입니다. "
             "아래 빈칸은 실제 분석 결과가 아니며, 고객 선정·발송을 수행하지 않았습니다.\n"
             "4.1. 핵심 타깃 정의 및 선정 조건\n"
-            f"기획상 목표 고객: {age_label} 온라인 회원 (여성 의류 구매 이력은 참고 조건이며 고객 성별 확인값이 아님)\n"
+            f"기획상 목표 고객: {age_label} 고객 (기획 채널: {channel_label}, 상품 분류는 고객 성별 확인값이 아님)\n"
             "실제 적용 필터·데이터 기준일: ____________________ [추후 입력]\n"
             "ACTIVE 상태·마케팅 수신 동의 확인: ____________________ [추후 입력]\n"
             "4.2. 고객 점수 및 세그먼트별 선정 결과\n"

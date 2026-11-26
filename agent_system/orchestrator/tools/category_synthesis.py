@@ -72,7 +72,7 @@ def _fallback_hm(category):
             'style_tag_counts': _counts(dict(tags))}
 
 
-def interpret_monthly_seasons(monthly: pd.DataFrame, category: str) -> str:
+def interpret_monthly_seasons(monthly: pd.DataFrame, category: str, period_plan=None) -> str:
     """선택 상품군의 관측 월별 구매량만 이용해 두 시즌의 방향을 설명한다."""
     required = {'season', 'month', 'category', 'purchases'}
     if monthly is None or monthly.empty or not required.issubset(monthly.columns):
@@ -84,27 +84,37 @@ def interpret_monthly_seasons(monthly: pd.DataFrame, category: str) -> str:
     if part['purchases'].isna().any() or (part['purchases'] < 0).any():
         return '월별 구매 변화: 구매 건수 검증이 필요합니다.'
     series = []
-    for season, rows in part.groupby('season', sort=True):
+    for _, rows in part.groupby('season', sort=True):
         values = {}
-        for row in rows.itertuples(index=False):
-            key = str(row.month)[5:7]
-            if key not in {'11', '12', '01'} or key in values or not float(row.purchases).is_integer():
-                return '월별 구매 변화: 겨울 월별 중복·누락 또는 집계값을 확인해야 합니다.'
-            values[key] = int(row.purchases)
-        if set(values) != {'11','12','01'}:
-            return '월별 구매 변화: 비교할 11월·12월·1월 기록이 모두 필요합니다.'
-        def direction(before, after):
-            return '증가' if after > before else ('감소' if after < before else '동일')
-        series.append((season, direction(values['11'],values['12']),direction(values['12'],values['01'])))
+        for row in rows.sort_values('month').itertuples(index=False):
+            month = str(row.month)
+            if not re.fullmatch(r'\d{4}-(?:0[1-9]|1[0-2])', month) or month in values or not float(row.purchases).is_integer():
+                return '월별 구매 변화: 관측 월 중복·누락 또는 집계값을 확인해야 합니다.'
+            values[month] = int(row.purchases)
+        series.append(values)
     if len(series) != 2:
-        return '월별 구매 변화: 두 겨울 시즌의 자료가 필요합니다.'
-    def phrase(index, label):
-        trends = [v[index] for v in series]
+        return '월별 구매 변화: 비교 가능한 두 과거 관측 기간의 자료가 필요합니다.'
+    if period_plan is not None:
+        from .category_planning.seasonal_trends import period_windows
+        expected = {}
+        for w in period_windows(period_plan):
+            expected.setdefault(w['season'], set()).update(str(x) for x in pd.period_range(w['start'],w['end'],freq='M'))
+        if len(expected)!=2 or any(set(vals)!=expected[k] for k,vals in zip(sorted(expected),series)):
+            return '월별 구매 변화: 분석 계획의 관측 월 기록이 일부 누락됐습니다.'
+    months = [[int(m[5:7]) for m in vals] for vals in series]
+    if months[0] != months[1] or len(months[0]) < 2 or any(b != a % 12 + 1 for a,b in zip(months[0],months[0][1:])):
+        return '월별 구매 변화: 두 기간의 연속된 대응 월 기록이 필요합니다.'
+    def direction(before, after):
+        return '증가' if after > before else '감소' if after < before else '동일'
+    lines = []
+    for i,(a,b) in enumerate(zip(months[0],months[0][1:])):
+        trends = [direction(list(vals.values())[i],list(vals.values())[i+1]) for vals in series]
+        label = f'{a}월 대비 {b}월'
         if trends[0] == trends[1]:
-            return f'두 겨울 시즌 모두 {label} 구매 건수가 {trends[0]}했습니다.' if trends[0] != '동일' else f'두 겨울 시즌 모두 {label} 구매 건수가 같았습니다.'
-        return (f'{label} 구매 건수는 첫 시즌에 {trends[0]}, 두 번째 시즌에 {trends[1]}해 '
-                '시즌별 방향이 달랐습니다.')
-    return '월별 주요 발견: ' + ' '.join([phrase(1,'11월 대비 12월'), phrase(2,'12월 대비 1월')])
+            lines.append(f'두 과거 관측 기간 모두 {label} 구매 건수가 {trends[0]}했습니다.' if trends[0]!='동일' else f'두 과거 관측 기간 모두 {label} 구매 건수가 같았습니다.')
+        else:
+            lines.append(f'{label} 구매 건수는 첫 기간에 {trends[0]}, 두 번째 기간에 {trends[1]}해 기간별 방향이 달랐습니다.')
+    return '월별 주요 발견: ' + ' '.join(lines)
 
 
 def summarize(category, hm, market):
@@ -144,7 +154,7 @@ def build_category_summary(category, hm, market, run_id, *, period_plan=None, pe
                 result['attachments'].append(weekly_chart)
                 from agent_system.orchestrator.tools.category_planning.campaign_evidence import summarize_campaign_window
                 evidence = summarize_campaign_window(weekly, [{'category': category}])[category]
-                result['final_answer'] += (f"\n기획전 대응 기간: 과거 두 겨울 시즌 합산 "
+                result['final_answer'] += (f"\n기획전 대응 기간: 과거 두 대응 기간 합산 "
                     f"{evidence['purchases']:,}건, 일평균 {evidence['purchases_per_day']:,.1f}건 "
                     f"(시즌별 {evidence['days_per_season']}일 관측).")
                 weekly['source'] = 'hm_campaign_aligned_weekly'
@@ -153,7 +163,7 @@ def build_category_summary(category, hm, market, run_id, *, period_plan=None, pe
             except Exception as exc:
                 result['final_answer'] += f'\n기획전 대응 주별 구매 추이: 자료 확인 필요 ({type(exc).__name__}: {exc})'
             monthly = monthly.loc[monthly['category'].eq(category)].copy()
-            result['final_answer'] += '\n' + interpret_monthly_seasons(monthly, category)
+            result['final_answer'] += '\n' + interpret_monthly_seasons(monthly, category, period_plan=period_plan)
             monthly['source']='hm_monthly'
             monthly['metric']='purchases'
             result['dataframe']=pd.concat([result['dataframe'],monthly],ignore_index=True)

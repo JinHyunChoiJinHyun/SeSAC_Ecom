@@ -61,7 +61,7 @@ def selection_brief(summary, selected, campaign, market=None):
         shapes = [x for x in ranked.get('related_shapes', [])
                   if x.get('products') and x.get('label') in ('후드형', '푸퍼형', '봄버형', '크롭형', '칼라형')]
         shape_text = ', '.join(f"{x['label']} {x['products']}개" for x in shapes[:4]) or '세부 디자인 분류 확인 필요'
-        rank_note = (f"무신사 상위 랭킹의 여성·공용 비교 범위에서 '{subtype}' 관련 잠정 상품 "
+        rank_note = (f"무신사 상위 랭킹의 {ranked.get('gender_scope') or '성별 범위 미확인'} 비교 범위에서 '{subtype}' 관련 잠정 상품 "
                      f"{ranked.get('related_products', 0)}개를 확인했어요. 디자인 표현은 {shape_text} 등이며 "
                      '매출·선호도 순위가 아닙니다.\n'
                      f"해당 상품 리뷰 {ranked.get('related_reviews', 0)}건의 관심 표현은 "
@@ -118,7 +118,7 @@ def approval_brief(summary, selected, campaign, market=None):
             + '\n\n■ 기획전 구성 승인 대기\n선택한 소구점과 구성 방향을 확정하시겠습니까?\n[승인] 확정 후 대표 문구 3안 생성·검증 단계로 진행합니다.\n[반려]·[승인 요청 취소] 확정하지 않고 검토 단계로 돌아갑니다.')
 
 
-def generate_candidates(summary, campaign):
+def generate_candidates(summary, campaign, *, _legacy_replay=False):
     """선정 색상과 검증된 공통 소구점에 기반한 3가지 표현 방향을 생성."""
     values = campaign.get('values') or {}
     reference_mode = summary.get("evidence_role") == "historical_reference"
@@ -158,7 +158,13 @@ def generate_candidates(summary, campaign):
         note = ('일부 과거 사례의 특징은 향후 판매 상품에서도 별도 검증해야 합니다. 모든 상품에 공통 적용하지 않습니다.' if reference_mode else '상품별 한정 특성은 해당 상품 카드에서만 안내합니다. 전체 상품에 공통 적용하지 않습니다.')
         descriptions = [d + ' ' + note for d in descriptions]
     from agent_system.orchestrator.tools.fashion_copy import make_fashion_copy
-    creative = make_fashion_copy(subtype=subtype, colors=colors, points=points)
+    from .campaign_season import from_campaign
+    season_context = summary.get('season_context') or from_campaign(campaign=campaign)
+    if _legacy_replay:
+        from .campaign_legacy_r4283 import make_fashion_copy as legacy_copy
+        creative = legacy_copy(subtype=subtype, colors=colors, points=points)
+    else:
+        creative = make_fashion_copy(subtype=subtype, colors=colors, points=points, season_context=season_context)
     candidates = []
     for i, row in enumerate(creative['options']):
         # 기존 확정 상품 형태 근거와 상품별 한정 안내를 보존한다.
@@ -178,19 +184,21 @@ def generate_candidates(summary, campaign):
         candidates = [dict(item, subcopies=list(creative['options'][i]['subcopies']),
                            description=creative['options'][i]['subcopies'][0])
                       for i, item in enumerate(candidates)]
-    review_memo = (['과거 H&M 상품 5개는 디자인 참고 사례이며 실제 판매 상품이 아닙니다.',
+    review_memo = ([f'과거 H&M 상품 {5 if _legacy_replay else len(ids)}개는 디자인 참고 사례이며 실제 판매 상품이 아닙니다.',
                     '기획전의 판매 상품·가격·할인·재고·실제 적용 디자인 특징은 미확정입니다.',
                     '소재·보온성·착용감·핏 등은 향후 편성 상품 근거 확인 후 광고에 반영합니다.']
                    if reference_mode else [])
     return {'schema_version': 1, 'reference_role': 'historical_reference' if reference_mode else 'legacy_product_selection', 'category': values.get('category'), 'subtype': subtype,
             'colors': colors, 'ids': ids, 'saleable_article_ids': [] if reference_mode else ids, 'points': points, 'candidates': candidates, 'product_cards': cards,
-            'status': 'draft', 'keywords': creative['keywords'], 'copy_style': 'fashion_v422a', 'review_memo': review_memo}
+            'status': 'draft', **({} if _legacy_replay else {'season_context': season_context}), 'keywords': creative['keywords'], 'copy_style': 'fashion_v422a', 'review_memo': review_memo}
 
 
 def validate_candidates(package, summary, campaign):
     """후보가 확정 입력으로 재현 가능한지 확인한다. 실패 시 16단계 진입 금지."""
     from agent_system.orchestrator.tools.copy_revision import regenerate_copy, replay_copy_step, _regenerate_copy_legacy, validate_copy_claims
-    expected = generate_candidates(summary, campaign)
+    # 기존 승인 카피는 동일한 구형 템플릿으로만 재검증한다. 신규 Run의 계절값 누락은 허용하지 않는다.
+    legacy = 'season_context' not in package and 'season_context' not in summary
+    expected = generate_candidates(summary, campaign, _legacy_replay=legacy)
     if package.get('revision'):
         steps = package.get('revision_steps')
         if steps:

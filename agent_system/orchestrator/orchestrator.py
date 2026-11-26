@@ -547,7 +547,7 @@ def orchestrator_node(state) -> dict:
                 f"8단계 검증 상품 ID: {updates['products']}\n"
                 f"기획전 테마 제안: {updates['theme']}\n" +
                 (f"운영 일정: {updates['schedule']}\n" if updates.get("schedule") else "") +
-                (f"선택 유형: {updates.get('subtype')} / 색상: {updates.get('colors')} (상품 설명 규칙 매칭, 성능 미검증)\n" if run.get("subtype_flow") else "검증된 과거 온라인 구매 기록 기반 후보이며 테마의 실제 상품 여부는 미검증입니다.\n") +
+                (f"선택 유형: {updates.get('subtype')} / 색상: {updates.get('colors')} (상품 설명 규칙 매칭, 성능 미검증)\n" if run.get("subtype_flow") else "검증된 과거 확정 채널 구매 기록 기반 후보이며 테마의 실제 상품 여부는 미검증입니다.\n") +
                 "확정하려면 [승인], 아니면 [반려]를 눌러 주세요."
             )
             return {**common, "turn_type": "approval_request", "reply": request["question"],

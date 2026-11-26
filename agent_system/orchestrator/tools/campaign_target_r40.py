@@ -71,6 +71,8 @@ def score_campaign(campaign, run, root):
     if run.get('period_plan'):
         from .category_planning.analysis_scope_r427 import run_scope
         run_scope(run)
+        from .campaign_scope_r43 import run_scope as campaign_scope
+        campaign_scope(run)
     values = campaign.get('values') or {}
     ids = list(dict.fromkeys(re.findall(r'(?<!\d)\d{10}(?!\d)', str(values.get('products') or ''))))
     if not ids:
@@ -201,7 +203,7 @@ def notice(target, *, evidence=False, confirmed=False):
     lines = ['고객 타깃 확정' if confirmed else '고객 타깃 선정 제안', '구매 예측 상위 3% · 양수 취향 상위 10%',
              'H&M 2020-09-23 기준 30일 예측 · 실제 구매확률 및 발송 가능 인원 아님',
              f"점수화 고객 {p['population']:,}명 / 마케팅 후보 {p['total']:,}명 (중복 제거)"]
-    lines[3:3] = [audience_text(p), population_text(p), '구매 이력은 기존 모델 정의(전체 채널)이며 연령은 과거 데이터의 저장값입니다.']
+    lines[3:3] = [audience_text(p), population_text(p), '구매 이력은 기존 모델 정의(전체 채널)이며 연령은 과거 데이터의 저장값입니다. 상품 유형×색상 점수이며 성별별·채널별 예측은 아닙니다.']
     lines += [f"• {g['name']}: {g['count']:,}명 ({g['share_percent']:.2f}%, 전체 기준)" for g in p['all_groups']]
     if evidence:
         cutoff = p['taste_cutoff']

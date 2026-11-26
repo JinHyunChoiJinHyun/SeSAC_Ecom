@@ -69,9 +69,18 @@ def source(run,campaign):
         raise ValueError('승인된 제목·본문·CTA가 필요합니다.')
     scope=require_scope(run)
     # 고객 개인 정보, 원문 사용자 요청, 이메일은 이미지 API에 전달하지 않는다.
-    raw=str(run.get('request') or '')
-    season=next((x for x in ('겨울','여름','봄','가을') if x in raw),'계절 중립')
+    if 'season_context' in spec:
+        season=spec['season_context']['season']
+    else:
+        # 구형 승인 시안의 원래 source fingerprint를 유지한다.
+        raw=str(run.get('request') or '')
+        season=next((x for x in ('겨울','여름','봄','가을') if x in raw),'계절 중립')
     data={'run_id':str(run['run_id']),'revision':preview['revision'],'spec':deepcopy(spec),'subtype':subtype,'colors':colors,'scope':scope,'season':season,'products':values.get('products'),'selling_points':values.get('selling_points'),'schedule':values.get('schedule')}
+    if 'campaign_scope' in run:
+        from .campaign_scope_r43 import run_scope
+        data['campaign_scope'] = run_scope(run)
+        if any(r.get('analysis_product_gender') != data['campaign_scope']['product_gender'] or r.get('analysis_channel') != data['campaign_scope']['channel'] for r in run.get('verified_candidate_rows') or []):
+            raise ValueError('페이지 상품군·채널과 검증 후보가 일치하지 않습니다.')
     return data,_digest(data)
 
 
@@ -126,15 +135,18 @@ def build_assets(data, generate_image=None):
     generate_image=generate_image or _image_api
     colors=data['colors']; subtype=data['subtype']; spec=data['spec']; scope=data['scope']
     # 상품명/색상/스타일만 전달하며 가격 및 성능을 생성하지 않는다.
-    context=f"Concept fashion imagery, women's apparel, item: {subtype}; allowed garment colors: {', '.join(colors)}; season: {data['season']}; target styling age range: {scope['age_min']}-{scope['age_max']}; theme: {spec.get('theme','modern')}."
+    from .campaign_scope_r43 import image_terms
+    gender = (data.get('campaign_scope') or {}).get('product_gender', 'legacy')
+    apparel, models = image_terms(gender)
+    context=f"Concept fashion imagery, {apparel}, item: {subtype}; allowed garment colors: {', '.join(colors)}; season: {data['season']}; target styling age range: {scope['age_min']}-{scope['age_max']}; theme: {spec.get('theme','modern')}."
     points='; '.join(str(x)[:80] for x in (spec.get('points') or [])[:4])
     context+=f' Design composition reference only: {points}. Show visual color and design differences, not functional performance.'
     constraint=' Imaginary fashion concept only, no brands, no logos, no typography, no price, no promotional claims. Never depict an actual SKU.'
-    hero=generate_image(design.hero_prompt(context,constraint),'1024x1536')
+    hero=generate_image(design.hero_prompt(context,constraint,product_gender=gender),'1024x1536')
     cards=[]
     for i,(name,visual,description) in enumerate(design.designs(subtype)):
         color=colors[i%len(colors)]
-        image=generate_image(design.card_prompt(context,constraint,subtype,color,visual),'1024x1024')
+        image=generate_image(design.card_prompt(context,constraint,subtype,color,visual,theme=spec.get('theme','modern'),product_gender=gender),'1024x1024')
         cards.append({'image':image,'name':f'{subtype} {name}','color':color,'description':description})
     return {'hero':hero,'cards':cards}
 
@@ -203,14 +215,18 @@ def revise(data,assets,question,generate_image=None):
         changed |= spec.get('layout_variant')!=2; spec['layout_variant']=2
     # 선택된 색상 안에서만 카드 순서를 변경한다.
     if re.search(r'앞(?:쪽|으로)|먼저',q):
-        color=next((c for c in data['colors'] if c.lower() in q.lower() or (c=='Black' and '블랙' in q) or (c=='Greenish Khaki' and re.search(r'그린\s*카키',q))),None)
+        from .campaign_colors import mentioned_color
+        color=mentioned_color(q,data['colors'])
         if color:
             ordered=sorted(assets['cards'],key=lambda c:c['color']!=color)
             changed |= [c['color'] for c in ordered]!=[c['color'] for c in assets['cards']]; assets['cards']=ordered
     if re.search(r'(?:모델\s*컷|착장\s*이미지|히어로\s*이미지).*?(?:다시|교체|재생성)',q):
         gen=generate_image or _image_api
-        prompt=f"Editorial concept fashion photo, adult female model wearing {data['subtype']}; colors {', '.join(data['colors'])}; {data['season']}; style {spec.get('theme')}; target styling age range {data['scope']['age_min']}-{data['scope']['age_max']}. Distinct alternate composition. No brands, no typography, no claims, no prices."
-        assets['hero']=gen(design.hero_prompt(prompt,' no typography, no brands, no price, no claims.'),'1024x1536'); changed=True
+        from .campaign_scope_r43 import image_terms
+        gender = (data.get('campaign_scope') or {}).get('product_gender', 'legacy')
+        apparel, models = image_terms(gender)
+        prompt=f"Editorial concept fashion photo, {models} wearing {data['subtype']}; colors {', '.join(data['colors'])}; {data['season']}; style {spec.get('theme')}; target styling age range {data['scope']['age_min']}-{data['scope']['age_max']}. Distinct alternate composition. No brands, no typography, no claims, no prices."
+        assets['hero']=gen(design.hero_prompt(prompt,' no typography, no brands, no price, no claims.',product_gender=gender),'1024x1536'); changed=True
     if not changed and any(spec.get(field)==value for field,value in explicit): raise ValueError('요청한 문구가 이미 적용되어 있습니다. 기존 완성본을 유지합니다.')
     if not changed: raise ValueError('지원되는 변경을 찾지 못했거나 테마 조정 한도에 도달했습니다. 제목·본문·CTA 지정 문구, 전체 톤, 상품 카드 강조·순서, 모델컷 재생성을 요청해 주세요.')
     return data,assets

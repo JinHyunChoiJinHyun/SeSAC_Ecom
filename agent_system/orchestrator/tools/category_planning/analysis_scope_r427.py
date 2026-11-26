@@ -16,6 +16,9 @@ def run_scope(run):
     scope = audience.require_scope(run)
     if run.get('period_plan') and plan_scope(run['period_plan']) != scope:
         raise ValueError('시장·상품 분석 연령과 고객 조건이 다릅니다. 새 분석을 시작하세요.')
+    if 'campaign_scope' in run or 'campaign_scope' in (run.get('period_plan') or {}):
+        from ..campaign_scope_r43 import run_scope as campaign_scope
+        campaign_scope(run)
     return scope
 
 def report_label(run):

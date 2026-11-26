@@ -44,7 +44,7 @@ def _matching(series, pattern):
 
 
 def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
-                   reviews: pd.DataFrame, subtype: str = '경량패딩') -> dict:
+                   reviews: pd.DataFrame, subtype: str = '경량패딩', *, product_gender=None) -> dict:
     """단일 카테고리 랭킹의 여성·공용 우선 근거와 연결 리뷰를 계산한다."""
     if 'item_id' not in products or 'name' not in products or 'ranking' not in products:
         raise ValueError('무신사 랭킹에 item_id/name/ranking이 필요합니다.')
@@ -62,7 +62,18 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
         p['gender'] = pd.NA
     # 성별 미확인 상품은 여성·공용으로 간주하지 않는다.
     gender_known = p['gender'].notna().any()
-    eligible = p[p['gender'].isin(['여', '여성', '공용', '유니섹스', 'unisex'])].copy() if gender_known else p.copy()
+    if product_gender in ('women', 'men', 'both'):
+        allowed = {'women': ('여','여성','여성용','female','women'), 'men': ('남','남성','남성용','male','men'), 'both': ('여','여성','여성용','female','women','남','남성','남성용','male','men')}[product_gender]
+        eligible = p[p['gender'].fillna('').astype(str).str.strip().str.casefold().isin(allowed)].copy()
+        gender_scope = {'women':'여성','men':'남성','both':'여성·남성'}[product_gender] + ' 명시 상품(공용·미확인 제외)'
+    elif product_gender == 'all':
+        eligible = p.copy()
+        gender_scope = '수집 전체 상품(성별 미확인 포함)'
+    elif product_gender is None or product_gender == 'legacy':
+        eligible = p[p['gender'].isin(['여', '여성', '공용', '유니섹스', 'unisex'])].copy() if gender_known else p.copy()
+        gender_scope = '여성·공용' if gender_known else '성별 미확인(전체 참고)'
+    else:
+        raise ValueError('지원하지 않는 상품 성별 조건')
     # 아우터 통합 표본의 분류 적합성을 확인한다. 원본 100개는 보존하고
     # 소분류 근거에 한해서 명백 불일치/판정 보류 상품을 자동 제외한다.
     audit_counts = {}
@@ -104,7 +115,7 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
     return {
         'subtype': subtype,
         'total_products': len(p), 'eligible_products': len(eligible),
-        'gender_scope': '여성·공용' if gender_known else '성별 미확인(전체 참고)',
+        'gender_scope': gender_scope,
         'category_audit': audit_counts,
         'related_products': len(related), 'lightweight_named_products': len(lightweight),
         'related_reviews': len(r),
@@ -117,7 +128,7 @@ def analyze_ranked(products: pd.DataFrame, info: pd.DataFrame,
     }
 
 
-def load_ranked_evidence(category: str, subtype: str) -> dict:
+def load_ranked_evidence(category: str, subtype: str, *, product_gender=None) -> dict:
     """DuckDB 모드에는 통합 테이블의 category를 기준으로, CSV 모드에는 기존 파일을 읽는다."""
     from common.external_data_store import enabled as duckdb_enabled
     if duckdb_enabled():
@@ -129,7 +140,9 @@ def load_ranked_evidence(category: str, subtype: str) -> dict:
         # 랭킹 데이터에는 상세 정보가 합쳐져 있어도 analyze_ranked가 기존 방식으로 합칩니다.
         if products.empty:
             raise ValueError(f'무신사 DuckDB 카테고리 상품이 없습니다: {category}')
-        return analyze_ranked(products, details, reviews, subtype)
+        if product_gender is None:
+            return analyze_ranked(products, details, reviews, subtype)
+        return analyze_ranked(products, details, reviews, subtype, product_gender=product_gender)
     from agent_system.common_tools.external_data import musinsa_sample
     from shared_analysis.market.category_comparison import normalize_category
     sets = [(key, value) for key, value in musinsa_sample.file_sets().items()
@@ -140,7 +153,9 @@ def load_ranked_evidence(category: str, subtype: str) -> dict:
     products = pd.read_csv(files['ranking'], dtype={'item_id': str})
     info = pd.read_csv(files['add_info'], dtype={'item_id': str}) if 'add_info' in files else pd.DataFrame()
     reviews = pd.read_csv(files['review'], dtype={'item_id': str, 'review_id': str}) if 'review' in files else pd.DataFrame()
-    return analyze_ranked(products, info, reviews, subtype)
+    if product_gender is None:
+        return analyze_ranked(products, info, reviews, subtype)
+    return analyze_ranked(products, info, reviews, subtype, product_gender=product_gender)
 
 
 def render_ranked(evidence: dict) -> str:
