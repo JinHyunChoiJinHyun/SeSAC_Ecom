@@ -31,7 +31,7 @@ from langgraph.types import Command
 
 from agent_system.orchestrator import settings
 from agent_system.orchestrator.orchestrator import make_agent_node, orchestrator_node, pop_turn_result
-from agent_system.orchestrator.registry import get_agents
+from agent_system.orchestrator.registry import get_routable_agents
 from agent_system.orchestrator.tools import approval, context, workflow
 from agent_system.orchestrator.tools.memory import get_checkpointer, langsmith_enabled, prune_thread_history
 
@@ -60,7 +60,7 @@ class OrchestratorState(MessagesState):
 def build_graph(checkpointer=None):
     """Orchestrator 그래프를 만듭니다. checkpointer가 있으면 멀티턴 기억이 켜집니다."""
 
-    agents = get_agents()
+    agents = get_routable_agents()
     builder = StateGraph(OrchestratorState)
     builder.add_node("orchestrator", orchestrator_node)
     for spec in agents:

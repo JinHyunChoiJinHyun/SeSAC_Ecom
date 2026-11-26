@@ -1,43 +1,38 @@
-"""④ Content Generation Agent — 콘텐츠 생성 에이전트 (「CART_SIGNAL 에이전트 및 Tool 설계안」)
+"""콘텐츠 생성 Agent — 기존 기획전 조건·승인 흐름을 유지하면서 소구점, 카피, 고객군별 문구, 페이지 시안을 생성·수정합니다."""
 
-역할: 확정된 상품·소구점·타깃 정보를 바탕으로 마케팅 콘텐츠 생성
-시나리오: 메인 14·20단계(기획전 문구·페이지 틀·세그먼트 메시지), 서브 3단계(필수 컷·추가 컷). 촬영 요청서는 결과 정리 담당
+# 기존 워크플로에서 호출하는 로컬 Tool 목록 (LLM에는 연결하지 않음).
+from agent_system.agents.local_workflow import execute_tool, freeze_tools, workflow_tool
 
-구현 상태 (11/18 팀 원칙: 없는 부분은 가짜로 만들지 않고 미구현)
-- Tool 이름·기능·백엔드 API 경로는 확정 (agent_system/tools/content_tools.py)
-- 백엔드 API가 연결되기 전(CART_SIGNAL_BACKEND_URL 없음)에는 LLM을 부르지 않고 '미구현' 안내를 돌려줍니다 (not_ready=True).
-- registry.py에서는 enabled=False. 데이터·모델·백엔드가 연결되면 True로 바꾸면 Orchestrator·워크플로가 바로 사용합니다.
-- 실행 흐름은 agent_system/base_agent.py (Tool 호출 로그 포함, 팀 규칙)
-"""
+WORKFLOW_TOOLS = freeze_tools({
+    'build_summary': ('agent_system.orchestrator.tools.campaign_selection', 'build_summary'),
+    'build_selling_point_evidence': ('agent_system.orchestrator.tools.campaign_selection', 'build_selling_point_evidence'),
+    'generate_candidates': ('agent_system.orchestrator.tools.campaign_copy', 'generate_candidates'),
+    'regenerate_copy': ('agent_system.orchestrator.tools.copy_revision', 'regenerate_copy'),
+    'replay_copy_step': ('agent_system.orchestrator.tools.copy_revision', 'replay_copy_step'),
+    'create_initial_preview': ('agent_system.orchestrator.tools.campaign_page', 'create_initial_preview'),
+    'revise_preview': ('agent_system.orchestrator.tools.campaign_page', 'revise_preview'),
+    'regenerate_preview': ('agent_system.orchestrator.tools.campaign_page', 'regenerate_preview'),
+    'undo_preview': ('agent_system.orchestrator.tools.campaign_page', 'undo_preview'),
+    'render_preview_image': ('agent_system.orchestrator.tools.campaign_page', 'render_preview_image'),
+    'handle_segment_copy': ('agent_system.orchestrator.tools.campaign_copy_r41', 'handle'),
+    'handle_final_page': ('agent_system.orchestrator.tools.campaign_page_final_r428', 'handle'),
+    'handle_final_page_button': ('agent_system.orchestrator.tools.campaign_page_final_r428', 'handle_button'),
+})
 
-from __future__ import annotations
+def run(action, /, *args, **kwargs):
+    """기존 워크플로의 조건 검사 이후 선택된 Tool을 실행한다."""
+    return execute_tool(WORKFLOW_TOOLS, action, *args, **kwargs)
 
-from agent_system import backend_client
-from agent_system.base_agent import ToolAgentConfig, run_tool_agent
-from agent_system.prompts.content_generation_prompt import CONTENT_GENERATION_PROMPT
-from agent_system.tools import content_tools as T
-
-AGENT_NAME = "content_generation"
-
-CONFIG = ToolAgentConfig(
-    name=AGENT_NAME,
-    label="콘텐츠 생성",
-    tools=T.TOOLS,
-    tool_source=T.TOOL_SOURCE,
-    prompt=CONTENT_GENERATION_PROMPT,
-    data_status=T.data_status,
-    is_ready=backend_client.enabled,
-    scope_note="확정값·분석 근거만 사용 (백엔드 슬롯 규칙·템플릿)",
-    table_priority=("generate_campaign_copy", "generate_segment_messages", "plan_product_photography", "build_campaign_page"),
-)
-
-
-def get_content_generation_model(llm_config: dict | None = None):
-    """요청에 고정된 채팅 모델 (테스트에서 바꿔 끼울 수 있게 함수로 둠)."""
-    from env.gpt_client import get_openai_chat_client
-    return get_openai_chat_client(model_config=llm_config)
-
-
-def run(request) -> dict:
-    """registry에서 부르는 진입점: run(AgentRequest) -> dict"""
-    return run_tool_agent(CONFIG, request, lambda cfg: get_content_generation_model(cfg))
+build_summary = workflow_tool('content_generation', 'build_summary')
+build_selling_point_evidence = workflow_tool('content_generation', 'build_selling_point_evidence')
+generate_candidates = workflow_tool('content_generation', 'generate_candidates')
+regenerate_copy = workflow_tool('content_generation', 'regenerate_copy')
+replay_copy_step = workflow_tool('content_generation', 'replay_copy_step')
+create_initial_preview = workflow_tool('content_generation', 'create_initial_preview')
+revise_preview = workflow_tool('content_generation', 'revise_preview')
+regenerate_preview = workflow_tool('content_generation', 'regenerate_preview')
+undo_preview = workflow_tool('content_generation', 'undo_preview')
+render_preview_image = workflow_tool('content_generation', 'render_preview_image')
+handle_segment_copy = workflow_tool('content_generation', 'handle_segment_copy')
+handle_final_page = workflow_tool('content_generation', 'handle_final_page')
+handle_final_page_button = workflow_tool('content_generation', 'handle_final_page_button')

@@ -1,5 +1,5 @@
 """10단계: 검증된 상품 후보와 마케터 선택을 승인 화면으로 요약한다."""
-from agent_system.orchestrator.tools.category_approval import validated_updates
+from agent_system.agents.validation_agent import validated_updates
 
 
 def build_step10_request(run):

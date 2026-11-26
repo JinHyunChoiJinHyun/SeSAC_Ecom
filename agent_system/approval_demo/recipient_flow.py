@@ -391,7 +391,7 @@ def validate_target_for_thread(root, event, question, campaign=None):
     if not question:
         raise ValueError('고객 선정 요청이 비어 있습니다.')
     from agent_system.agents.dynamic_targeting import calculate_requested_target
-    from agent_system.validation.specialized_selection_gate import check_selection
+    from agent_system.agents.validation_agent import check_selection
     result = calculate_requested_target(question, campaign or {}, Path(root))
     verdict = check_selection('targeting', question, result)
     if verdict.get('status') != 'PASS' or result.get('error') or result.get('not_ready'):

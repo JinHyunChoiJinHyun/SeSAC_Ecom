@@ -20,6 +20,7 @@ Orchestrator Tool (멘토 조언 5개 기능)
     6. 다음 노드는 조건부 엣지가 결정                                     manage_workflow
 """
 
+from agent_system.agents import content_generation_agent as content_agent
 import re
 from threading import Lock
 
@@ -85,9 +86,8 @@ def orchestrator_node(state) -> dict:
     # R29: 소구점 재표시는 승인·워크플로 상태를 변경하지 않는 읽기 전용 요청이다.
     # LLM 및 13단계 번호 선택보다 먼저 처리한다.
     if re.fullmatch(r"\s*(?:소구점|판매\s*포인트|마케팅\s*소구점)(?:\s*(?:분석|후보|추천))?\s*(?:다시\s*(?:보여\s*줘|보여주세요|알려\s*줘|출력\s*해줘)|재표시|다시\s*분석\s*해줘)\s*[.!]?\s*", str(question), re.I):
-        from agent_system.orchestrator.tools.campaign_selection import (
-            replay_selling_point_report, build_selling_point_evidence,
-        )
+        from agent_system.orchestrator.tools.campaign_selection import replay_selling_point_report
+        from agent_system.agents.content_generation_agent import build_selling_point_evidence
         summary = run.get('campaign_summary') or {}
         replay_ok = False
         if pending:
@@ -182,7 +182,7 @@ def orchestrator_node(state) -> dict:
     if copy41.is_request(question) and ((run.get('campaign_target_r39') or {}).get('policy') == 'r40_v1' or str(question).startswith(copy41.PREFIX) or '고객군별' in str(question) or '세그먼트별' in str(question)):
         extra41 = {}
         try:
-            package41 = copy41.handle(question, run, campaign, pending)
+            package41 = content_agent.handle_segment_copy(question, run, campaign, pending)
             extra41['workflow_run'] = dict(run, segment_copy_r41=package41)
             notice41 = copy41.render(package41)
         except (ValueError, TypeError, KeyError) as exc:
@@ -363,13 +363,13 @@ def orchestrator_node(state) -> dict:
                 new_run = deepcopy(run)
                 new_run['page_preview'] = preview
                 if regenerate:
-                    new_run['page_preview'] = page_tool.regenerate_preview(preview, run['run_id'], run.get('copy_package') or {}, campaign)
+                    new_run['page_preview'] = content_agent.regenerate_preview(preview, run['run_id'], run.get('copy_package') or {}, campaign)
                     notice_prefix = '페이지 틀을 새 스타일로 다시 만들었습니다.'
                 elif undo:
-                    new_run['page_preview'] = page_tool.undo_preview(preview)
+                    new_run['page_preview'] = content_agent.undo_preview(preview)
                     notice_prefix = '직전 페이지 틀 수정만 되돌렸습니다.'
                 elif edit:
-                    new_run['page_preview'] = page_tool.revise_preview(preview, run['run_id'], run.get('copy_package') or {}, campaign, edit)
+                    new_run['page_preview'] = content_agent.revise_preview(preview, run['run_id'], run.get('copy_package') or {}, campaign, edit)
                     notice_prefix = '요청한 페이지 구성 변경을 반영했습니다.'
                 else:
                     if reject:
@@ -382,7 +382,7 @@ def orchestrator_node(state) -> dict:
                 # 되돌리기 및 재표시는 기존 파일을 그대로 쓰며, 없을 때는 동일 사양으로만 복구한다.
                 from pathlib import Path as _PreviewPath
                 if not _PreviewPath(current_path).is_file():
-                    page_tool.render_preview_image(shown['current']['spec'], _PreviewPath(current_path))
+                    content_agent.render_preview_image(shown['current']['spec'], _PreviewPath(current_path))
                 # R35 Hotfix: turn_id가 있는 경우에만 결과 저장
                 turn_id = state.get('turn_id')
                 if turn_id:
@@ -401,7 +401,9 @@ def orchestrator_node(state) -> dict:
     if str(question).strip() in ('대표 문구 단계로 되돌리기', '카피 단계로 되돌리기'):
         from copy import deepcopy
         from agent_system.workflows.registry import get_workflow
-        from agent_system.orchestrator.tools.campaign_copy import generate_candidates, validate_candidates, render_options
+        from agent_system.agents.content_generation_agent import generate_candidates
+        from agent_system.agents.validation_agent import validate_candidates
+        from agent_system.orchestrator.tools.campaign_copy import render_options
         from agent_system.workflows import base
         if run.get('workflow') != 'trend_planning' or not (campaign.get('values') or {}).get('selling_points'):
             notice = '소구점이 확정된 기획전 Run에서만 카피 단계로 돌아갈 수 있습니다.'
@@ -525,7 +527,8 @@ def orchestrator_node(state) -> dict:
             and run.get("status") == "waiting_input"
             and run.get("waiting_key") == "products"):
         from agent_system.orchestrator.tools.workflow import current_step
-        from agent_system.orchestrator.tools.category_approval import selected_ids, validated_updates, selected_category
+        from agent_system.orchestrator.tools.category_approval import selected_ids, selected_category
+        from agent_system.agents.validation_agent import validated_updates
         from agent_system.orchestrator.tools.category_planning.review_selection import CATEGORIES
         _, _, current = current_step(run)
         chosen = selected_category(question)
@@ -586,9 +589,9 @@ def orchestrator_node(state) -> dict:
         if is_copy_reset_request(question):
             try:
                 from copy import deepcopy
-                from agent_system.orchestrator.tools.campaign_copy import (
-                    generate_candidates, validate_candidates, render_options,
-                )
+                from agent_system.agents.content_generation_agent import generate_candidates
+                from agent_system.agents.validation_agent import validate_candidates
+                from agent_system.orchestrator.tools.campaign_copy import render_options
                 summary = run.get('campaign_summary') or {}
                 clean = validate_candidates(generate_candidates(summary, campaign), summary, campaign)
                 new_run = deepcopy(run)
@@ -608,8 +611,10 @@ def orchestrator_node(state) -> dict:
         # 단일 확정 UI: 카피 수정본을 별도로 승인하지 않고 1~3안 직접 확정한다.
         if question.startswith('__cart_copy_review__:'):
             from copy import deepcopy
-            from agent_system.orchestrator.tools.campaign_copy import generate_candidates, validate_candidates, render_options
-            from agent_system.orchestrator.tools.copy_revision import regenerate_copy, replay_copy_step
+            from agent_system.agents.content_generation_agent import generate_candidates
+            from agent_system.agents.validation_agent import validate_candidates
+            from agent_system.orchestrator.tools.campaign_copy import render_options
+            from agent_system.agents.content_generation_agent import regenerate_copy, replay_copy_step
             command = question.split(':', 1)[1]
             if command == 'edit':
                 new_run = deepcopy(run)
@@ -653,14 +658,16 @@ def orchestrator_node(state) -> dict:
         choice = None if feedback else parse_copy_choice(question, package)
         # 이미 검증된 문구의 수정 요청은 새로운 3안을 만들고 같은 Run에 저장한다.
         # 승인 요청이 없는 상태에서만 재생성하며, 확정된 상품과 소구점은 변경하지 않는다.
-        from agent_system.orchestrator.tools.copy_revision import parse_revision_request, regenerate_copy
+        from agent_system.orchestrator.tools.copy_revision import parse_revision_request
+        from agent_system.agents.content_generation_agent import regenerate_copy
         if feedback:
             try:
-                from agent_system.orchestrator.tools.campaign_copy import validate_candidates, render_options
+                from agent_system.agents.validation_agent import validate_candidates
+                from agent_system.orchestrator.tools.campaign_copy import render_options
                 from copy import deepcopy
                 summary = run.get('campaign_summary') or {}
                 revision = int(package.get('revision') or 0)
-                from agent_system.orchestrator.tools.campaign_copy import generate_candidates
+                from agent_system.agents.content_generation_agent import generate_candidates
                 original = package if revision else generate_candidates(summary, campaign)
                 revised = regenerate_copy(original, feedback, revision)
                 checked = validate_candidates(revised, summary, campaign)
@@ -685,8 +692,8 @@ def orchestrator_node(state) -> dict:
         # 재확인 팝업 없이 선택한 완성형 카피 1안을 한 번에 확정한다.
         # 선택 시에도 기존 approval 경로와 동일한 재현 검증 및 의미 검증을 수행한다.
         from copy import deepcopy
-        from agent_system.orchestrator.tools.campaign_copy import validate_candidates
-        from agent_system.validation.semantic_campaign_validator import review_campaign_copy
+        from agent_system.agents.validation_agent import validate_candidates
+        from agent_system.agents.validation_agent import review_campaign_copy
         try:
             summary = run.get('campaign_summary') or {}
             verified = validate_candidates({**package, 'status': 'draft'}, summary, campaign)
@@ -694,7 +701,8 @@ def orchestrator_node(state) -> dict:
             if package.get('status') != 'verified' or verified != package:
                 raise ValueError('선택한 카피의 근거 검증이 완료되지 않았습니다.')
             approved = selected_copy_value(choice, package)
-            from agent_system.orchestrator.tools.campaign_page import create_initial_preview, preview_message
+            from agent_system.agents.content_generation_agent import create_initial_preview
+            from agent_system.orchestrator.tools.campaign_page import preview_message
             new_run = deepcopy(run)
             generated = create_initial_preview(run['run_id'], choice, package, campaign)
             new_run.update(status='waiting_input', waiting_key='page',
@@ -881,7 +889,7 @@ def make_agent_node(spec):
         )
 
         # 검증은 결과 저장·승인·대화 상태 갱신보다 먼저 수행한다.
-        from agent_system.validation.specialized_selection_gate import validate_with_retries
+        from agent_system.agents.validation_agent import validate_with_retries
         runner = spec.load_runner()
         result = validate_with_retries(
             spec.name, question,

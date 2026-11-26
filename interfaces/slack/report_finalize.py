@@ -132,7 +132,7 @@ def process_uploaded_docx(client, event: dict, file_info: dict) -> None:
             if not hasattr(upload_result, 'get') or upload_result.get('ok') is not True:
                 raise RuntimeError('Slack 최종 PDF 공유가 확인되지 않았습니다.')
             # 성공적으로 Slack에 게시된 최종 PDF만 스레드의 승인 첨부 대상으로 등록
-            from agent_system.approval_demo.recipient_flow import mark_pdf_ready
+            from agent_system.agents.campaign_execution_agent import mark_pdf_ready
             mark_pdf_ready(Path(__file__).resolve().parents[2], event, pdf)
             print("[PDF 업로드] Slack PDF 전송 완료", flush=True)
             return True
@@ -149,7 +149,7 @@ def process_uploaded_docx(client, event: dict, file_info: dict) -> None:
 
 
 def process_uploaded_png(client, event, file_info, *, defer=False):
-    from agent_system.approval_demo.delivery_r42 import register_png, prepare_send, post_buttons
+    from agent_system.agents.campaign_execution_agent import register_png, prepare_send, post_buttons
     root = Path(__file__).resolve().parents[2]
     kwargs = dict(channel=event['channel'], thread_ts=event.get('thread_ts') or event.get('ts'))
     try:

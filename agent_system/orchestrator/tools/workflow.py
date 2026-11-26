@@ -200,6 +200,8 @@ def _history(run: dict, step, status: str, summary: str = "") -> list:
 
 def _run_agent_step(step, run: dict, state) -> dict:
     spec = get_agent(step.owner)
+    if spec is None or not spec.enabled or getattr(spec, "workflow_only", False):
+        return {"final_answer": "해당 단계의 실행 경로가 구현되지 않았습니다.", "not_ready": True}
     request = AgentRequest(
         question=base.render(step.instruction, run, state.get("campaign")),
         user_question=run.get("request", ""),
@@ -480,7 +482,8 @@ def run_workflow_node(state) -> dict:
         spec = get_agent(step.owner)
         local_step12 = workflow.name == "trend_planning" and step.no == 12
         local_copy = workflow.name == "trend_planning" and step.no in (14, 15)
-        if spec is None or (not spec.enabled and not (local_step7 or local_step12 or local_copy)):
+        if spec is None or ((not spec.enabled or getattr(spec, "workflow_only", False))
+                            and not (local_step7 or local_step12 or local_copy)):
             name = spec.label if spec else step.owner
             if step.optional:
                 sections.append(f"{label}\n건너뜀: {name} Agent 구현 전 (이전 단계 결과 표로 대신)")
@@ -529,9 +532,9 @@ def run_workflow_node(state) -> dict:
             except Exception as exc:
                 result = {"final_answer": "카테고리 시장 데이터 조회 실패", "error": f"{type(exc).__name__}: {exc}"}
         elif local_copy:
-            from agent_system.orchestrator.tools.campaign_copy import (
-                generate_candidates, validate_candidates, render_options,
-            )
+            from agent_system.agents.content_generation_agent import generate_candidates
+            from agent_system.agents.validation_agent import validate_candidates
+            from agent_system.orchestrator.tools.campaign_copy import render_options
             try:
                 summary = run.get("campaign_summary") or {}
                 if step.no == 14:
@@ -545,12 +548,13 @@ def run_workflow_node(state) -> dict:
             except (ValueError, TypeError, KeyError) as exc:
                 result = {"final_answer": "대표 문구 생성 또는 검증 실패", "error": str(exc)}
         elif local_step12:
-            from agent_system.orchestrator.tools.campaign_selection import build_summary, ids_from
+            from agent_system.agents.content_generation_agent import build_summary
+            from agent_system.orchestrator.tools.campaign_selection import ids_from
             from agent_system.tools.product_tools import get_product_details
             try:
                 result = build_summary(run, campaign, get_product_details(ids_from(campaign)))
                 run["campaign_summary"] = result["campaign_summary"]
-                from agent_system.orchestrator.tools.campaign_selection import build_selling_point_evidence
+                from agent_system.agents.content_generation_agent import build_selling_point_evidence
                 try:
                     result.update(build_selling_point_evidence(result["campaign_summary"]))
                 except (ValueError, OSError, RuntimeError) as exc:
@@ -559,7 +563,7 @@ def run_workflow_node(state) -> dict:
             except Exception as exc:
                 result = {"final_answer": "12단계 추천 생성 실패", "error": f"{type(exc).__name__}: {exc}"}
         elif local_step7 and step.no == 7:
-            from agent_system.orchestrator.tools.category_synthesis import build_category_summary
+            from agent_system.agents.reporting_agent import build_category_summary
             try:
                 if run.get("period_plan"):
                     from .category_planning.analysis_scope_r427 import run_scope
@@ -593,7 +597,7 @@ def run_workflow_node(state) -> dict:
             except Exception as exc:
                 result = {"final_answer": "7단계 결과 정리 실패", "error": f"{type(exc).__name__}: {exc}"}
         elif local_step7 and step.no == 9:
-            from agent_system.orchestrator.tools.category_synthesis import product_summary
+            from agent_system.agents.reporting_agent import product_summary
             try:
                 result = product_summary(run.get("verified_candidate_rows") or [], run["review_category"], state["turn_id"])
                 result["stage_alignment_output"] = True
@@ -820,7 +824,7 @@ def run_workflow_node(state) -> dict:
     # R30: 상품 구성 승인 직후에는 11단계 시장 요약보다 12단계 소구점 근거를 전달한다.
     if selling_point_result is not None:
         from pathlib import Path as _EvidencePath
-        from agent_system.orchestrator.tools.campaign_selection import build_selling_point_evidence
+        from agent_system.agents.content_generation_agent import build_selling_point_evidence
         evidence = selling_point_result
         graph_path = evidence.get("visualization_path")
         if (evidence.get("dataframe") is None or not graph_path
@@ -962,7 +966,7 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
         if (not workflow or workflow.name != "trend_planning" or not step or step.no != 17
                 or run.get("status") != "paused"):
             return "대표 문구를 확정한 뒤 타깃 분석 전 대기 상태에서만 보고서 초안을 작성할 수 있습니다.", None, False
-        from agent_system.orchestrator.tools.provisional_report import build_draft
+        from agent_system.agents.reporting_agent import build_draft
         try:
             report = build_draft(run, campaign)
         except ValueError as exc:
@@ -970,7 +974,8 @@ def handle_command(message: str, run: dict | None, campaign: dict | None) -> tup
         revised = dict(run, report_draft={"status": "review", "revision": 1, "text": report, "target_verified": False, "history": []})
         return report, base.record_run_event(revised, "provisional_report_drafted", target_verified=False), False
     # 보고서 수정은 새 SQL 조회가 아닌 현재 Run의 확정 근거만 사용한다.
-    from agent_system.orchestrator.tools.provisional_report import is_report_revision, revise_draft
+    from agent_system.orchestrator.tools.provisional_report import is_report_revision
+    from agent_system.agents.reporting_agent import revise_draft
     if is_report_revision(message):
         workflow, _, step = current_step(run)
         if (not workflow or workflow.name != "trend_planning" or not step or step.no != 17

@@ -1,43 +1,28 @@
-"""⑤ Validation Agent — 검증 에이전트 (「CART_SIGNAL 에이전트 및 Tool 설계안」)
+"""검증 Agent — 분석 결과 및 데이터 근거, 카피, 상품 선택과 보고서 작성 조건을 검증합니다."""
 
-역할: 생성된 결과물이 실제 데이터와 승인된 조건에 부합하는지 확인
-시나리오: 메인 15·21단계(페이지 틀·메시지 근거 검사), 보고서 수치 검사 / 서브: 촬영 요청서 근거 확인
+# 기존 워크플로에서 호출하는 로컬 Tool 목록 (LLM에는 연결하지 않음).
+from agent_system.agents.local_workflow import execute_tool, freeze_tools, workflow_tool
 
-구현 상태 (11/18 팀 원칙: 없는 부분은 가짜로 만들지 않고 미구현)
-- Tool 이름·기능·백엔드 API 경로는 확정 (agent_system/tools/validation_tools.py)
-- 백엔드 API가 연결되기 전(CART_SIGNAL_BACKEND_URL 없음)에는 LLM을 부르지 않고 '미구현' 안내를 돌려줍니다 (not_ready=True).
-- registry.py에서는 enabled=False. 데이터·모델·백엔드가 연결되면 True로 바꾸면 Orchestrator·워크플로가 바로 사용합니다.
-- 실행 흐름은 agent_system/base_agent.py (Tool 호출 로그 포함, 팀 규칙)
-"""
+WORKFLOW_TOOLS = freeze_tools({
+    'check_selection': ('agent_system.validation.specialized_selection_gate', 'check_selection'),
+    'validate_with_retries': ('agent_system.validation.specialized_selection_gate', 'validate_with_retries'),
+    'validate_candidates': ('agent_system.orchestrator.tools.campaign_copy', 'validate_candidates'),
+    'review_campaign_copy': ('agent_system.validation.semantic_campaign_validator', 'review_campaign_copy'),
+    'validated_updates': ('agent_system.orchestrator.tools.category_approval', 'validated_updates'),
+    'verify_requested_updates': ('agent_system.orchestrator.tools.category_approval', 'verify_requested_updates'),
+    'validate_copy_evidence': ('agent_system.validation.campaign_evidence_gate', 'validate_copy_evidence'),
+    'require_approved_copy_for_report': ('agent_system.validation.campaign_evidence_gate', 'require_approved_copy_for_report'),
+})
 
-from __future__ import annotations
+def run(action, /, *args, **kwargs):
+    """기존 워크플로의 조건 검사 이후 선택된 Tool을 실행한다."""
+    return execute_tool(WORKFLOW_TOOLS, action, *args, **kwargs)
 
-from agent_system import backend_client
-from agent_system.base_agent import ToolAgentConfig, run_tool_agent
-from agent_system.prompts.validation_prompt import VALIDATION_PROMPT
-from agent_system.tools import validation_tools as T
-
-AGENT_NAME = "validation"
-
-CONFIG = ToolAgentConfig(
-    name=AGENT_NAME,
-    label="검증",
-    tools=T.TOOLS,
-    tool_source=T.TOOL_SOURCE,
-    prompt=VALIDATION_PROMPT,
-    data_status=T.data_status,
-    is_ready=backend_client.enabled,
-    scope_note="백엔드 규칙 검사 결과 기준 (무신사 리뷰를 H&M 특성으로 단정한 표현은 실패)",
-    table_priority=("validate_data_evidence", "validate_marketing_copy", "validate_campaign_conditions"),
-)
-
-
-def get_validation_model(llm_config: dict | None = None):
-    """요청에 고정된 채팅 모델 (테스트에서 바꿔 끼울 수 있게 함수로 둠)."""
-    from env.gpt_client import get_openai_chat_client
-    return get_openai_chat_client(model_config=llm_config)
-
-
-def run(request) -> dict:
-    """registry에서 부르는 진입점: run(AgentRequest) -> dict"""
-    return run_tool_agent(CONFIG, request, lambda cfg: get_validation_model(cfg))
+check_selection = workflow_tool('validation', 'check_selection')
+validate_with_retries = workflow_tool('validation', 'validate_with_retries')
+validate_candidates = workflow_tool('validation', 'validate_candidates')
+review_campaign_copy = workflow_tool('validation', 'review_campaign_copy')
+validated_updates = workflow_tool('validation', 'validated_updates')
+verify_requested_updates = workflow_tool('validation', 'verify_requested_updates')
+validate_copy_evidence = workflow_tool('validation', 'validate_copy_evidence')
+require_approved_copy_for_report = workflow_tool('validation', 'require_approved_copy_for_report')

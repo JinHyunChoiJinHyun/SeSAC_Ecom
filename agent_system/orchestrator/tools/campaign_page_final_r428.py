@@ -342,4 +342,5 @@ def sync_delivery(root,event,run,campaign,*,sending=False):
     content=_checked(root,record)
     if png.get('sha256')==record['sha256'] and png.get('file_id')=='r428:'+record['token']: return
     if sending: raise ValueError('최종 PNG가 변경됐습니다. 수신자를 다시 지정하고 발송 승인해 주세요.')
-    d.register_png(root,event,content,file_id='r428:'+record['token'])
+    from agent_system.agents.campaign_execution_agent import register_png
+    register_png(root,event,content,file_id='r428:'+record['token'])

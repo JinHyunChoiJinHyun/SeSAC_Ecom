@@ -16,7 +16,7 @@ _ID = re.compile(r"(?<!\d)\d{10}(?!\d)")
 _ROUTES = {"market_analysis", "product_analysis", "targeting"}
 _MARKET_TOOLS = ("get_shopping_trends", "analyze_trend_sustainability",
                  "analyze_youtube_trends", "analyze_competitor_reviews",
-                 "analyze_selling_points", "search_fashion_trends")
+                 "analyze_selling_points")
 
 
 def _market_evidence(result: dict) -> bool:

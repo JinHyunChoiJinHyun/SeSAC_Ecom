@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 
-from agent_system.validation.campaign_evidence_gate import validate_copy_evidence
+from agent_system.agents.validation_agent import validate_copy_evidence
 
 
 def _parse_result(raw):

@@ -37,6 +37,8 @@ python slack_bot.py
 """
 
 
+from agent_system.agents import content_generation_agent as content_agent
+from agent_system.agents import campaign_execution_agent as execution_agent
 import logging
 import json
 import os
@@ -561,12 +563,12 @@ class SlackBridge:
             if r.MAIL_INTENT.search(question):
                 result=self.runner(question,event)
                 client.chat_postMessage(**kwargs,text=result['final_answer'])
-                if result.get('recipient_confirmation'): d.post_buttons(client,event,r._read_state(self.base_dir,event)['pending'])
-                elif result.get('recipient_choose'): d.post_buttons(client,event,choose=True)
+                if result.get('recipient_confirmation'): execution_agent.post_buttons(client,event,r._read_state(self.base_dir,event)['pending'])
+                elif result.get('recipient_choose'): execution_agent.post_buttons(client,event,choose=True)
             else:
                 state=r._read_state(self.base_dir,event)
-                pending=d.prepare_send(self.base_dir,event) if state.get('pdf') and state.get('png') else None
-                if pending: d.post_buttons(client,event,pending)
+                pending=execution_agent.prepare_send(self.base_dir,event) if state.get('pdf') and state.get('png') else None
+                if pending: execution_agent.post_buttons(client,event,pending)
                 elif state.get('target',{}).get('kind')=='r39':
                     status=(state.get('pending') or {}).get('status')
                     client.chat_postMessage(**kwargs,text='수신자 확인 버튼을 눌러 주세요.' if status=='AWAITING_CONFIRMATION' else '최종 PDF를 확인하고 수신자를 지정해 주세요.' if state.get('pdf') else '수정 Word를 첨부해 주세요.')
@@ -1211,7 +1213,7 @@ class SlackBridge:
         # R39: 실제로 보고서가 전달된 스레드에만 사내 발송 준비 상태를 등록한다.
         if result.get('r39_report') and delivery_status == 'success' and delivery_result.get('share_confirmation') is not False:
             try:
-                from agent_system.approval_demo.recipient_flow import register_campaign_report
+                from agent_system.agents.campaign_execution_agent import register_campaign_report
                 register_campaign_report(self.base_dir, event, result['r39_report'])
             except Exception:
                 LOGGER.exception('R39_REPORT_REGISTER_FAILED')
@@ -1223,10 +1225,10 @@ class SlackBridge:
         # 승인 수신자 확인은 별도 네/아니요 버튼으로 표시
         confirmation = result.get('recipient_confirmation') if isinstance(result, dict) else None
         if isinstance(result, dict) and result.get("recipient_choose"):
-            from agent_system.approval_demo.delivery_r42 import post_buttons
+            from agent_system.agents.campaign_execution_agent import post_buttons
             post_buttons(client,event,choose=True)
         if result.get("r424_mail_review"):
-            from agent_system.approval_demo.delivery_r42 import post_buttons
+            from agent_system.agents.campaign_execution_agent import post_buttons
             from agent_system.approval_demo.recipient_flow import _read_state
             post_buttons(client,event,_read_state(self.base_dir,event)["pending"])
         if confirmation:
@@ -1484,7 +1486,7 @@ def main():
             try:
                 snapshot = conversation_graph.get_state({'configurable':{'thread_id':_active_id}})
                 values = getattr(snapshot,'values',None) or {}
-                result = final428.handle_button(event['cart_signal_action'],BASE_DIR,event,values.get('workflow_run') or {},values.get('campaign') or {})
+                result = content_agent.handle_final_page_button(event['cart_signal_action'],BASE_DIR,event,values.get('workflow_run') or {},values.get('campaign') or {})
                 return {**result,'thread_id':_active_id}
             except Exception as exc:
                 LOGGER.warning('R4282 final page button failed (%s)',type(exc).__name__)
@@ -1555,7 +1557,7 @@ def main():
             LOGGER.info("ANALYSIS_SESSION_BOUND base=%s active=%s", _base_id, _active_id)
 
         # CART_APPROVAL_RECIPIENT_R3: 17단계 실DB 검증 및 자연어 수신자 확인
-        from agent_system.approval_demo.recipient_flow import route_recipient_flow
+        from agent_system.agents.campaign_execution_agent import route_recipient_flow
         # 같은 분석 세션의 확정 기획전 값을 읽어 고객 선정에 활용한다.
         # 대화 상태 조회에 실패하면 추측하지 않고 명시적 조건을 요청한다.
         _target_campaign = {}
@@ -1584,7 +1586,7 @@ def main():
             final_record428 = None
         kind428 = final428.intent(question, previous, reviewing=bool(final_record428 and final_record428.get('status')=='review'))
         if kind428:
-            return {**final428.handle(kind428,question,BASE_DIR,event,_target_run,_target_campaign),'thread_id':_active_id}
+            return {**content_agent.handle_final_page(kind428,question,BASE_DIR,event,_target_run,_target_campaign),'thread_id':_active_id}
         if evidence_request(question):
             try: return replay(_target_run,_target_campaign,_active_id,event.get('user',''))
             except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
@@ -1610,7 +1612,7 @@ def main():
             selected_for_mail=target39.confirmed_for_report(_target_run,_target_campaign)
             if selected_for_mail and is_edit(question) and not re.search(r'고객군|세그먼트|핵심\s*타깃|교차판매|재활성화',str(question)):
                 from agent_system.approval_demo.session_r424 import resolve
-                from agent_system.approval_demo.delivery_r42 import revise_mail
+                from agent_system.agents.campaign_execution_agent import revise_mail
                 try:
                     resolve(BASE_DIR,event,target39.email_summary(_target_run,selected_for_mail))
                     revised=revise_mail(BASE_DIR,event,question)
@@ -1628,9 +1630,9 @@ def main():
                     except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
                 if not selected39 or not recipient39.matches_campaign_report(BASE_DIR, event, target39.email_summary(_target_run, selected39)):
                     return {'turn_type':'chitchat', 'final_answer':'현재 기획전의 Word 보고서를 만든 스레드에서 수정본을 PDF로 변환한 뒤 사내 보고 대상을 지정해 주세요. 고객에게 직접 발송하지 않습니다.', 'completed_steps':[]}
-                try: final428.sync_delivery(BASE_DIR,event,_target_run,_target_campaign)
+                try: execution_agent.sync_delivery(BASE_DIR,event,_target_run,_target_campaign)
                 except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
-                recipient_result = recipient39.start_recipient_confirmation(question, event, BASE_DIR)
+                recipient_result = execution_agent.start_recipient_confirmation(question, event, BASE_DIR)
                 if recipient_result is not None:
                     return recipient_result
             from agent_system.orchestrator.tools.target_start_r38 import target_start_intent
@@ -1659,7 +1661,7 @@ def main():
 
         # CART_APPROVAL_SLACK_DEMO_V1: 명시적 승인시연 명령만 별도 처리한다.
         # 고객 이메일 전송 기능은 추가하지 않는다.
-        from agent_system.approval_demo.slack_flow import run_approval_demo_command
+        from agent_system.agents.campaign_execution_agent import run_approval_demo_command
         approval_result = run_approval_demo_command(question, event, repo_root=BASE_DIR)
         if approval_result is not None:
             return approval_result
@@ -1928,7 +1930,8 @@ def main():
             # 이메일 작업은 Slack 3초 응답 제한 밖에서 워커로 처리
             def _job():
                 import json as _json
-                from agent_system.approval_demo.recipient_flow import confirm_recipient, _thread
+                from agent_system.agents.campaign_execution_agent import confirm_recipient
+                from agent_system.approval_demo.recipient_flow import _thread
                 try:
                     action = (body.get('actions') or [{}])[0]
                     value = _json.loads(action.get('value') or '{}')
@@ -1965,12 +1968,13 @@ def main():
                                 client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text='현재 기획전과 일치하지 않는 보고 요청입니다. 이메일은 전송하지 않았습니다.')
                                 return
                         if saved.get('kind')=='r39' and action.get('action_id')=='cartrecipient_send':
-                            from agent_system.orchestrator.tools.campaign_page_final_r428 import sync_delivery
+                            from agent_system.agents.campaign_execution_agent import sync_delivery
                             try: sync_delivery(BASE_DIR,evt,run,values.get('campaign') or {},sending=True)
                             except ValueError as exc:
                                 client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text=str(exc))
                                 return
-                        from agent_system.approval_demo.delivery_r42 import ROLE_KEYS, prepare_send, post_buttons
+                        from agent_system.approval_demo.delivery_r42 import ROLE_KEYS
+                        from agent_system.agents.campaign_execution_agent import prepare_send, post_buttons
                         action_id = action['action_id']
                         if action_id.startswith('cartrecipient_pick_'):
                             from datetime import datetime, timezone, timedelta
@@ -1978,7 +1982,7 @@ def main():
                             if choice.get('nonce') != value.get('nonce') or choice.get('owner') != user or datetime.now(timezone.utc)-datetime.fromisoformat(choice['created_at']) > timedelta(minutes=15):
                                 client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text='이전 담당자 선택 버튼입니다. 다시 요청해 주세요.')
                                 return
-                            from agent_system.approval_demo.recipient_flow import start_recipient_confirmation
+                            from agent_system.agents.campaign_execution_agent import start_recipient_confirmation
                             role = next(k for k,v in ROLE_KEYS.items() if v == action_id.removeprefix('cartrecipient_pick_'))
                             result = start_recipient_confirmation(role+'에게 보내줘',evt,BASE_DIR,choice_nonce=value.get('nonce'))
                             client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text=result['final_answer'])

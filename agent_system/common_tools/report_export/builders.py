@@ -417,7 +417,7 @@ def build_campaign_report(campaign: dict | None, run: dict | None, entries: list
     age_label = report_label(run)
     # 동일 Run의 검증된 승인 카피가 존재하면 보고서 생성 직전 재검사한다.
     # legacy Run의 미검증 상태를 PASS로 표현하지는 않는다.
-    from agent_system.validation.campaign_evidence_gate import require_approved_copy_for_report
+    from agent_system.agents.validation_agent import require_approved_copy_for_report
     require_approved_copy_for_report(run, campaign or {})
     page = _json_field(values.get('page'))
     selling = _json_field(values.get('selling_points'))

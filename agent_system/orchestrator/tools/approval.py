@@ -114,7 +114,7 @@ def check_approval_node(state) -> dict:
     if (kind == "approve" and review_run.get("workflow") == "trend_planning"
             and review_run.get("status") == "waiting_input" and review_run.get("waiting_key") == "products"
             and {"category", "products", "theme", "subtype", "colors"}.intersection(requested)):
-        from agent_system.orchestrator.tools.category_approval import verify_requested_updates
+        from agent_system.agents.validation_agent import verify_requested_updates
         try:
             if "products" not in requested:
                 raise ValueError("검증된 상품 ID가 없는 승인 요청입니다.")
@@ -141,14 +141,15 @@ def check_approval_node(state) -> dict:
                     "turn_type": "approval", "reply": reply, "messages": [AIMessage(content=reply, name="orchestrator")]}
     if (kind == "approve" and review_run.get("workflow") == "trend_planning"
             and review_run.get("waiting_key") == "page"):
-        from agent_system.orchestrator.tools.campaign_copy import selected_copy_value, validate_candidates
+        from agent_system.orchestrator.tools.campaign_copy import selected_copy_value
+        from agent_system.agents.validation_agent import validate_candidates
         package = review_run.get("copy_package") or {}
         chosen = next((c for c in package.get("candidates") or []
                        if c.get("number") == request.get("copy_choice") and c.get("verified")), None)
         try:
             valid = validate_candidates({**package, "status": "draft"},
                                         review_run.get("campaign_summary") or {}, campaign)
-            from agent_system.validation.semantic_campaign_validator import review_campaign_copy
+            from agent_system.agents.validation_agent import review_campaign_copy
             # 외부 LLM 호출은 명시적으로 required 설정된 경우에만 수행한다.
             # 오프라인에서도 생성 코드와 분리된 근거 검사는 반드시 적용한다.
             review_campaign_copy(package, review_run.get("campaign_summary") or {}, campaign)

@@ -19,7 +19,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from pydantic import BaseModel, Field
 
-from agent_system.orchestrator.registry import get_agents
+from agent_system.orchestrator.registry import get_routable_agents
 from common.data_sources import get_available_sources
 from env.gpt_client import get_openai_chat_client
 
@@ -199,7 +199,7 @@ def build_intent_prompt(sources=None) -> str:
     return (
         INTENT_SYSTEM_PROMPT
         .replace("@@SOURCE_CAPABILITIES@@", "\n".join(f"- {source.capability}" for source in sources))
-        .replace("@@AGENT_CAPABILITIES@@", ", ".join(spec.label for spec in get_agents()))
+        .replace("@@AGENT_CAPABILITIES@@", ", ".join(spec.label for spec in get_routable_agents()))
         .replace("@@DEFAULT_SOURCE@@", default or "메인")
         .replace("@@WORKFLOWS@@", _workflow_list())
     )

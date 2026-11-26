@@ -64,7 +64,7 @@ def run_approval_demo_command(question: str, event: dict, *, repo_root: Path | N
             if len(target_question) > 300 or len(message_draft) > 3000:
                 raise ValueError('요청 또는 메시지 길이를 확인해 주세요.')
             from agent_system.agents.dynamic_targeting import calculate_requested_target
-            from agent_system.validation.specialized_selection_gate import check_selection
+            from agent_system.agents.validation_agent import check_selection
             result = calculate_requested_target(target_question, {}, root)
             verdict = check_selection('targeting', '고객 선정', result)
             if verdict['status'] != 'PASS':

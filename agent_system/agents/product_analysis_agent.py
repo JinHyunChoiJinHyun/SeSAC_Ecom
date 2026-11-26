@@ -7,7 +7,7 @@
 흐름
     run(request) → LLM(Tool calling, langchain create_agent) ⇄ agent_system/tools/product_tools.py
                  → 최종 답변 + 코드가 붙이는 '근거 출처·데이터 상태' (LLM이 빠뜨려도 항상 표시)
-- Tool 계산은 shared_analysis/product (백엔드 연결 후에는 backend /products/* API가 같은 계산을 수행)
+- Tool 계산은 shared_analysis/product
 - LLM은 Tool 선택과 설명만 합니다.
 - Tool 호출은 공통 로그(agent_system/common_tools/tool_call_log.py)로 남깁니다.
 

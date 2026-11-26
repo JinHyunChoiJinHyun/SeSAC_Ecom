@@ -1,22 +1,7 @@
-"""② Product Analysis Agent Tool 5개 (「CART_SIGNAL 에이전트 및 Tool 설계안」 이름·기능 그대로).
+"""상품 분석 Tool 5개. H&M 읽기 전용 DuckDB 및 공통 분석 함수를 사용한다.
 
-    search_products             H&M 상품 카테고리·속성·스타일 태그 기반 검색
-    match_product_keywords      트렌드 키워드와 자사 상품 속성 매칭
-    analyze_product_sales       동일 기간·조건의 상품별 구매 실적 비교
-    get_product_details         상품 설명, 소재, 색상, 이미지 등 정보 조회
-    compare_product_candidates  후보 상품의 키워드 일치도와 판매 근거 비교
-
-동작 모드 (아키텍처 [3] Tool → API → Service, scope: product:read)
-- 백엔드 모드: CART_SIGNAL_BACKEND_URL이 있으면 backend_client로 아래 API를 호출합니다 (팀원 백엔드 준비 후).
-      GET  /products/search          POST /products/keyword-match     POST /products/sales
-      GET  /products/{article_id}    POST /products/compare
-- 로컬 모드(지금): H&M DuckDB를 읽기 전용으로 조회(agent_system/common_tools/local_data/hm_products.py)하고
-  shared_analysis/product(백엔드와 같은 계산 함수)로 계산합니다.
-모든 Tool은 ToolResult를 반환합니다: {"available", "status", "source", "data", "evidence"}
-
-기준일: H&M 마지막 거래일(아키텍처 ANALYSIS_AS_OF). "최근 N주"는 그 날부터 거꾸로 계산하고 결과에 실제 기간을 넣습니다.
-나중에 최근 상품·판매 데이터(무신사·네이버 쇼핑 배치)를 쓰게 되면 LOCAL 모듈(또는 백엔드 API)만 바꿉니다.
-"""
+기준일은 H&M 마지막 거래일이며 최근 N주는 해당 날짜에서 역산한다.
+결과는 available, status, source, data, evidence 형식을 유지한다."""
 
 from __future__ import annotations
 
@@ -24,7 +9,6 @@ from collections import Counter
 
 import pandas as pd
 
-from agent_system import backend_client
 from agent_system.common_tools.local_data import hm_images as IMAGES
 from agent_system.common_tools.local_data import hm_products as LOCAL
 from shared_analysis.market.common import clean_words
@@ -106,9 +90,6 @@ def search_products(query: str, name_contains: str | None = None, limit: int = D
     limit: 돌려줄 상품 수 (최대 50). 전체 건수·태그 분포는 limit과 관계없이 전체 기준입니다.
     """
     limit = max(1, min(int(limit or DEFAULT_LIMIT), 50))
-    if backend_client.enabled():
-        return backend_client.call("GET", "/products/search", source=SOURCE,
-                                   params={"query": query, "name_contains": name_contains, "limit": limit})
     if (blocked := _local_ready()) is not None:
         return blocked
     products = LOCAL.articles()
@@ -151,9 +132,6 @@ def match_product_keywords(keywords: list[str], base_query: str | None = None, t
     """
     keywords = clean_words(keywords)
     top_n = max(1, min(int(top_n or 5), 20))
-    if backend_client.enabled():
-        return backend_client.call("POST", "/products/keyword-match", source=SOURCE,
-                                   body={"keywords": keywords, "base_query": base_query, "top_n": top_n})
     if (blocked := _local_ready()) is not None:
         return blocked
     products = LOCAL.articles()
@@ -182,10 +160,6 @@ def analyze_product_sales(article_ids: list[str] | None = None, product_codes: l
     channel = channel if channel in LOCAL.CHANNELS else "online"
     key = "product_code" if product_codes and not article_ids else "article_id"
     ids = normalize_ids(article_ids) if key == "article_id" else clean_words(product_codes)
-    if backend_client.enabled():
-        return backend_client.call("POST", "/products/sales", source=SOURCE, body={
-            "article_ids": ids if key == "article_id" else None, "product_codes": ids if key != "article_id" else None,
-            "weeks": weeks, "end_date": end_date, "channel": channel})
     if (blocked := _local_ready()) is not None:
         return blocked
     if not ids:
@@ -224,12 +198,6 @@ def get_product_details(article_ids: list[str]) -> dict:
     같은 상품 모델(product_code)의 다른 색상도 함께 돌려줍니다.
     """
     ids = normalize_ids(article_ids)[:MAX_IDS]
-    if backend_client.enabled():
-        rows = [backend_client.call("GET", f"/products/{a}", source=SOURCE) for a in ids]
-        ok = [r for r in rows if r.get("available")]
-        return {"available": bool(ok), "status": "연결됨 (백엔드)" if ok else (rows[0]["status"] if rows else "ID 없음"),
-                "source": SOURCE, "data": {"rows": [r.get("data") for r in ok]},
-                "evidence": [e for r in ok for e in r.get("evidence", [])]}
     if (blocked := _local_ready()) is not None:
         return blocked
     products = LOCAL.articles()
@@ -264,9 +232,6 @@ def compare_product_candidates(article_ids: list[str], keywords: list[str], week
     """
     ids = normalize_ids(article_ids)[:MAX_IDS]
     keywords = clean_words(keywords)
-    if backend_client.enabled():
-        return backend_client.call("POST", "/products/compare", source=SOURCE, body={
-            "article_ids": ids, "keywords": keywords, "weeks": weeks, "end_date": end_date, "channel": channel})
     if (blocked := _local_ready()) is not None:
         return blocked
     details = get_product_details(ids)
@@ -303,8 +268,6 @@ TOOL_SOURCE = {name: "hm" for name in PRODUCT_TOOLS}
 
 def data_status() -> dict:
     """연결 상태 (Agent 프롬프트 안내용)."""
-    if backend_client.enabled():
-        return {"hm": "백엔드 API로 조회"}
     info = LOCAL.status()
     status = info["status"]
     if info["available"]:

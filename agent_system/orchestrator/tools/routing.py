@@ -18,7 +18,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from agent_system.orchestrator.registry import AgentSpec, get_agents, get_default_agent
+from agent_system.orchestrator.registry import AgentSpec, get_routable_agents, get_default_agent
 
 
 class RouteDecision(BaseModel):
@@ -48,7 +48,7 @@ ORCHESTRATOR_PROMPT_TEMPLATE = """
 
 
 def build_routing_prompt(agents: list[AgentSpec] | None = None) -> str:
-    agents = get_agents() if agents is None else agents
+    agents = get_routable_agents() if agents is None else agents
     lines = []
     for spec in agents:
         lines.append(f"- name: {spec.name}  ({spec.label}){'  [기본]' if spec.is_default else ''}")
@@ -86,7 +86,7 @@ def route_request(
 
     from agent_system.orchestrator import settings
 
-    agents = get_agents()
+    agents = get_routable_agents()
     names = {spec.name for spec in agents}
     default = get_default_agent()
 

@@ -7,7 +7,7 @@
 흐름
     run(request) → LLM(Tool calling, langchain create_agent) ⇄ agent_system/tools/market_tools.py
                  → 최종 답변 + 코드가 붙이는 '근거 출처·데이터 상태' (LLM이 빠뜨려도 항상 표시)
-- Tool 계산은 shared_analysis/market (백엔드 연결 후에는 backend API가 같은 계산을 수행)
+- Tool 계산은 shared_analysis/market
 - LLM은 Tool 선택과 설명만 합니다.
 
 출력 (orchestrator/registry.py 공통 결과 형식)
@@ -35,12 +35,12 @@ MAX_ROWS_FOR_LLM = 40       # Tool 결과를 LLM에 넘길 때 목록 최대 행
 
 # Slack 표·CSV로 보낼 표 우선순위 (요약 표 우선, 원시 추이 시계열은 마지막)
 TABLE_PRIORITY = ("analyze_trend_sustainability", "analyze_youtube_trends", "analyze_competitor_reviews",
-                  "analyze_selling_points", "get_shopping_trends", "search_fashion_trends")
+                  "analyze_selling_points", "get_shopping_trends")
 TOOL_TABLE_TITLES = {"analyze_trend_sustainability": "네이버 관심 상승률·지속 근거",
                      "analyze_youtube_trends": "유튜브 반응 (보조 근거)",
                      "analyze_competitor_reviews": "무신사 유사 상품 리뷰 항목 (언급률·불만 비율)",
                      "analyze_selling_points": "무신사 유사 상품 소구점 (소재·핏·관리·디자인)",
-                     "get_shopping_trends": "네이버 검색 추이", "search_fashion_trends": "패션 매체 근거"}
+                     "get_shopping_trends": "네이버 검색 추이"}
 MAX_EXTRA_TABLES = 3        # 보고서에 같이 넣을 다른 Tool 표 수 (대표 표 1개 + 최대 3개)
 NESTED_COLUMNS = {"top_videos", "top_values", "recent_values", "request", "related_candidates", "evidence_links"}   # 표에서 뺄 중첩 값
 
@@ -296,6 +296,6 @@ if __name__ == "__main__":
     keyword = " ".join(sys.argv[1:]) or "니트"
     print("데이터 연결 상태:", json.dumps(T.data_status(), ensure_ascii=False, indent=2))
     for name, func in T.MARKET_TOOLS.items():
-        result = func(query=keyword) if name == "search_fashion_trends" else func(keywords=[keyword])
+        result = func(keywords=[keyword])
         print(f"\n===== {name} =====")
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str)[:3000])
