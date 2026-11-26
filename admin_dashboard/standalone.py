@@ -1,4 +1,4 @@
-"""표준 라이브러리 HTTP 서버로 관리자 인증, 정적 화면, 기록 조회와 모델 설정 API를 제공합니다."""
+"""표준 라이브러리 HTTP 서버로 관리자 인증, 정적 화면, 기록 조회, 모델 설정, 재학습, 외부 데이터 API를 제공합니다."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .external_data import ExternalDataManager, ExternalError
+from .retrain import RetrainError, RetrainManager
 from .service import Dashboard, Settings, export_csv, select_runs, summary
 from env.model_settings import get_store, ModelSettingsError
 
@@ -41,9 +43,20 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
         raise ValueError("외부 접속에는 관리자 인증 설정이 필요합니다.")
     dashboard = Dashboard(settings)
     model_store = get_store(settings.project)
+    retrain = RetrainManager(settings.project)
+    external = ExternalDataManager(settings.project)
+    # POST 경로별 처리 함수와 출처 차단 시 안내 문구입니다.
+    post_routes = {
+        "/api/model-settings": (lambda body: (model_store.apply(body), model_store.public_status())[1], "모델 설정을 변경할"),
+        "/api/retrain/start": (retrain.start, "재학습을 시작할"),
+        "/api/retrain/apply": (retrain.apply, "모델을 적용할"),
+        "/api/retrain/discard": (retrain.discard, "모델을 버릴"),
+        "/api/retrain/dismiss": (retrain.dismiss, "작업 표시를 닫을"),
+        "/api/external/run": (external.start, "수집을 시작할"),
+    }
 
     class Handler(BaseHTTPRequestHandler):
-        """GET으로 화면·기록·결과 파일·모델 설정을 조회하고 POST로 모델 설정을 변경합니다."""
+        """GET으로 화면·기록·결과 파일·모델 설정·재학습 상태를 조회하고 POST로 모델 설정 변경과 재학습을 처리합니다."""
         server_version = "EcomAdmin/1.0"
 
         def log_message(self, format, *args):
@@ -96,6 +109,8 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 self.route()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            except ExternalError as exc:
+                self.error(exc.status, exc.message)
             except (ValueError, TypeError):
                 self.error(422, "날짜·페이지·상태 필터 값을 확인해 주세요.")
             except OSError:
@@ -104,11 +119,13 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 self.error(500, "기록 조회 중 오류가 발생했습니다.")
 
         def do_POST(self):
-            """관리자 접근 권한과 출처 헤더를 확인한 JSON 요청으로 모델 설정을 적용합니다."""
+            """관리자 접근 권한과 출처 헤더를 확인한 JSON 요청으로 모델 설정 변경·재학습 작업을 처리합니다."""
             if not self.authorized():
                 return self.error(401, "관리자 인증이 필요합니다.")
-            if urlsplit(self.path).path != "/api/model-settings":
+            path = urlsplit(self.path).path
+            if path not in post_routes:
                 return self.error(404, "페이지를 찾지 못했습니다.")
+            handler, action = post_routes[path]
             # Sec-Fetch-Site가 cross-site이거나 Origin의 스킴·호스트가 허용되지 않으면 차단합니다.
             # 두 출처 헤더가 없는 요청도 관리자 접근 권한 검사 후 허용합니다.
             origin = self.headers.get("Origin")
@@ -116,23 +133,26 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                 origin and (urlsplit(origin).scheme not in {"http", "https"}
                             or urlsplit(origin).netloc != self.headers.get("Host"))
             ):
-                return self.error(403, "다른 출처에서는 모델 설정을 변경할 수 없습니다.")
+                return self.error(403, f"다른 출처에서는 {action} 수 없습니다.")
             if self.headers.get_content_type() != "application/json":
-                return self.error(415, "JSON 형식으로 모델 설정을 보내 주세요.")
+                return self.error(415, "JSON 형식으로 요청을 보내 주세요.")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 2048:
                     raise ValueError()
-                selection = json.loads(self.rfile.read(length).decode("utf-8"))
-                model_store.apply(selection)
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
                 # 공개 응답에는 API 키를 포함하지 않습니다.
-                return self.send_data(json.dumps(model_store.public_status(), ensure_ascii=False))
+                return self.send_data(json.dumps(handler(body), ensure_ascii=False, default=str))
             except ModelSettingsError as exc:
                 return self.error(422, str(exc))
+            except RetrainError as exc:
+                return self.send_data(json.dumps({"detail": exc.message, **exc.extra}, ensure_ascii=False), status=exc.status)
+            except ExternalError as exc:
+                return self.error(exc.status, exc.message)
             except (ValueError, UnicodeError):
-                return self.error(400, "모델 설정 요청을 확인해 주세요.")
+                return self.error(400, "요청 내용을 확인해 주세요.")
             except OSError:
-                return self.error(503, "모델 설정을 저장하지 못했습니다.")
+                return self.error(503, "저장하지 못했습니다. 잠시 후 다시 시도해 주세요.")
 
         def route(self):
             """GET URL을 해석해 날짜 기준, 화면, 기록·모델 설정, CSV와 파일 조회로 분기합니다."""
@@ -147,6 +167,29 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
                     return self.send_data(json.dumps(model_store.public_status(), ensure_ascii=False))
                 except ModelSettingsError as exc:
                     return self.error(503, str(exc))
+            if path == "/api/retrain/status":
+                return self.send_data(json.dumps(retrain.status(), ensure_ascii=False, default=str))
+            if path == "/api/retrain/history":
+                return self.send_data(json.dumps({"items": retrain.history()}, ensure_ascii=False, default=str))
+            # 외부 데이터: 수집 상태, 그래프·미리보기 데이터, 최신 CSV 내려받기
+            if path == "/api/external/status":
+                return self.send_data(json.dumps(external.status(), ensure_ascii=False, default=str))
+            if path == "/api/external/naver":
+                return self.send_data(json.dumps(external.naver_series(), ensure_ascii=False))
+            if path == "/api/external/youtube-views":
+                return self.send_data(json.dumps(external.views_series(), ensure_ascii=False))
+            if path == "/api/external/youtube-candidates":
+                return self.send_data(json.dumps(external.candidates_top(), ensure_ascii=False))
+            if path == "/api/external/musinsa":
+                category = get("category")
+                if len(category) > 50:
+                    raise ValueError()
+                return self.send_data(json.dumps(external.musinsa_ranking(category), ensure_ascii=False))
+            if path.startswith("/api/external/download/"):
+                from urllib.parse import quote
+                file = external.download_path(path.removeprefix("/api/external/download/"))
+                return self.send_data(file.read_bytes(), "text/csv; charset=utf-8",
+                                      disposition="attachment; filename*=UTF-8''" + quote(file.name))
             if path == "/":
                 return self.send_data((STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
             if path.startswith("/assets/"):

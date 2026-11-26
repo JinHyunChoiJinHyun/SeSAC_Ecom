@@ -269,3 +269,7 @@ project_agent/
 /local_tests/
 
 /.vscode/
+
+# 대시보드·수집기 실행 결과
+/admin_dashboard/runtime/
+/external_data/data/

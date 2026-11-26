@@ -82,3 +82,60 @@ a[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
 .llm-controls select { max-width:100%; padding:8px; border:1px solid #d8deea; border-radius:6px; }
 #llm-feedback, .llm-note { flex-basis:100%; color:#59657a; }
 @media (max-width:640px) { .llm-controls { margin-left:0; width:100%; } .llm-controls select { width:100%; } }
+
+/* 모델 재학습 화면 */
+#retrain-view { display:grid; gap:18px; }
+#retrain-view[hidden] { display:none; }
+.retrain-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.retrain-card { padding:20px 22px; min-width:0; }
+.retrain-card h2 { font-size:15px; margin:0 0 14px; display:flex; align-items:center; gap:10px; }
+.retrain-facts { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:8px 16px; font-size:12px; margin:0; }
+.retrain-facts dt { color:var(--sub); }
+.retrain-facts dd { margin:0; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.retrain-form { display:flex; flex-wrap:wrap; align-items:end; gap:12px; }
+.retrain-form label { display:grid; gap:6px; font-size:12px; color:var(--sub); }
+.retrain-form small { font-size:10px; }
+.retrain-form input { padding:8px; border:1px solid #d8deea; border-radius:6px; font:inherit; color:var(--text); }
+.retrain-note { font-size:11px; color:var(--sub); margin:12px 0 0; line-height:1.6; }
+.retrain-feedback { font-size:12px; margin:8px 0 0; overflow-wrap:anywhere; }
+.retrain-feedback.error { color:var(--red); }
+.retrain-job-head { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+.retrain-job-head .retrain-note { margin:0; }
+.retrain-steps { display:flex; flex-wrap:wrap; gap:8px; margin:4px 0 14px; font-size:12px; }
+.retrain-steps span { padding:5px 10px; border-radius:999px; background:#f1f3fa; color:var(--sub); }
+.retrain-steps span.done { background:#e7f5f0; color:var(--green); }
+.retrain-steps span.now { background:var(--brand-soft); color:var(--brand); font-weight:600; }
+.retrain-error { color:var(--red); font-size:12px; margin:0 0 12px; overflow-wrap:anywhere; }
+.retrain-checks { width:100%; border-collapse:collapse; font-size:12px; margin-bottom:12px; }
+.retrain-checks td { padding:8px 6px; border-top:1px solid var(--border); vertical-align:top; overflow-wrap:anywhere; }
+.check-level { font-weight:600; white-space:nowrap; }
+.check-level.ok { color:var(--green); } .check-level.warn { color:var(--amber); } .check-level.block { color:var(--red); } .check-level.info { color:var(--sub); }
+.retrain-actions { display:flex; gap:10px; flex-wrap:wrap; }
+.retrain-log { margin-top:14px; font-size:12px; }
+.retrain-log pre { max-height:260px; overflow:auto; white-space:pre-wrap; }
+@media(max-width:650px){ .retrain-grid { grid-template-columns:1fr; } .retrain-card { padding:17px 16px; } }
+
+/* 외부 데이터 화면 */
+#external-view { display:grid; gap:18px; }
+#external-view[hidden] { display:none; }
+.ext-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.ext-card { display:grid; gap:12px; align-content:start; }
+.ext-card h2 { margin:0; }
+.ext-card.stale { border-color:#f1d9a6; }
+.ext-card .retrain-actions { align-items:center; }
+.ext-card .retrain-actions .retrain-note { margin:0; }
+.ext-card .retrain-log { margin-top:0; }
+.ext-warn { display:inline-block; font-size:10px; color:#b98a2f; background:#fff8eb; border-radius:4px; padding:1px 6px; margin-left:4px; }
+.ext-feedback:empty { display:none; }
+.ext-head { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+.ext-head h2 { margin:0; }
+.ext-tools { display:flex; align-items:center; gap:8px; }
+.ext-tools select { border:1px solid var(--border); font-size:11px; background:#fff; border-radius:6px; padding:7px 9px; max-width:170px; }
+.ext-tools .button .icon { width:13px; height:13px; }
+.ext-chart { min-height:188px; }
+.ext-name { white-space:normal; max-width:280px; min-width:180px; }
+.ext-name a { color:#48546e; text-decoration:none; overflow-wrap:anywhere; }
+.ext-name a:hover { color:var(--brand); }
+.ext-downloads { display:flex; gap:12px; align-items:center; font-size:11px; color:var(--sub); margin-top:12px; flex-wrap:wrap; }
+.ext-downloads a { color:var(--brand); }
+@media(max-width:900px){ .ext-cards { grid-template-columns:1fr; } }
