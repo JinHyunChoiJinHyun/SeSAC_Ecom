@@ -274,3 +274,22 @@ def describe_sources_for_prompt(sources: list[DataSource] | None = None) -> str:
     """프롬프트용 '조회 가능한 schema' 목록."""
     sources = get_available_sources() if sources is None else sources
     return "\n".join(f"- {source.key:<10} → {source.display}" for source in sources)
+
+
+# 로컬 시장 분석 전용 DB. 일반 Agent SQL 출처(DATA_SOURCES)에는 등록하지 않습니다.
+LOCAL_EXTERNAL_DB_FILES = {
+    "musinsa": "musinsa.duckdb",
+    "naver": "naver.duckdb",
+    "youtube": "youtube.duckdb",
+}
+
+
+def get_local_external_db_path(dataset: str, db_dir: Path | None = None) -> Path:
+    """기존 시장 데이터별 DB 경로와 환경변수 우선순위를 유지합니다."""
+    if dataset not in LOCAL_EXTERNAL_DB_FILES:
+        raise ValueError(f"알 수 없는 데이터 종류: {dataset}")
+    override = os.environ.get(f"CART_SIGNAL_{dataset.upper()}_DB")
+    if override:
+        return Path(override).expanduser().resolve()
+    folder = db_dir if db_dir is not None else PROJECT_ROOT / "database"
+    return (folder / LOCAL_EXTERNAL_DB_FILES[dataset]).expanduser().resolve()

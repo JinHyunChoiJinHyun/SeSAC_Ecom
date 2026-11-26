@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common.external_data_store import fetch
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATE_COLUMNS = ("날짜", "period", "date", "기간")
 VIDEO_COLUMNS = {"keyword", "video_id", "published_at", "collected_at", "view_count"}
@@ -88,6 +90,12 @@ def naver_status() -> dict:
 
 
 def load_naver() -> pd.DataFrame:
+    # R8_DUCKDB_LOAD_NAVER
+    from common.external_data_store import enabled as _r8_enabled
+    # 명시적으로 지정한 네이버 CSV 경로는 테스트/수동 검증에서 최우선한다.
+    # 평소 운영(CART_SIGNAL_NAVER_DIR 미설정)은 DuckDB를 그대로 사용한다.
+    if _r8_enabled() and not os.getenv('CART_SIGNAL_NAVER_DIR'):
+        return naver_frame()
     """모든 네이버 CSV → shared_analysis.market.trend_analysis 입력 형식."""
     parts = []
     for path in _csvs(naver_dir()):
@@ -114,6 +122,10 @@ def _file_date(path: Path) -> str:
 
 
 def load_youtube() -> dict:
+    # R8_DUCKDB_LOAD_YOUTUBE
+    from common.external_data_store import enabled as _r8_enabled
+    if _r8_enabled():
+        return youtube_bundle()
     """{"candidates": DataFrame, "videos": DataFrame, "files": [...]}"""
     candidates, videos, files = [], [], []
     for path in _csvs(youtube_dir()):
@@ -149,3 +161,26 @@ def youtube_status() -> dict:
     if not data["candidates"].empty:
         kinds.append(f"키워드 후보 {len(data['candidates'])}개 (조회수 상위 영상 반복 등장, 영상별 조회수 없음)")
     return {"available": True, "status": "연결됨 (로컬 배치 CSV: " + ", ".join(kinds) + ")"}
+
+
+# 로컬 DuckDB 읽기 어댑터 (기존 CSV 반환 계약 유지)
+def naver_frame() -> pd.DataFrame:
+    df = fetch('naver_trend')
+    needed = {'keyword','period','ratio','request_id','collected_at'}
+    if not needed.issubset(df):
+        raise ValueError(f'네이버 DB 누락 컬럼: {needed-set(df)}')
+    result = df[['keyword','period','ratio','request_id','collected_at']].copy()
+    result['period'] = pd.to_datetime(result['period'], errors='raise')
+    result['ratio'] = pd.to_numeric(result['ratio'], errors='raise')
+    # 독립 정규화 값: 키워드끼리 합계나 평균을 계산하지 않는다.
+    return result
+
+
+def youtube_bundle() -> dict:
+    df = fetch('youtube_candidate')
+    if 'links' in df:
+        df['links'] = df['links'].fillna('').map(
+            lambda s: [part.strip() for part in str(s).split('|') if part.strip()]
+        )
+    return {'candidates': df, 'videos': pd.DataFrame(),
+            'files': df['source_file'].dropna().unique().tolist() if 'source_file' in df else []}

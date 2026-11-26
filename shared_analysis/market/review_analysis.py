@@ -105,9 +105,12 @@ def classify_value(aspect: str, value: str) -> str:
     return "기타"
 
 
-def analyze_reviews(products: pd.DataFrame, reviews: pd.DataFrame, keywords, exclude=None) -> dict:
+def analyze_reviews(products: pd.DataFrame, reviews: pd.DataFrame, keywords, exclude=None, *, all_products=False) -> dict:
     keywords = clean_words(keywords)
-    found = similar_products(products, keywords, exclude)
+    found = (products.assign(matched_keyword="카테고리 전체").sort_values("ranking")
+             if all_products and "ranking" in products else
+             products.assign(matched_keyword="카테고리 전체") if all_products else
+             similar_products(products, keywords, exclude))
     reviews = reviews[reviews["item_id"].astype(str).isin(set(found["item_id"].astype(str)))]
     total = len(reviews)
     base = {"keywords": keywords, "similar_products": len(found), "reviews": total,

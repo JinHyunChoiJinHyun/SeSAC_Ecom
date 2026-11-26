@@ -29,6 +29,12 @@ ANALYSIS_REPORT = re.compile(r"(보고서|리포트|report).{0,8}" + _ACTION, re
 def detect(message: str) -> str:
     """'campaign' / 'analysis' / '' (보고서 요청 아님)"""
     text = str(message or "")
+    if re.search(r"(?:취소|보내|발송|변환|수정하지|만들지|작성하지)",text):
+        return ""
+    if re.search(r"(?:기획전|캠페인).{0,30}(?:제안서|보고서|리포트).{0,15}"+_ACTION,text) or re.search(r"(?:운영\s*제안서|제안서\s*초안).{0,15}"+_ACTION,text):
+        return "campaign"
+    if re.search(r"(?:워드|Word)\s*(?:파일)?(?:로)?\s*(?:정리|작성|만들|생성)",text,re.I):
+        return "analysis"
     if CAMPAIGN_REPORT.search(text):
         return "campaign"
     if ANALYSIS_REPORT.search(text):

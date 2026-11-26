@@ -72,6 +72,9 @@ class _Blank(dict):
 def render(template: str, run: dict, campaign: dict | None) -> str:
     values = dict((campaign or {}).get("values") or {})
     values.update(request=run.get("request", ""), previous=run.get("previous", "") or "(없음)")
+    # CART_SIGNAL_CATEGORY_REVIEW_LOOP_V1
+    if run.get("review_category"):
+        values["category"] = run["review_category"]
     return str(template or "").format_map(_Blank(values))
 
 
@@ -99,7 +102,7 @@ def new_run(workflow: Workflow, request: str, parent_run_id: str = "") -> dict:
 
 
 def is_active(run: dict | None) -> bool:
-    return bool(run) and run.get("status") in ("running", "waiting_input")
+    return bool(run) and run.get("status") in ("running", "waiting_input", "paused")
 
 
 def confirmed_since(campaign: dict | None, key: str, since: str) -> bool:

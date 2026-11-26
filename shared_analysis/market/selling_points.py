@@ -55,9 +55,12 @@ SELLING_POINT_TERMS = {
 
 
 def analyze_selling_points(products: pd.DataFrame, reviews: pd.DataFrame, keywords, exclude=None,
-                           include_reviews: bool = True) -> dict:
+                           include_reviews: bool = True, *, all_products=False) -> dict:
     keywords = clean_words(keywords)
-    found = similar_products(products, keywords, exclude)
+    found = (products.assign(matched_keyword="카테고리 전체").sort_values("ranking")
+             if all_products and "ranking" in products else
+             products.assign(matched_keyword="카테고리 전체") if all_products else
+             similar_products(products, keywords, exclude))
     item_ids = set(found["item_id"].astype(str))
     reviews = reviews[reviews["item_id"].astype(str).isin(item_ids)] if include_reviews else reviews.iloc[0:0]
     names = found["name"].fillna("").astype(str).str.lower()

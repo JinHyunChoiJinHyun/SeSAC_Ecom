@@ -21,10 +21,12 @@ from datetime import datetime, timezone
 # 확정값 항목과 한글 이름 (프롬프트·안내 문구에 사용)
 CAMPAIGN_KEYS = {
     "category": "카테고리",
-    "products": "주력 상품",
+    "products": "H&M 과거 판매 참고 상품 ID",
     "target": "타깃",
     "schedule": "기획전 일정",
     "theme": "기획전 주제",
+    "subtype": "주력 세부 유형",
+    "colors": "기획전 색상",
     "note": "메모",
     # 워크플로 마케터 선택 단계에서 쓰는 확정값 (agent_system/workflows/)
     "selling_points": "공통 소구점·가격·혜택",

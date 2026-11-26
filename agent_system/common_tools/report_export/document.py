@@ -27,6 +27,7 @@ class Table:
 class Image:
     path: str
     caption: str = ""
+    max_height_mm: float | None = None  # 시안 등 세로 이미지에만 지정
 
 
 @dataclass

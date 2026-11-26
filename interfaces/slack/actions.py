@@ -29,12 +29,16 @@ _APPROVAL_BUTTONS = [
     ("reject", "반려", "danger"),
     ("cancel", "승인 요청 취소", None),
 ]
+_TARGET_BUTTONS = [('approve','승인','primary'), ('reject','반려','danger'), ('resize','선정 규모 변경',None), ('evidence','선정 근거 보기',None)]
+_PAGE_PREVIEW_BUTTONS = [('approve', '승인', 'primary'), ('reject', '반려', 'danger'), ('edit', '수정', None), ('regenerate', '페이지 다시 만들기', None), ('undo', '직전 수정 되돌리기', None)]
+
 _WORKFLOW_BUTTONS = {
     "blocked": [("continue", "다시 시도", "primary"), ("status", "진행 상황", None), ("cancel", "워크플로 취소", "danger")],
     "waiting_input": [("status", "진행 상황", None), ("cancel", "워크플로 취소", "danger")],
 }
 LABELS = {("approval", d): label for d, label, _ in _APPROVAL_BUTTONS}
 LABELS.update({("workflow", c): label for buttons in _WORKFLOW_BUTTONS.values() for c, label, _ in buttons})
+LABELS.update({("page_preview_review", c): label for c, label, _ in _PAGE_PREVIEW_BUTTONS})
 
 
 def _button(action_id: str, text: str, value: dict, style: str | None = None, confirm: dict | None = None) -> dict:
@@ -49,26 +53,94 @@ def _button(action_id: str, text: str, value: dict, style: str | None = None, co
     return button
 
 
-def build_action_blocks(actions: list[dict] | None, thread_id: str) -> list[dict]:
+def build_action_blocks(actions: list[dict] | None, thread_id: str, requester_user_id: str = "") -> list[dict]:
     """결과의 actions → Slack Block Kit 블록. 보여 줄 버튼이 없으면 빈 목록."""
     blocks = []
     for item in actions or []:
         kind = item.get("type")
+        if kind == 'final_page_review' and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}final_page_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id}, style) for d,label,style in [('approve','완성본 승인','primary'),('edit','수정 요청',None),('reject','반려','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*기획전 페이지 완성본 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}final_page_review','elements':buttons}]
+            continue
+        if kind == 'segment_copy_review' and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}segment_copy_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id}, style) for d,label,style in [('approve','문구 승인','primary'),('reject','문구 반려','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객군별 문구 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}segment_copy_review','elements':buttons}]
+            continue
+        if kind == 'target_selection_review'  and item.get('run_id') and item.get('token'):
+            buttons = [_button(f'{ACTION_PREFIX}target_review_{d}', label, {'k':kind,'d':d,'run':item['run_id'],'tok':item['token'],'t':thread_id,'owner':requester_user_id, **({'view':'open'} if item.get('fixed_policy') and d == 'evidence' else {})}, style) for d,label,style in _TARGET_BUTTONS if not (item.get('fixed_policy') and d == 'resize') and (not item.get('read_only') or d == 'evidence')]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*고객 타깃 승인 완료*' if item.get('read_only') else '*고객 타깃 검토*'}}, {'type':'actions','block_id':f'{ACTION_PREFIX}target_selection_review','elements':buttons}]
+            continue
+        if kind == 'page_preview_review' and item.get('run_id') and isinstance(item.get('revision'), int):
+            buttons = [_button(f"{ACTION_PREFIX}page_preview_{d}", label,
+                               {'k':'page_preview_review','d':d,'run':item['run_id'],
+                                'rev':item['revision'],'t':thread_id,'owner':requester_user_id}, style)
+                       for d,label,style in _PAGE_PREVIEW_BUTTONS]
+            blocks += [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': '*시안 검토*'}},
+                       {'type': 'actions', 'block_id': f'{ACTION_PREFIX}page_preview_review', 'elements': buttons}]
+            continue
+        if kind == "copy_revision_review" and item.get("run_id") and isinstance(item.get("revision"), int):
+            phase = item.get("phase", "review")
+            decisions = [('choose1', '1안 확정', None), ('choose2', '2안 확정', None),
+                         ('choose3', '3안 확정', 'primary'), ('edit','추가 수정',None),
+                         ('undo','직전 수정 되돌리기','danger')]
+            buttons = [_button(f"{ACTION_PREFIX}copy_review_{d}", label,
+                               {'k': 'copy_revision_review', 'd': d, 'run': item['run_id'],
+                                'rev': item['revision'], 'phase': phase,
+                                't': thread_id, 'owner': requester_user_id}, style)
+                       for d, label, style in decisions]
+            note = '완성형 카피 하나를 바로 확정하거나 추가 수정·되돌리기할 수 있습니다.'
+            blocks += [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': f'*카피 수정 검토* — {note}'}},
+                       {'type': 'actions', 'block_id': f'{ACTION_PREFIX}copy_review', 'elements': buttons}]
+            continue
+        if kind == 'report_draft_review' and item.get('run_id'):
+            buttons = [_button(f'{ACTION_PREFIX}report_{d}', label,
+                       {'k':'report_draft_review','d':d,'run':item['run_id'],
+                        'rev':item['revision'],'t':thread_id,'owner':requester_user_id}, style)
+                       for d,label,style in [('approve','승인','primary'),('edit','수정 요청',None),
+                                              ('cancel','취소','danger')]]
+            blocks += [{'type':'section','text':{'type':'mrkdwn','text':'*보고서 초안 검토* — 승인, 수정 요청 또는 초안 취소를 선택하세요.'}},
+                       {'type':'actions','block_id':f'{ACTION_PREFIX}report_review','elements':buttons}]
+            continue
         if kind == "approval" and item.get("token"):
+
             title = item.get("title") or "승인 요청"
+            # 승인 버튼도 내부 단계 번호 없이 표시합니다.
+            from interfaces.slack.message_policy import hide_workflow_stage_labels
+            title = hide_workflow_stage_labels(str(title))
             buttons = [_button(f"{ACTION_PREFIX}approval_{d}", label,
-                               {"k": "approval", "d": d, "tok": item["token"], "t": thread_id}, style)
+                               {"k": "approval", "d": d, "tok": item["token"], "t": thread_id, "owner": requester_user_id}, style)
                        for d, label, style in _APPROVAL_BUTTONS]
             blocks += [{"type": "section", "text": {"type": "mrkdwn",
-                                                    "text": f"*{title}* — 버튼으로 선택해 주세요. 수정은 채팅으로 입력 (예: \"카디건으로 수정\")"}},
+                                                    "text": f"*{title}* — 버튼으로 선택해 주세요. 변경할 내용은 채팅으로 알려 주세요."}},
                        {"type": "actions", "block_id": f"{ACTION_PREFIX}approval", "elements": buttons}]
+        elif kind == "category_confirm" and item.get("run_id") and item.get("category"):
+            category = str(item["category"])
+            buttons = [_button(f"{ACTION_PREFIX}category_confirm", f"{category} 승인",
+                               {"k": "category_confirm", "run": item["run_id"], "category": category,
+                                "tok": item.get("token", ""),
+                                "t": thread_id, "owner": requester_user_id}, "primary")]
+            for decision, label, style in _APPROVAL_BUTTONS[1:]:
+                buttons.append(_button(f"{ACTION_PREFIX}category_{decision}", label,
+                    {"k": "category_confirm", "d": decision, "run": item["run_id"],
+                     "category": category, "tok": item.get("token", ""), "t": thread_id, "owner": requester_user_id}, style))
+            blocks += [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*대분류 최종 확인* — {category}로 확정하시겠습니까? 승인 시 세부 유형 순위와 색상별 구매 근거를 안내합니다."}},
+                       {"type": "actions", "block_id": f"{ACTION_PREFIX}category", "elements": buttons}]
+        elif kind == "subtype_suggestion" and item.get("run_id") and item.get("subtype") and item.get("colors"):
+            subtype, colors = str(item["subtype"]), [str(c) for c in item["colors"]]
+            buttons = [_button(f"{ACTION_PREFIX}subtype_suggestion", "추천 유형·상위 2색 선택",
+                               {"k": "subtype_suggestion", "run": item["run_id"], "subtype": subtype,
+                                "colors": colors, "t": thread_id, "owner": requester_user_id}, "primary")]
+            blocks += [{"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*세부 유형·색상 선택* — 추천: {subtype} / {', '.join(colors)}. 다른 조합은 채팅으로 입력하세요."}},
+                       {"type": "actions", "block_id": f"{ACTION_PREFIX}subtype", "elements": buttons}]
         elif kind == "workflow" and item.get("status") in _WORKFLOW_BUTTONS and item.get("run_id"):
             confirm = {"title": {"type": "plain_text", "text": "워크플로 취소"},
                        "text": {"type": "mrkdwn", "text": "진행 중인 워크플로를 취소할까요? 확정값은 그대로 남습니다."},
                        "confirm": {"type": "plain_text", "text": "취소하기"},
                        "deny": {"type": "plain_text", "text": "돌아가기"}}
             buttons = [_button(f"{ACTION_PREFIX}workflow_{c}", label,
-                               {"k": "workflow", "c": c, "run": item["run_id"], "t": thread_id}, style,
+                               {"k": "workflow", "c": c, "run": item["run_id"], "t": thread_id, "owner": requester_user_id}, style,
                                confirm if c == "cancel" else None)
                        for c, label, style in _WORKFLOW_BUTTONS[item["status"]]]
             note = "멈춘 단계를 다시 시도하거나 취소할 수 있습니다." if item["status"] == "blocked" \
@@ -95,6 +167,53 @@ def parse_action(body: dict) -> dict | None:
     if value.get("k") == "approval" and value.get("d") in {d for d, _, _ in _APPROVAL_BUTTONS} and value.get("tok"):
         action = {"type": "approval", "decision": value["d"], "token": str(value["tok"])}
         label = LABELS[("approval", value["d"])]
+    elif value.get("k") == "category_confirm" and value.get("run") and value.get("category"):
+        action = {"type": "category_confirm", "run_id": str(value["run"]), "category": str(value["category"])}
+        decision = value.get("d", "approve")
+        if decision not in {"approve", "reject", "cancel"}:
+            return None
+        if value.get("tok"):
+            action["token"] = str(value["tok"])
+        if decision != "approve":
+            action["decision"] = decision
+        label = f"{action['category']} 확정" if decision == "approve" else LABELS[("approval", decision)]
+    elif (value.get("k") == "subtype_suggestion" and value.get("run") and value.get("subtype")
+          and isinstance(value.get("colors"), list) and value["colors"]):
+        action = {"type": "subtype_suggestion", "run_id": str(value["run"]),
+                  "subtype": str(value["subtype"]), "colors": [str(c) for c in value["colors"]]}
+        label = "추천 유형·상위 2색 선택"
+    elif value.get('k') == 'final_page_review' and value.get('run') and isinstance(value.get('tok'),str) and re.fullmatch(r'[0-9a-f]{12}',value['tok']) and value.get('d') in ('approve','edit','reject'):
+        action = {'type':'final_page_review','command':value['d'],'run_id':str(value['run']),'token':value['tok']}
+        label = {'approve':'완성본 승인','edit':'수정 요청','reject':'반려'}[value['d']]
+    elif value.get('k') == 'segment_copy_review' and value.get('run') and value.get('tok') and value.get('d') in ('approve','reject'):
+        action = {'type':'segment_copy_review','command':value['d'],'run_id':str(value['run']),'token':str(value['tok'])}
+        label = '문구 승인' if value['d']=='approve' else '문구 반려'
+    elif (value.get('k') == 'target_selection_review'  and value.get('run') and value.get('tok') and value.get('d') in {d for d, _, _ in _TARGET_BUTTONS}):
+        action = {'type':'target_selection_review','command':value['d'],'run_id':str(value['run']),'token':str(value['tok'])}
+        label = next(label for d,label,_ in _TARGET_BUTTONS if d == value['d'])
+        if value['d'] == 'evidence' and value.get('view') in ('open','close'):
+            action['view'] = value['view']
+            label = '선정 근거 보기' if value['view'] == 'open' else '선정 근거 접기'
+    elif (value.get('k') == 'page_preview_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') > 0
+          and value.get('d') in ('approve','reject','edit','regenerate','undo')):
+        action = {'type':'page_preview_review','command':value['d'],
+                  'run_id':str(value['run']),'revision':value['rev']}
+        label = {'approve':'승인','reject':'반려','edit':'수정','regenerate':'페이지 다시 만들기','undo':'직전 수정 되돌리기'}[value['d']]
+    elif (value.get('k') == 'copy_revision_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') >= 0
+          and value.get('phase') in ('review', 'select')
+          and value.get('d') in ('approve','edit','undo','choose1','choose2','choose3')):
+        action = {'type': 'copy_revision_review', 'command': value['d'],
+                  'run_id': str(value['run']), 'revision': value['rev'], 'phase': value['phase']}
+        label = {'approve':'승인','edit':'추가 수정','undo':'취소 후 되돌리기',
+                 'choose1':'1안 선택','choose2':'2안 선택','choose3':'3안 선택'}[value['d']]
+    elif (value.get('k') == 'report_draft_review' and value.get('run')
+          and isinstance(value.get('rev'), int) and value.get('rev') > 0
+          and value.get('d') in ('approve','edit','cancel')):
+        action = {'type':'report_draft_review','command':value['d'],
+                  'run_id':str(value['run']),'revision':value['rev']}
+        label = {'approve':'승인','edit':'수정 요청','cancel':'취소'}[value['d']]
     elif value.get("k") == "workflow" and ("workflow", value.get("c")) in LABELS and value.get("run"):
         action = {"type": "workflow", "command": value["c"], "run_id": str(value["run"])}
         label = LABELS[("workflow", value["c"])]
@@ -114,6 +233,7 @@ def parse_action(body: dict) -> dict | None:
         "action": action,
         "label": label,
         "thread_id": str(value.get("t") or ""),
+        "requester_user_id": str(value.get("owner") or ""),
         "event": event,
         "team_id": (body.get("team") or {}).get("id") or "",
         "message_ts": message_ts,

@@ -165,8 +165,8 @@ AGENTS: list[AgentSpec] = [
             "연락 가능 여부·발송 상한·대조군을 반영한 최종 발송 명단을 만듭니다."
         ),
         examples=("이번 기획전 발송 대상 뽑아줘", "핵심 타깃 고객에게 어떤 상품을 추천할지 정해줘"),
-        runner="agent_system.agents.targeting_agent:run",
-        enabled=False,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
+        runner="agent_system.agents.model_targeting_agent:run",
+        enabled=True,   # 코드 있음. 데이터·예측 모델·백엔드 API 연결 후 True (지금은 Tool이 '미구현' 반환)
         tools=("calculate_target_scores", "recommend_customer_products", "segment_customers",
                "build_campaign_audience"),
         scenario="메인: 고객 세분화·고객별 추천 상품·발송 명단 (점수 계산과 추천은 별도 Tool)",

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from agent_system.common_tools.report_export import analysis_log
@@ -121,7 +122,7 @@ _ARTICLE_ID = re.compile(r"(?<!\d)\d{10}(?!\d)")
 MAX_PRODUCT_IMAGES = 6
 
 
-def _confirmed_product_images(products) -> ImageGrid | Paragraph | None:
+def _confirmed_product_images(products, *, reference_only=False) -> ImageGrid | Paragraph | None:
     """확정된 주력 상품 값에 들어 있는 H&M 상품 ID(10자리)의 이미지. ID가 없으면 None."""
     ids = list(dict.fromkeys(_ARTICLE_ID.findall(str(products or ""))))
     if not ids:
@@ -136,7 +137,7 @@ def _confirmed_product_images(products) -> ImageGrid | Paragraph | None:
         reasons = sorted({v["image_status"] for v in info.values()})
         return Paragraph("주력 상품 이미지 없음: " + ", ".join(reasons), "muted")
     missing = [i for i in ids if not info.get(i, {}).get("image_available")]
-    caption = "주력 상품 이미지 (H&M 원본)" + (f" · 이미지 없음: {', '.join(missing)}" if missing else "")
+    caption = ("과거 판매 참고 사례 이미지 (H&M 원본, 실제 판매 상품 아님)" if reference_only else "주력 상품 이미지 (H&M 원본)") + (f" · 이미지 없음: {', '.join(missing)}" if missing else "")
     return ImageGrid([(f["path"], f["article_id"]) for f in files], caption)
 
 
@@ -160,69 +161,477 @@ def build_analysis_report(entries: list[dict], now: datetime | None = None) -> R
 
 
 # ---------------------------------------------------------------- 기획전 실행 계획 보고서
+
+def _json_field(value):
+    """상태값은 JSON 문자열로 저장될 수 있으므로 표시 전에 안전하게 해석한다."""
+    import json
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            pass
+    return {}
+
+
+def _missing(value):
+    return str(value).strip() if value not in (None, '', []) else '미확정'
+
+
+def _draft_parts(text):
+    """Slack에서 확정/수정한 초안의 항목을 재사용하고, 내부 실행 로그는 싣지 않는다."""
+    groups: dict[str, list[str]] = {}
+    current = None
+    for line in str(text or '').splitlines():
+        line = line.strip()
+        match = re.match(r'^(\d+(?:\.\d+)?)\.\s+(.+)$', line)
+        if match:
+            current = match.group(1)
+            groups[current] = []
+        elif current and line:
+            groups[current].append(line)
+    return groups
+
+
+def _draft_blocks(lines):
+    """완료된 초안에서 확인된 문장만 문단으로 보여준다."""
+    return [Paragraph(x, 'muted' if ('[추후' in x or x.startswith('※')) else 'body')
+            for x in lines if x and not x.startswith('[초안 상태]')]
+
+
+
+def _saved_evidence_lines(draft: dict, section: str, fallback: list[str]) -> list[str]:
+    """Slack 최신 초안의 출처별 문장을 우선 표시하고 없는 절만 저장 근거로 보완한다."""
+    lines = draft.get(section)
+    return [str(line) for line in lines if str(line).strip()] if isinstance(lines, list) and lines else fallback
+
+
+def _report_market_evidence(run, draft):
+    """저장된 무신사 근거만 보고서에 반영한다. 미확인 숫자는 추정하지 않는다."""
+    market = run.get('category_market') or {}
+    summary = run.get('campaign_summary') or {}
+    evidence = market.get('ranked_evidence') or summary.get('ranked_evidence') or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+
+    # 집계의 출처와 비교 범위를 명시한 구조화 근거가 가장 우선이다.
+    total = evidence.get('total_products')
+    eligible = evidence.get('eligible_products')
+    related = evidence.get('related_products')
+    reviews = evidence.get('related_reviews')
+    subtype = evidence.get('subtype') or run.get('selected_subtype') or '선택 세부 유형'
+    if all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+           for v in (total, eligible, related, reviews)):
+        parts = [f"무신사 {market.get('category') or summary.get('category') or run.get('review_category') or '해당 카테고리'} 랭킹 수집 상품 {total}개 중 {evidence.get('gender_scope') or '성별 범위 미확인'} 비교 대상 "
+                 f"{eligible}개, '{subtype}' 관련 상품명 기반 잠정 후보 "
+                 f"{related}개 및 연결 리뷰 {reviews}건을 확인했습니다."]
+        shapes = {str(item.get('label')): item.get('products')
+                  for item in evidence.get('related_shapes') or [] if isinstance(item, dict)}
+        designs = [f'{label} {shapes[label]}개' for label in ('후드형', '푸퍼형', '크롭형')
+                   if isinstance(shapes.get(label), int) and shapes[label] >= 0]
+        if designs:
+            parts.append('관련 상품명에서 관찰된 디자인 표현(중복 허용): ' + ', '.join(designs) + '.')
+        parts.append('랭킹은 매출·선호도 순위가 아니며, 상품명 분류는 잠정적이고 리뷰 언급은 긍정 평가가 아닙니다.')
+        return parts
+
+    # 구조화 근거가 없다면 보고서 초안의 원래 무신사 설명만 재사용한다.
+    # 부정확한 개수를 기본값으로 넣거나 새로운 API·DB 조회는 하지 않는다.
+    return [line for line in draft.get('2', []) if line.startswith('무신사')]
+
+
+def _market_detail_blocks(run: dict) -> list:
+    """저장된 관련 상품 표본의 수치만 기록한다. 집계하지 않은 값은 만들지 않는다."""
+    market = run.get('category_market') or {}
+    summary = run.get('campaign_summary') or {}
+    ranked = market.get('ranked_evidence') or summary.get('ranked_evidence') or {}
+    if not isinstance(ranked, dict):
+        return []
+    blocks = []
+    stats = ranked.get('market_metrics') or {}
+    if isinstance(stats, dict) and isinstance(stats.get('metrics'), dict):
+        from shared_analysis.market.price_quality import render_metrics
+        blocks.append(Paragraph('3.4 관련 상품 가격·할인·평점·리뷰 통계', 'subheading'))
+        blocks.extend(Paragraph(line) for line in render_metrics(stats))
+    aspects = [x for x in ranked.get('aspects') or [] if isinstance(x, dict)
+               and isinstance(x.get('mentions'), int) and not isinstance(x.get('mentions'), bool)
+               and x.get('mentions') >= 0 and x.get('label')]
+    if aspects:
+        denominator = ranked.get('related_reviews')
+        blocks.append(Paragraph('3.5 관련 상품 수집 리뷰 관심 표현', 'subheading'))
+        rows = []
+        for item in aspects:
+            n = item['mentions']
+            rate = f'{n / denominator:.1%}' if isinstance(denominator, int) and denominator > 0 else '분모 미확인'
+            rows.append([str(item['label']), f'{n:,}건', rate])
+        blocks.append(Table(['리뷰 관심사', '언급 리뷰 수', '수집 리뷰 대비'], rows,
+                            '복수 관심사가 한 리뷰에 등장할 수 있으며 긍정·부정 평가를 구별하지 않습니다.'))
+    return blocks
+
+
+def _cross_evidence_blocks(run: dict, confirmed_ids: list[str], *, reference_only=False, selected_points=None) -> list:
+    """실제 확정 상품 ID가 포함된 H&M·무신사 교차 근거만 명확히 구분한다."""
+    summary = run.get('campaign_summary') or {}
+    cross = summary.get('cross_evidence') or []
+    if not isinstance(cross, list):
+        return []
+    rows = []
+    approved = set(confirmed_ids)
+    for item in cross:
+        if not isinstance(item, dict) or item.get('cross_verified') is not True:
+            continue
+        ids = item.get('hm_matched_ids') or []
+        if not isinstance(ids, list) or not ids or not all(x in approved for x in ids):
+            continue
+        mentions, total = item.get('musinsa_mentions'), item.get('musinsa_related_reviews')
+        if not (isinstance(mentions, int) and not isinstance(mentions, bool)
+                and isinstance(total, int) and total > 0 and 0 <= mentions <= total):
+            continue
+        scope = '상품별 한정' if item.get('scope') == 'partial' else '공통'
+        rows.append([('[선택] ' if str(item.get('label') or '') in (selected_points or []) else '[미선택·참고] ') + str(item.get('label') or '확인된 특징'), scope,
+                     ', '.join(ids), f"{item.get('musinsa_aspect') or '관심 표현'} {mentions:,}/{total:,}건"])
+    # V429O_CROSS_ROWS: 선택 소구점이 사전 교차 검증 목록에 없더라도
+    # 확정된 편성 방향을 누락하지 않는다. 검증되지 않은 교차 관계로 오인하지 않게 표기한다.
+    from agent_system.orchestrator.tools.provisional_report import _point_evidence_detail
+    selected = [str(p) for p in (selected_points or []) if str(p).strip()]
+    included = {str(row[0]).removeprefix('[선택] ').strip() for row in rows}
+    for point in selected:
+        if point in included:
+            continue
+        detail = _point_evidence_detail(point, run)
+        # 참고 ID도 이번 보고서의 승인 상품 범위 밖이라면 출력하지 않는다.
+        safe_refs = [ref for ref in detail['refs'] if ref in approved]
+        rows.append(['[선택·참고] ' + point,
+                     '편성 방향 (교차 검증 아님)',
+                     ', '.join(safe_refs) if safe_refs else '연결 확인 필요',
+                     detail['review']])
+    if any(str(r[0]).startswith('[선택·참고]') for r in rows):
+        # 선택되었다는 사실과 출처 간 교차 검증을 구분한다.
+        appendix_notice = True
+    else:
+        appendix_notice = False
+    if not rows:
+        return []
+    return [Paragraph('5.2 H&M × 무신사 참고 소구점 교차 근거 (미선택 항목 포함)' if reference_only else '5.2 H&M × 무신사 소구점 교차 근거', 'subheading'),
+            Table(['소구점', '과거 사례 일치 범위' if reference_only else 'H&M 적용 범위', 'H&M 과거 참고 ID' if reference_only else '확인된 H&M 상품 ID', '무신사 리뷰 언급'], rows),
+            *([Paragraph('선택·참고 행은 캠페인 편성 방향이며 H&M·무신사 간 상품별 교차 검증을 뜻하지 않습니다.', 'notice')] if appendix_notice else []),
+            Paragraph('무신사 리뷰는 경쟁 상품의 관심 표현이며 H&M 상품의 만족도·성능 또는 동일 상품을 입증하지 않습니다.', 'notice')]
+
+
+def _approved_copy_blocks(page: dict) -> list:
+    """최종 승인된 카피의 제목·본문을 하나의 완성형 카피로 표시한다."""
+    headline = str(page.get('headline') or '').strip()
+    subcopies = [str(x).strip() for x in (page.get('subcopies') or [])
+                 if isinstance(x, str) and x.strip()]
+    blocks = [Paragraph('5.3 승인된 완성형 캠페인 카피', 'subheading'),
+              Paragraph(headline or '미확정', 'subheading'),
+              *[Paragraph(text) for text in subcopies]]
+    keywords = page.get('keywords') or []
+    valid = [k.strip() for k in keywords if isinstance(k, str) and k.strip()] if isinstance(keywords,list) else []
+    if valid:
+        blocks.append(Paragraph('배너·상세페이지 키워드: ' + ' · '.join(valid[:5])))
+    memo = page.get('review_memo') or []
+    if isinstance(memo, list) and memo:
+        blocks.append(Paragraph('5.4 마케터 검토 메모 — 고객 광고 비노출', 'subheading'))
+        blocks.extend(Paragraph(str(x), 'notice') for x in memo if isinstance(x,str) and x.strip())
+    return blocks
+
+
+def _approved_page_preview_blocks(run: dict, page: dict) -> list:
+    """R36: 동일 Run의 최종 승인 시안만 보고서에 포함한다."""
+    preview = run.get('page_preview')
+    if not preview:
+        return []  # R35 이전 Run의 보고서 동작 유지
+    heading = Paragraph('5.5 기획전 페이지 구성 시안', 'subheading')
+
+    def unavailable(reason):
+        return [heading, Paragraph('페이지 시안 미첨부: ' + reason, 'notice')]
+
+    if not isinstance(preview, dict) or preview.get('status') != 'approved':
+        return unavailable('최종 승인된 시안이 없습니다.')
+    current = preview.get('current') or {}
+    choice = preview.get('selected_copy') or {}
+    try:
+        if not isinstance(current, dict) or not isinstance(choice, dict):
+            raise ValueError('시안 상태 형식 불일치')
+        revision = preview.get('revision')
+        number = page.get('number')
+        if (type(revision) is not int or revision < 1 or current.get('revision') != revision
+                or type(number) is not int or number not in (1, 2, 3)
+                or choice.get('number') != number or preview.get('selected_copy_number') != number
+                or current.get('selected_copy_number') != number
+                or not page.get('headline') or choice.get('headline') != page.get('headline')
+                or current.get('selected_headline') != page.get('headline')
+                or choice.get('subcopies') != page.get('subcopies')):
+            raise ValueError('확정 카피 또는 승인 시안 버전 불일치')
+        spec = current.get('spec')
+        if not isinstance(spec, dict) or spec.get('revision') != revision:
+            raise ValueError('승인 시안 사양 불일치')
+        from agent_system.orchestrator.tools import campaign_page
+        run_id = run.get('run_id')
+        if not run_id or not current.get('image_path'):
+            raise ValueError('승인 시안 경로 없음')
+        safe = re.sub(r'[^a-zA-Z0-9_-]', '_', str(run_id))
+        root = campaign_page.PREVIEW_DIR.resolve()
+        expected = root / safe / f'page_preview_r{revision}.png'
+        path = Path(current['image_path']).resolve()
+        if path != expected or not path.is_relative_to(root):
+            raise ValueError('동일 Run의 승인 이미지 경로 불일치')
+        if not path.is_file():
+            # 사라진 파일만 승인 당시 사양으로 복구한다. 새 디자인은 생성하지 않는다.
+            campaign_page.render_preview_image(spec, path)
+        from PIL import Image as PILImage
+        with PILImage.open(path) as image:
+            if image.format != 'PNG':
+                raise ValueError('PNG 형식 불일치')
+            image.verify()
+    except (OSError, ValueError, TypeError, RuntimeError, KeyError, ImportError) as exc:
+        return unavailable(f'승인 시안 확인 또는 복구 실패 ({type(exc).__name__}).')
+    caption = f'최종 승인 페이지 틀 · {revision}차 시안 · 대표 카피 {number}안'
+    return [heading, Image(str(path), caption, max_height_mm=220),
+            Paragraph('레이아웃 검토용 목업이며 실제 판매 상품 이미지·가격·혜택 또는 게시 완료 화면이 아닙니다.', 'muted')]
+
+
+def _deduplicate_purchase_summary(extra, total_note):
+    """Word의 집계 합계와 동일한 초안 문장을 레거시/참고 사례 모두에서 제외한다."""
+    if '합계:' not in total_note:
+        return list(extra)
+    labels = ('H&M 확정 상품', '확정 상품', '과거 참고 사례', 'H&M 과거 구매 사례')
+    return [line for line in extra
+            if not ('구매 기록 합계' in line and any(label in line for label in labels))]
+
+
 def build_campaign_report(campaign: dict | None, run: dict | None, entries: list[dict],
                           now: datetime | None = None, backend_connected: bool = False) -> ReportDocument:
-    """확정값 + 워크플로 진행 + 단계별 결과. 진행하지 않은 단계는 '미진행'으로 그대로 표시합니다."""
-    from agent_system.orchestrator.tools.conversation_state import CAMPAIGN_KEYS
-    from agent_system.workflows.registry import get_workflow
+    """마케터 검토용 제안서. 승인된 Run 스냅샷과 수정된 초안을 우선 사용한다.
 
-    values = (campaign or {}).get("values") or {}
+    내부 JSON/단계별 실행 기록은 Word 본문에 노출하지 않는다. 고객군과 발송 수치는
+    모델이 연결되기 전까지 실제 결과로 채우지 않는다.
+    """
+    from agent_system.orchestrator.tools import provisional_report
+
+    values = (campaign or {}).get('values') or {}
     run = run or {}
-    sections = []
-    notice = ("이 보고서는 대화에 기록된 확정값과 워크플로 단계 결과로 만든 초안입니다. "
-              "백엔드 보고서 기능(⑥ 결과 정리 Agent · /reports/campaign) 연결 전이라 content_hash·모델 버전·승인 기록은 포함되지 않습니다.")
-    sections.append(Section("작성 기준", [Paragraph(notice, "notice")]))
-    sections.append(Section("1. 기획전 확정값", [Table(["항목", "값"], [[label, values.get(key, "미정")]
-                                                                  for key, label in CAMPAIGN_KEYS.items()])]))
-    product_grid = _confirmed_product_images(values.get("products"))
-    if product_grid is not None:
-        sections[-1].blocks.append(product_grid)
+    from agent_system.orchestrator.tools.category_planning.analysis_scope_r427 import report_label, EXTERNAL_NOTE
+    age_label = report_label(run)
+    # 동일 Run의 검증된 승인 카피가 존재하면 보고서 생성 직전 재검사한다.
+    # legacy Run의 미검증 상태를 PASS로 표현하지는 않는다.
+    from agent_system.validation.campaign_evidence_gate import require_approved_copy_for_report
+    require_approved_copy_for_report(run, campaign or {})
+    page = _json_field(values.get('page'))
+    selling = _json_field(values.get('selling_points'))
+    confirmed_ids = list(dict.fromkeys(_ARTICLE_ID.findall(str(values.get('products') or ''))))
+    rows_by_id = {str(row.get('article_id')): row for row in run.get('verified_candidate_rows') or []
+                  if isinstance(row, dict)}
+    colors = values.get('colors') or []
+    if isinstance(colors, str):
+        colors = [x.strip() for x in colors.split(',') if x.strip()]
+    title = str(page.get('headline') or '').strip() or '미확정'
+    points = selling.get('points') or []
+    theme = selling.get('theme') or values.get('theme') or values.get('subtype') or '미확정'
+    from agent_system.orchestrator.tools.category_planning.period_context import (
+        period_note, purchase_label, run_schedule, validate_report_context, saved_comparison_note,
+    )
+    validate_report_context(run, campaign)
+    plan = run.get('period_plan')
+    from agent_system.orchestrator.tools.campaign_scope_r43 import labels
+    merchandise, channel_label = labels(plan)
+    basis = purchase_label(plan)
+    schedule = run_schedule(run, _missing(values.get('schedule')))
+    from agent_system.orchestrator.tools.campaign_season import from_campaign
+    season_context = (run.get('campaign_summary') or {}).get('season_context') or from_campaign(run,campaign)
+    from agent_system.orchestrator.tools.merchandising_direction import is_reference, build_direction
+    reference_only = is_reference(run) or is_reference(run.get('campaign_summary'))
+    direction = (selling.get('merchandising_direction') or
+                 build_direction(run.get('campaign_summary') or {}, selling,
+                     subtype=str(values.get('subtype') or ''), colors=colors)) if reference_only else None
 
-    workflow = get_workflow(run.get("workflow", ""))
-    run_entries = [e for e in entries or [] if (e.get("workflow") or {}).get("run_id") == run.get("run_id")]
-    if workflow:
-        history = {}
-        for item in run.get("history") or []:
-            history[(item["no"], item["title"])] = item
-        rows, pending = [], []
-        steps = workflow.steps()
-        for index, (stage, step) in enumerate(steps):
-            item = history.get((step.no, step.title))
-            if item:
-                status = STATUS_LABELS.get(item["status"], item["status"])
-            elif index == int(run.get("step_index", 0)) and run.get("status") == "waiting_input":
-                status = "마케터 선택 대기"
-            elif index == int(run.get("step_index", 0)) and run.get("status") == "blocked":
-                status = f"멈춤: {run.get('blocked_reason', '')}"
-            else:
-                status = "미진행"
-            if status in ("미진행",) or status.startswith("멈춤") or status == "마케터 선택 대기":
-                pending.append(f"{step.no}단계 {step.title} ({stage.title})")
-            rows.append([step.no, stage.title, step.title, step.owner, status])
-        sections.append(Section("2. 워크플로 진행", [
-            Paragraph(f"{workflow.title} · run {run.get('run_id', '')} · 상태 {run.get('status', '')}", "muted"),
-            Table(["단계", "구분", "하는 일", "담당", "상태"], rows)]))
-        detail = Section("3. 단계별 결과", [])
-        if run_entries:
-            sections.append(detail)
-            for i, entry in enumerate(run_entries, start=1):
-                info = entry.get("workflow") or {}
-                sections.append(entry_section(entry, i, f"{info.get('step_no', '')}단계 {info.get('step_title', '')}"))
-                sections[-1].level = 2
-        else:
-            detail.blocks.append(Paragraph("기록된 단계 결과가 없습니다.", "muted"))
-            sections.append(detail)
-        sections.append(Section("4. 남은 단계", [Bullets(pending) if pending else Paragraph("모든 단계를 마쳤습니다.")]))
-    else:
-        sections.append(Section("2. 워크플로 진행", [Paragraph(
-            "진행한 기획전 워크플로가 없습니다. '기획전 준비 시작하자'로 워크플로를 진행하면 단계별 결과가 들어갑니다.", "muted")]))
+    # report_draft는 사용자가 Slack에서 보완한 최신 버전이다. 이를 그대로 재사용한다.
+    saved = (run.get('report_draft') or {}).get('text')
+    if not saved:
+        try:
+            saved = provisional_report.build_draft(run, campaign)
+        except ValueError:
+            saved = ''
+    draft = _draft_parts(saved)
 
+    products = []
+    purchases = []
+    for aid in confirmed_ids:
+        row = rows_by_id.get(aid, {})
+        count = row.get('winter_online_purchases')
+        valid = isinstance(count, (int, float)) and not isinstance(count, bool) and float(count).is_integer() and count >= 0
+        if valid:
+            purchases.append(int(count))
+        products.append([str(row.get('prod_name') or '상품명 확인 필요'), aid,
+                         str(row.get('colour_group_name') or '확인 필요'),
+                         f'{int(count):,}건' if valid else '미확인'])
+    total_note = (f'{"과거 참고 사례" if reference_only else "확정 상품"} {len(confirmed_ids)}개의 {basis} 기록 합계: {sum(purchases):,}건'
+                  if confirmed_ids and len(purchases) == len(confirmed_ids) else
+                  '과거 참고 사례의 구매 건수 중 미확인 값이 있어 합계는 표시하지 않습니다.' if reference_only else '확정 상품 구매 건수 중 미확인 값이 있어 합계는 표시하지 않습니다.')
+
+    # Slack 초안과 동일한 저장 근거를 사용하되 출처별 절은 Word에서 한 번씩만 표현한다.
+    from agent_system.orchestrator.tools.provisional_report import _verified_naver_note, _selected_point_reasons
+    naver_notes = _saved_evidence_lines(draft, '2.1', [_verified_naver_note(run, campaign)])
+    musinsa_notes = _saved_evidence_lines(draft, '2.2', _report_market_evidence(run, draft))
+    revision_notes = _saved_evidence_lines(draft, '2.4', [])
+    # 가격·리뷰 상세 통계는 아래 구조화 표를 정본으로 삼아 중복 나열하지 않는다.
+    market_blocks = _market_detail_blocks(run)
+    # 상세 표가 없는 경우에만 Slack 검증 문구를 대신 사용한다.
+    has_review_table = any(isinstance(block, Table) and '리뷰 관심사' in block.columns
+                           for block in market_blocks)
+    musinsa_detail_fallback = ([] if has_review_table else
+                               provisional_report._verified_musinsa_note(run))
+    point_reasons = _selected_point_reasons([str(x) for x in points], run)
+    reasoning = ('종합 판단: 네이버는 상대 검색 관심도, H&M은 과거 구매·상품 디자인 사례, '
+                 '무신사는 경쟁 상품·리뷰 관심 표현을 나타냅니다. 서로 다른 시점과 표본이므로 '
+                 '현재 재고·실제 판매량·성능·기획전 수요를 입증하지 않습니다.')
+
+    sections = [
+        Section('1. 제안 요약', [
+            Paragraph(f'기획전: {theme} / 세부 유형: {_missing(values.get("subtype"))}'),
+            Paragraph(f'대표 문구: {title}'),
+            Paragraph('과거 H&M 상품은 디자인 참고 사례이며, 유형·색상·디자인 특징을 향후 기획전 편성 조건으로 제안합니다. 현재 판매 상품·타깃 선정·발송은 미확정입니다.' if reference_only else '확정된 상품·색상·콘텐츠를 바탕으로 한 기획안이며 타깃 선정·발송은 미완료입니다.', 'notice')]),
+        Section('2. 기획전 기본안', [Table(['항목', '제안 내용'], [
+            ['기획전 형태', f'{channel_label} 채널 대상 기획전 (기획 목표)'],
+            ['대분류 / 세부 유형', f'{_missing(values.get("category"))} / {_missing(values.get("subtype"))}'],
+            ['기획전 주제', theme],
+            ['운영 기간', schedule],
+            ['콘텐츠 계절', season_context['season']],
+            ['상품 분석 범위', merchandise],
+            ['색상', ', '.join(colors) if colors else '미확정'],
+            ['상품 수', (f'{len(confirmed_ids)}개 (과거 판매 참고 사례; 실제 편성 상품 미확정)' if reference_only else f'{len(confirmed_ids)}개 (확정 상품 ID 기준)')],
+            ['대표 문구', title],
+            ['실제 발송 규모', '추후 작성 (타깃 모델 미연결)']])]),
+        Section('3. 상품 선정 및 시장 분석 근거', [
+            Paragraph('3.1 H&M 과거 구매 근거', 'subheading'),
+            Paragraph(f'H&M 과거 {age_label} 고객·{merchandise}·' + ('검증된 핵심 월' if plan else '겨울(12~2월)') + f'·{channel_label} 구매 기록을 참고했습니다. 고객 성별과 현재 수요·재고는 확인되지 않았습니다.'),
+            *([Paragraph(line) for line in period_note(plan).splitlines() if not line.startswith("운영 일정:")] if plan else []),
+            *([Paragraph(saved_comparison_note(run))] if saved_comparison_note(run) else []),
+            Paragraph(total_note + ' (현재 판매량 아님)'),
+            Paragraph(EXTERNAL_NOTE),
+            Paragraph("3.2 네이버 검색 관심도 분석", "subheading"),
+            *_draft_blocks(naver_notes),
+            Paragraph("3.3 무신사 경쟁 시장 근거", "subheading"),
+            *(_draft_blocks(musinsa_notes) or [Paragraph("무신사 경쟁 시장 근거 미확인", "notice")]),
+            *market_blocks,
+            *([] if has_review_table else [Paragraph('3.5 무신사 리뷰 관심사 분석', 'subheading')] + _draft_blocks(musinsa_detail_fallback)),
+            Paragraph('3.6 종합 추천 판단', 'subheading'),
+            Paragraph(reasoning),
+            *([Paragraph('3.7 Slack 보고서 수정 요청 처리', 'subheading'), *_draft_blocks(revision_notes)] if revision_notes else []),
+            *_draft_blocks([x for x in draft.get('2', []) if x.startswith('선정 근거:')])]),
+        Section('4. 과거 H&M 판매 참고 사례 (실제 판매 상품 미확정)' if reference_only else '4. 주력 상품 구성', [
+            Table(['과거 상품명' if reference_only else '상품명', '참고 상품 ID' if reference_only else '상품 ID', '색상', basis], products)
+            if products else Paragraph('참고 상품 사례가 없습니다.' if reference_only else '확정된 상품 ID가 없습니다.', 'notice')]),
+        Section('5. 상품 구성 전략 및 콘텐츠' if reference_only else '5. 콘텐츠 및 소구점', [
+            *([Paragraph('5.1 향후 상품 편성 조건', 'subheading'), Paragraph(f"상품 유형: {direction.get('subtype') or '미확정'} / 검토 색상: {', '.join(direction.get('colors') or []) or '미확정'}"), Paragraph('검토 디자인 특징: ' + (' / '.join(x['feature'] for x in direction.get('design_features') or []) or '미선정')), Paragraph('판매 상품 ID·재고·실제 적용 디자인 특징: 미확정 (과거 H&M 상품 ID를 판매 상품으로 사용하지 않음)', 'notice')] if reference_only else []),
+            Paragraph(('편성 방향으로 선택한 소구점: ' if reference_only else '확정 소구점: ') + (', '.join(str(p) for p in points) if points else '미확정')),
+            *[Paragraph(note) for note in point_reasons],
+            *_cross_evidence_blocks(run, confirmed_ids, reference_only=reference_only, selected_points=points),
+            *_approved_copy_blocks(page),
+            *_approved_page_preview_blocks(run, page),
+            Paragraph(f'{"·".join(colors)} 과거 상품 사례를 비교하고, 향후 실제 편성 상품에는 확인된 디자인만 반영합니다.' if reference_only else f'{"·".join(colors)} 상품을 비교하고, 확인된 상품별 디자인 차이를 안내합니다.'
+                      if colors else '상품별로 실제 확인된 색상·디자인 차이만 안내합니다.'),
+            Paragraph('과거 상품의 소구점·디자인은 향후 편성 조건의 참고 근거일 뿐 실제 판매 상품의 성능을 입증하지 않습니다. 미확인 소재·보온성·핏·재고·가격·할인·혜택은 확정 표현으로 사용하지 않습니다.' if reference_only else '미확인 보온성·핏·착용감·가격·할인·혜택은 확정적 광고 문구로 사용하지 않습니다.', 'notice')]),
+        Section('6. 고객 타깃 선정 및 메시지 운영 — 추후 작성', [
+            Paragraph('실제 고객 점수·세그먼트 인원·발송 명단은 생성하지 않았습니다. 아래 항목은 팀원 모델 연결 후 채울 공간입니다.', 'notice')]),
+    ]
+    pictures = _confirmed_product_images(values.get('products'), reference_only=reference_only)
+    if pictures is not None:
+        sections[3].blocks.append(pictures)
+
+    target = sections[5].blocks
+    target.extend([
+        Paragraph('6.1 핵심 타깃 정의 및 선정 조건'),
+        Table(['항목', '확인 결과'], [
+            ['기획상 목표', f'{age_label} 고객 / {channel_label} (고객 성별 확인값 아님)'],
+            ['적용 필터·데이터 기준일', '________________ [추후 입력]'],
+            ['회원 상태·마케팅 수신 동의', '________________ [추후 입력]']]),
+        Paragraph('6.2 고객 점수 및 세그먼트별 선정 결과'),
+        Paragraph('모델명·버전·점수 산정 기준: ____________________ [추후 입력]'),
+        Table(['세그먼트', '인원', '선정/제외 기준'], [
+            ['핵심 타깃', '____명', '________________'],
+            ['재활성화 후보', '____명', '________________'],
+            ['교차 판매 후보', '____명', '________________'],
+            ['제외 고객', '____명', '________________']]),
+        Paragraph('6.3 발송 규모 및 연령대 구성'),
+        Paragraph('최종 발송 가능 인원: ____명 / 연령 구성: ____'),
+        Paragraph('발송 채널·연락처 확인: ____________________ [추후 입력]'),
+        Paragraph('6.4 대조군 및 실험 설계'),
+        Paragraph('대조군 인원·비율: ____________________ / 색상 노출·메시지 실험: ____________________'),
+        Paragraph('6.5 고객군별 메시지 초안'),
+        Table(['고객군', '메시지 초안'], [['핵심 타깃', '________________________'],
+                                  ['재활성화', '________________________'],
+                                  ['교차 판매', '________________________']]),
+        Paragraph('6.6 발송 전 검증 및 승인'),
+        Paragraph('수신 동의·중복 제거·수신 거부 확인: ____________________'),
+        Paragraph('담당자 검토 및 최종 승인: ____________________'),
+    ])
+    sections.extend([
+        Section('7. 운영 및 성과 측정 계획', [
+            Paragraph('실제 발송 전 최신 회원·재고·가격·URL·발송 채널·마케팅 수신 동의를 검증해야 합니다.'),
+            Paragraph('성과 지표(계획): 발송 성공률, 클릭률, 상세 조회, 장바구니, 구매 전환율, 수신 거부율. 현재 목표 및 실측 수치는 없습니다.')]),
+        Section('8. 데이터 한계 및 검증 필요 항목', [
+            Bullets(['H&M 거래 기록은 과거 자료이며 2026년 현재 판매량·재고가 아닙니다.',
+                     '무신사 수집 랭킹과 리뷰 언급 빈도는 판매량·선호도·H&M 제품 성능의 근거가 아닙니다.',
+                     '네이버 상대 관심도는 절대 판매량이나 캠페인 기간 수요를 보장하지 않습니다.',
+                     '실제 재고·가격·할인·상품 URL·회원 연락처·마케팅 수신 동의·기간을 확인해야 합니다.'])]),
+        Section('9. 팀장 검토 요청 사항', [
+            Paragraph(f'우선 검토: 기획전 유형·색상·디자인 편성 조건, 과거 참고 사례 {len(confirmed_ids)}개, 대표 문구 및 소구점.' if reference_only else f'우선 검토: 기획전 주제, 확정 상품 {len(confirmed_ids)}개, 선정 색상, 최종 대표 문구와 소구점.'),
+            Paragraph('후속 보완: 실제 판매 상품 SKU·소재·디자인 근거·재고·가격·혜택·URL·고객 타깃 선정·발송 가능 명단·운영 기간.' if reference_only else '후속 보완: 고객 타깃 선정 결과·발송 가능 명단·운영 기간·가격·재고·혜택·URL.'),
+            Paragraph('이 문서는 기획안 검토용 초안이며 실제 발송 승인·메일 발송·페이지 공개가 이뤄졌다는 뜻이 아닙니다.', 'notice')]),
+    ])
+    # R39: 모델을 실제로 실행하고 사용자가 확정한 집계만 보고서에 반영한다.
+    from agent_system.orchestrator.tools.campaign_target_r39 import confirmed_for_report, selection_basis
+    selected = confirmed_for_report(run, campaign or {})
+    if selected:
+        groups = selected['groups']
+        from agent_system.orchestrator.tools.audience_scope_r426 import audience_text, population_text
+        from agent_system.orchestrator.tools.campaign_copy_r41 import approved as approved_copy41
+        package41 = approved_copy41(run, campaign or {}) if selected.get('policy') == 'r40_v1' else None
+        if selected.get('policy') == 'r40_v1' and run.get('segment_copy_r41') and not package41:
+            raise ValueError('고객군별 문구를 먼저 승인해 주세요.')
+        messages41 = ([block for row in package41['rows'].values() for block in (Paragraph(row['name'], 'subheading'), Paragraph('메시지 방향: ' + row['strategy']), Paragraph('제목: ' + row['headline']), Paragraph('본문: ' + row['body']), Paragraph('CTA: ' + row['cta']))] if package41 else [block for g in groups for block in (Paragraph(g['name'], 'subheading'), Paragraph('메시지 방향: ' + g['strategy']), Paragraph('문구 제안: ' + g['message']))])
+        sections[0].blocks[2] = Paragraph(
+            '과거 상품을 디자인 참고 사례로 활용하고, 확정 카피·페이지 구성 및 고객 타깃 선정 결과를 제안합니다. 실제 판매 상품과 가격은 추후 확정합니다.'
+            if reference_only else '확정된 상품·색상·콘텐츠와 고객 타깃 선정 결과를 바탕으로 한 기획안입니다.', 'notice')
+        sections[1].blocks[0].rows[-1] = ['선정 고객 규모', f"{selected['total']:,}명 (중복 제거)"]
+        sections[5] = Section('6. 고객 타깃 선정 및 메시지 운영', [
+            Paragraph('6.1 고객 분석 및 선정 기준', 'subheading'),
+            Paragraph('분석 기준: H&M 과거 구매 데이터 기반 시뮬레이션 (2020.09.23 기준)'),
+            *([Paragraph(audience_text(selected)), Paragraph(population_text(selected)), Paragraph(f'시장·상품 분석의 저장 연령 범위: {age_label}. 저장된 연령은 구매 당시 또는 현재 연령이 아닙니다. 연령 제한 모집단의 정책 Lift는 미검증입니다.')] if selected.get('audience') else []),
+            Paragraph('직전 90일 구매 고객 중 연령 조건을 충족한 모집단의 조합별 30일 예측 순위와 180일 취향을 사용합니다. 구매 이력은 전체 채널 기준이며 모델은 상품 유형×색상 점수로 상품 성별별·채널별 구매 예측이 아닙니다. 동점은 평균 백분위로 처리하며 구매 순위·취향 각각 조합별 최대값을 사용합니다. 과거 자료의 순위 기반 후보이며 실제 발송 가능 인원은 아닙니다.' if selected.get('policy') == 'r40_v1' else '직전 90일 구매 고객 전체(연령 필터 미적용)의 품목·색상별 30일 구매 예측 순위입니다. 색상별 상위 고객을 선정하고 중복 고객을 별도 그룹으로 분리했습니다.'),
+            Table(['모델 분석 품목', '색상', '점수 산출 고객'], [[c['product_type'], c['colour'], f"{c['total']:,}명"] for c in selected['combos']]),
+            Paragraph(f"선정 기준: {selection_basis(selected)} / 전체 중복 제거 {selected['total']:,}명"),
+            *([Paragraph(f"전체 점수화 고객: {selected['population']:,}명 / 취향 경계값: {selected['taste_cutoff']:.6f}" if selected['taste_cutoff'] is not None else f"전체 점수화 고객: {selected['population']:,}명 / 양수 취향 없음"),
+               Table(['전체 고객군', '고객 수', '전체 대비 비율'], [[g['name'], f"{g['count']:,}명", f"{g['share_percent']:.2f}%"] for g in selected['all_groups']]),
+               Paragraph('제외·취향 미확인은 집계만 제공하고 후보 CSV에는 포함하지 않습니다. 재활성화는 취향 높음·구매 순위 낮음의 분류명이며 휴면 여부는 확인하지 않았습니다. Jacket 두 색상·전체 연령 모집단 백테스트에서 선정한 기본 정책이며 연령 제한 모집단과 다른 조합의 최적성은 미검증입니다.')] if selected.get('policy') == 'r40_v1' else []),
+            Paragraph('6.2 고객군별 선정 결과', 'subheading'),
+            Table(['고객군', '고객 수', '전체 대비 비율' if selected.get('policy') == 'r40_v1' else '비율'], [[g['name'], f"{g['count']:,}명", f"{g['share_percent']:.2f}%"] for g in groups]),
+            Paragraph('6.3 고객군별 메시지 및 운영 방향', 'subheading'),
+            *messages41,
+            Paragraph('6.4 고객 타깃 CSV 목록', 'subheading'),
+            Table(['고객군', '파일명', '고객 수'], [[g['name'], g['csv'], f"{g['count']:,}명"] for g in groups]),
+            Paragraph('전체 목록: target_all.csv / 그룹별 집계: target_summary.csv / 점수 열 안내: target_combos.csv'),
+        ])
+        if selected.get('policy') == 'r40_v1':
+            from agent_system.orchestrator.tools.target_presentation_r422 import optional_chart, evidence_lines
+            blocks = sections[5].blocks
+            i = next(j for j, b in enumerate(blocks) if isinstance(b, Paragraph) and b.text == '6.2 고객군별 선정 결과')
+            path = optional_chart(selected, run)
+            extra = [Paragraph('타깃 4분면 및 정책 선정 근거', 'subheading')]
+            if path:
+                extra.append(Image(path, '구매 예측 백분위 × 고객 취향 · 전체 고객 기준', max_height_mm=150))
+            extra.extend(Paragraph(line) for line in evidence_lines(selected))
+            blocks[i:i] = extra
+        sections[6] = Section('7. 운영 제안', [Paragraph('고객군별 메시지와 기획전 페이지 틀을 활용하여 실제 운영 조건을 검토합니다. 실제 편성 상품·가격·혜택은 담당자가 확정합니다.')])
+        sections[7] = Section('8. 추가 확인 사항', [Bullets(['실제 판매 상품·재고·가격·혜택·페이지 URL 확인', '현재 고객 연락처와 마케팅 수신 동의는 이번 분석 범위에 포함하지 않음'])])
+        sections[8] = Section('9. 사내 검토 요청 사항', [Paragraph('기획전 구성, 선정 고객 규모, 고객군별 메시지 전략 및 승인된 페이지 시안을 검토해 주세요.')])
     return ReportDocument(
-        kind="campaign",
-        title="기획전 실행 계획 보고서" + ("" if backend_connected else " (초안)"),
-        subtitle=values.get("theme") or values.get("category") or "",
-        meta=[("작성 시각", _now_text(now)), ("기획전 일정", values.get("schedule", "미정")),
-              ("주력 상품", values.get("products", "미정")), ("타깃", values.get("target", "미정"))],
+        kind='campaign', title='기획전 타깃 및 운영 제안서 (초안)', subtitle=str(theme),
+        meta=[('작성 시각', _now_text(now)), ('운영 기간', schedule),
+              ('주력 유형', _missing(values.get('subtype'))), ('타깃 분석', f"{selected['total']:,}명 선정" if selected else '모델 연결 전 — 추후 작성')],
         sections=sections,
-        footer=FOOTER,
+        footer='CART_SIGNAL · 마케터 확정값 기반 운영 제안서' if selected else 'CART_SIGNAL · 확인된 과거 데이터와 마케터 확정값 기준 · 타깃/발송 미실행 초안',
     )

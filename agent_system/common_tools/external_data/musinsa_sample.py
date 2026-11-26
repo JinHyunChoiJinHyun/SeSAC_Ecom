@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from common.external_data_store import fetch, LABELS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LABEL = "무신사 (랭킹·리뷰)"
 KINDS = ("ranking", "add_info", "review")
@@ -84,6 +86,10 @@ def _read(path: Path | None, **kw) -> pd.DataFrame:
 
 
 def load() -> dict:
+    # R8_DUCKDB_LOAD
+    from common.external_data_store import enabled as _r8_enabled
+    if _r8_enabled():
+        return musinsa_snapshot()
     """{"products", "reviews", "collected_at", "categories"} — 파일이 바뀌면 다시 읽습니다."""
     global _cache
     folder = data_dir()
@@ -116,9 +122,9 @@ def load() -> dict:
         for column in ("item_id", "satisfaction", "review"):
             if column not in reviews:
                 reviews[column] = None
-        # 같은 상품이 여러 카테고리에 있으면 한 번만 (리뷰 중복 집계 방지)
-        products = products.drop_duplicates("item_id", keep="first").reset_index(drop=True)
-        dedupe = ["review_id"] if "review_id" in reviews and reviews["review_id"].notna().all() else ["item_id", "review"]
+        # 카테고리별 상품·리뷰 복합 키를 사용해 다른 상품의 동일 review_id를 보존합니다.
+        products = products.drop_duplicates(["category", "item_id"], keep="first").reset_index(drop=True)
+        dedupe = ["category", "item_id", "review_id"] if "review_id" in reviews and reviews["review_id"].notna().all() else ["category", "item_id", "review"]
         reviews = reviews.drop_duplicates(dedupe, keep="first").reset_index(drop=True)
         # 수집일: collected_at 열이 있으면 그 값, 없으면 '미상'(파일 수정일은 참고로만 표시)
         if "collected_at" in products and pd.to_datetime(products["collected_at"], errors="coerce").notna().any():
@@ -131,3 +137,52 @@ def load() -> dict:
                     "categories": [c for c in sets if c]}
         _cache = snapshot
         return snapshot
+
+
+# 로컬 DuckDB 읽기 어댑터 (기존 CSV 반환 계약 유지)
+def _musinsa_tables():
+    ranking = fetch('musinsa_ranking')
+    info = fetch('musinsa_add_info')
+    reviews = fetch('musinsa_review')
+    for kind, frame in (('ranking', ranking), ('info', info), ('reviews', reviews)):
+        needed = {'category', 'item_id'}
+        if not needed.issubset(frame.columns):
+            raise ValueError(f'musinsa_{kind}: 필수 컬럼 누락: {needed - set(frame.columns)}')
+        unknown = set(frame['category'].dropna().unique()) - set(LABELS)
+        if unknown:
+            raise ValueError(f'musinsa_{kind}: 미등록 카테고리: {unknown}')
+        frame['category'] = frame['category'].map(LABELS)
+        frame['item_id'] = frame['item_id'].astype('string')
+    if 'review_id' in reviews:
+        reviews['review_id'] = reviews['review_id'].astype('string')
+    extra = [c for c in ('gender', 'rating', 'review_count') if c in info and c not in ranking]
+    if extra:
+        ranking = ranking.merge(info[['category','item_id', *extra]], on=['category','item_id'],
+                                how='left', validate='one_to_one')
+    return ranking, reviews
+
+
+def musinsa_snapshot() -> dict:
+    products, reviews = _musinsa_tables()
+    # 통합 CSV는 카테고리와 상품을 함께 식별한다. review_id 단독은 전역 고유키가 아니다.
+    products = products.drop_duplicates(['category', 'item_id'], keep='first').reset_index(drop=True)
+    if 'review_id' in reviews and reviews['review_id'].notna().all():
+        reviews = reviews.drop_duplicates(['category', 'item_id', 'review_id'], keep='first').reset_index(drop=True)
+    elif {'category', 'item_id', 'review'}.issubset(reviews):
+        reviews = reviews.drop_duplicates(['category','item_id','review'], keep='first').reset_index(drop=True)
+    for column in ('item_id', 'satisfaction', 'review'):
+        if column not in reviews:
+            reviews[column] = None
+    return {'products': products, 'reviews': reviews,
+            'collected_at': '미상 (원본 CSV 수집일 없음)',
+            'categories': list(LABELS.values())}
+
+
+def category_frames(category: str):
+    """카테고리별 원본 표본을 반환: 서로 다른 카테고리의 동일 ID를 제거하지 않는다."""
+    if category not in LABELS.values():
+        raise ValueError(f'지원하지 않는 무신사 카테고리: {category}')
+    products, reviews = _musinsa_tables()
+    products = products.loc[products['category'].eq(category)].copy()
+    reviews = reviews.loc[reviews['category'].eq(category)].copy()
+    return products, reviews, '미상 (원본 CSV 수집일 없음)'
