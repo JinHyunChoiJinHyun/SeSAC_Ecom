@@ -62,6 +62,18 @@ def _csvs(folder: Path) -> list[Path]:
     return sorted(folder.glob("*.csv")) if folder.is_dir() else []
 
 
+def _youtube_csvs() -> list[Path]:
+    """유튜브 키워드 후보 파일 목록.
+
+    수집기(external_data/youtube_keyword_candidates.py)는 주마다
+    database/youtube/keyword_candidates/keyword_candidates_YYYYMMDD.csv 로 쌓으므로 그중 가장 최근 파일만 읽습니다.
+    database/youtube/ 바로 아래에 둔 예전 파일도 계속 읽습니다.
+    (database/youtube/keyword_views/ 의 키워드별 총조회수는 형식이 달라 여기서 읽지 않습니다.)"""
+    folder = youtube_dir()
+    weekly = _csvs(folder / "keyword_candidates")
+    return _csvs(folder) + weekly[-1:]
+
+
 # ---------------------------------------------------------------- 네이버
 def _naver_frame(path: Path) -> pd.DataFrame:
     raw = pd.read_csv(path)
@@ -128,7 +140,7 @@ def load_youtube() -> dict:
         return youtube_bundle()
     """{"candidates": DataFrame, "videos": DataFrame, "files": [...]}"""
     candidates, videos, files = [], [], []
-    for path in _csvs(youtube_dir()):
+    for path in _youtube_csvs():
         try:
             raw = pd.read_csv(path)
         except Exception as exc:

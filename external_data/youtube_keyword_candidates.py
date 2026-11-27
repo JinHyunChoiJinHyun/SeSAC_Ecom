@@ -20,7 +20,7 @@ YouTube 패션 키워드 후보 수집 - 키워드 사전과 규칙으로 키워
 실행
 ----
 python youtube_keyword_candidates.py --preview        # 저장하지 않고 결과 일부만 출력
-python youtube_keyword_candidates.py                  # data/youtube/keyword_candidates/keyword_candidates_YYYYMMDD.csv 저장
+python youtube_keyword_candidates.py                  # database/youtube/keyword_candidates/keyword_candidates_YYYYMMDD.csv 저장
 
 환경변수
 --------
@@ -43,7 +43,7 @@ from dotenv import load_dotenv
 # 기본 설정
 # =========================================================
 
-PROJECT_DIR = Path(__file__).resolve().parent          # external_data/ (데이터 저장 기준)
+PROJECT_DIR = Path(__file__).resolve().parent          # external_data/ (수집 코드 위치)
 ROOT_DIR = PROJECT_DIR.parent                          # 프로젝트 루트 (env/ 는 다른 팀 코드와 함께 씀)
 # API 키 위치: 프로젝트 루트 .env 를 먼저 읽고, 없는 값만 예전 위치 env/.env 에서 채웁니다(대시보드와 같은 순서).
 ENV_PATHS = [ROOT_DIR / ".env", ROOT_DIR / "env" / ".env"]
@@ -55,7 +55,7 @@ def load_env():
     for path in ENV_PATHS:
         if path.is_file():
             load_dotenv(path)
-SAVE_DIR = PROJECT_DIR / "data" / "youtube"
+SAVE_DIR = ROOT_DIR / "database" / "youtube"   # 프로젝트 루트 database/ (에이전트가 읽는 위치)
 
 API_URL = "https://www.googleapis.com/youtube/v3"
 KST = timezone(timedelta(hours=9))
@@ -847,6 +847,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from _collector_lock import hold  # 예약·수동 실행이 겹치지 않도록 (이미 실행 중이면 종료 코드 75로 건너뜀)
+    hold("youtube_candidates")
     try:
         main()
     except RuntimeError as error:

@@ -100,10 +100,11 @@ def build_category_market(category):
         raise ValueError("동일 카테고리 파일 세트가 여러 개입니다.")
     if sets:
         _, files = sets[0]
-        p = pd.read_csv(files['ranking'], dtype={'item_id': str})
-        r = pd.read_csv(files['review'], dtype={'item_id': str, 'review_id': str}) if 'review' in files else pd.DataFrame(columns=['item_id','satisfaction','review'])
+        # 수집기의 새 컬럼 이름(collected_date·product_gender·reviewer_gender)은 예전 이름으로 맞춰 읽습니다.
+        p = musinsa_sample.normalize_columns(pd.read_csv(files['ranking'], dtype={'item_id': str}))
+        r = musinsa_sample.normalize_columns(pd.read_csv(files['review'], dtype={'item_id': str, 'review_id': str})) if 'review' in files else pd.DataFrame(columns=['item_id','satisfaction','review'])
         if 'add_info' in files:
-            info = pd.read_csv(files['add_info'], dtype={'item_id': str})
+            info = musinsa_sample.normalize_columns(pd.read_csv(files['add_info'], dtype={'item_id': str}))
             if 'item_id' in info:
                 extras = [c for c in ('gender','rating','review_count') if c in info and c not in p]
                 if extras:
@@ -115,6 +116,14 @@ def build_category_market(category):
         if 'collected_at' in p:
             dates = pd.to_datetime(p['collected_at'], errors='coerce').dropna()
             if len(dates): collected = str(dates.max().date())
+    elif '' in musinsa_sample.file_sets():
+        # 수집기가 5개 대분류를 한 파일에 합쳐 저장한 경우(category 열로 구분): 해당 대분류 행만 사용합니다.
+        snap = musinsa_sample.load()
+        p = snap['products'].loc[snap['products']['category'].map(normalize_category).eq(category)].copy()
+        r = snap['reviews'].loc[snap['reviews']['category'].map(normalize_category).eq(category)].copy()
+        p['category'] = category
+        r['category'] = category
+        collected = snap['collected_at']
     else:
         p = pd.DataFrame(columns=['category','item_id','name','ranking'])
         r = pd.DataFrame(columns=['category','item_id','satisfaction','review'])

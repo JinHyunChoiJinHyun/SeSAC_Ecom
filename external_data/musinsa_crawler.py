@@ -2,11 +2,11 @@
 
 RANKING_URLS 에 넣은 링크마다 아래 순서로 실행하고, 모든 링크를 종류별 파일 3개에 합쳐 저장합니다.
 맨 앞 collected_date 열에 수집일(YYYY-MM-DD), 그다음 category 열에 링크 이름(name)이 들어갑니다.
-저장 폴더는 실행한 날짜(한국 시간) 폴더입니다: data/musinsa/YYYYMMDD/
+저장 폴더는 실행한 날짜(한국 시간) 폴더입니다: database/musinsa/YYYYMMDD/
 (주 1회 수집할 때 지난 기록이 덮어써지지 않도록. 날짜는 시작할 때 한 번 정하므로 자정을 넘겨도 같은 폴더)
-  1) crawl_ranking(url, name) -> data/musinsa/YYYYMMDD/ranking.csv       (순위·브랜드·상품명·가격)
-  2) crawl_reviews(name)      -> data/musinsa/YYYYMMDD/review.csv        (작성자 체형·사이즈·만족도·본문)
-                              + data/musinsa/YYYYMMDD/product_info.csv  (제품 성별·별점·리뷰 수·이미지)
+  1) crawl_ranking(url, name) -> database/musinsa/YYYYMMDD/ranking.csv       (순위·브랜드·상품명·가격)
+  2) crawl_reviews(name)      -> database/musinsa/YYYYMMDD/review.csv        (작성자 체형·사이즈·만족도·본문)
+                              + database/musinsa/YYYYMMDD/product_info.csv  (제품 성별·별점·리뷰 수·이미지)
      product_info 는 리뷰 페이지 안의 상품 정보에서 함께 읽습니다(상품 상세페이지는 봇 차단으로 막힘).
 2번은 같은 날짜 폴더의 ranking.csv 에서 category 가 같은 행의 item_id 를 사용합니다.
 저장할 때는 그 링크(category)의 기존 행만 지우고 새로 모은 행으로 바꾸므로,
@@ -45,7 +45,7 @@ KST = timezone(timedelta(hours=9))
 _STARTED = datetime.now(KST)
 RUN_DATE = _STARTED.strftime("%Y%m%d")              # 실행 날짜 = 저장 폴더 이름
 COLLECTED_DATE = _STARTED.strftime("%Y-%m-%d")      # 세 파일 맨 앞 collected_date 열 값 (폴더 이름과 같은 날)
-OUT_DIR = Path(__file__).resolve().parent / "data" / "musinsa" / RUN_DATE
+OUT_DIR = Path(__file__).resolve().parent.parent / "database" / "musinsa" / RUN_DATE   # 프로젝트 루트 database/ (에이전트가 읽는 위치)
 PAGE_LOAD_TIMEOUT = 110  # 페이지 하나를 여는 데 기다리는 최대 시간(초). Selenium 응답 한계(120초)보다 짧아야 함
 
 # 크롤링할 링크 목록: {이름: 링크}. 이름이 합친 CSV의 category 열 값이 됩니다.
@@ -460,6 +460,8 @@ def crawl_reviews(name, limit=None, max_reviews_per_item=200, scroll_pause=1.0, 
 
 
 if __name__ == "__main__":
+    from _collector_lock import hold  # 예약·수동 실행이 겹치지 않도록 (이미 실행 중이면 종료 코드 75로 건너뜀)
+    hold("musinsa")
     for name in RANKING_URLS:
         out_path("ranking", name)   # 이름이 잘못됐으면 크롤링 시작 전에 멈춤
     failed = []
@@ -479,4 +481,9 @@ if __name__ == "__main__":
 
     total = len(RANKING_URLS)
     print(f"\n[완료] {total}개 중 {total - len(failed)}개 성공" + (f" / 실패: {', '.join(failed)}" if failed else ""))
+    if not failed:
+        # 모든 카테고리를 끝까지 수집한 폴더만 완료로 표시합니다(대시보드는 완료된 수집 중 최신을 보여 줌).
+        (OUT_DIR / "_complete.json").write_text(
+            json.dumps({"finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "categories": list(RANKING_URLS)}, ensure_ascii=False), encoding="utf-8")
     raise SystemExit(1 if failed else 0)   # 작업 스케줄러·로그에서 실패를 알 수 있도록

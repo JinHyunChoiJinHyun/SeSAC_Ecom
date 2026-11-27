@@ -1,6 +1,6 @@
 """대시보드 '외부 데이터' 화면: 수집기 실행 상태, 데이터 최신 현황, 미리보기, 수집기별 수동 실행.
 
-- 수집 코드는 프로젝트의 external_data/ 에 있고, 결과는 external_data/data/ 에 CSV로 쌓입니다.
+- 수집 코드는 프로젝트의 external_data/ 에 있고, 결과는 프로젝트 루트 database/<출처>/ 에 CSV로 쌓입니다(에이전트도 같은 곳을 읽음).
 - 예약 실행(Windows 작업 스케줄러)의 기록은 logs/external_data/daily_*.log, weekly_*.log 에서 읽습니다.
 - 수동 실행은 수집기마다 따로 하나씩만 돌고, 로그는 logs/external_data/manual_<수집기>_<시각>.log 에 남습니다.
 - 데이터 파일은 읽기만 합니다. 수집기를 실행할 때만 파일이 바뀝니다.
@@ -44,6 +44,8 @@ TASKS = ["youtube_views_daily", "external_weekly"]
 DOWNLOADS = {"naver", "youtube_views", "youtube_candidates", "musinsa_ranking", "musinsa_product_info", "musinsa_review"}
 LINE = re.compile(r"^===== \[(.*?)\]\s*(.*?)\s*$")
 STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})\D+?(\d{1,2}):(\d{2}):(\d{2})")
+# 수집기가 다른 실행과 겹쳐 스스로 건너뛸 때의 종료 코드 (external_data/_collector_lock.py)
+SKIP_EXIT_CODE = 75
 
 
 class ExternalError(Exception):
@@ -93,6 +95,10 @@ def _num(value, cast=float):
     return int(number) if cast is int else number
 
 
+def _exit_status(code) -> str:
+    return "succeeded" if code == 0 else "skipped" if code == SKIP_EXIT_CODE else "failed"
+
+
 def _read_csv(path: Path) -> list[dict]:
     with path.open(encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
@@ -102,7 +108,7 @@ class ExternalDataManager:
     def __init__(self, project, python=None):
         self.project = Path(project).resolve()
         self.root = self.project / "external_data"
-        self.data = self.root / "data"
+        self.data = self.project / "database"   # 수집기 저장 위치 = 에이전트가 읽는 위치
         self.logs = self.project / "logs" / "external_data"
         self.state_file = Path(__file__).resolve().parent / "runtime" / "external" / "manual_runs.json"
         self.python = python or sys.executable
@@ -111,6 +117,26 @@ class ExternalDataManager:
         self._history: list[dict] = self._load_history()
         self._cache: dict = {}
         self._next = (0.0, {})
+        self._lock_module = None
+
+    # =========================================================
+    # 수집기 실행 잠금 (예약·수동·대시보드 재시작 전 실행 모두 포함)
+    # =========================================================
+    def lock_held(self, key: str) -> bool:
+        """수집기 프로세스가 실행 중이면 잠금을 잡고 있습니다(external_data/_collector_lock.py)."""
+        if self._lock_module is None:
+            path = self.root / "_collector_lock.py"
+            if not path.is_file():
+                return False
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("_collector_lock", path)
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+            except (OSError, SyntaxError, ImportError):
+                return False
+            self._lock_module = module
+        return bool(self._lock_module.is_running(key))
 
     # =========================================================
     # 수동 실행 기록 저장
@@ -135,6 +161,29 @@ class ExternalDataManager:
     # =========================================================
     # 예약 실행 로그(daily_*.log, weekly_*.log) 해석
     # =========================================================
+    def _run_section(self, path: Path, key: str, started_at: str | None, lines: int = 12) -> list[str]:
+        """예약 로그에서 해당 수집기 실행 구간(시작 줄 ~ exit code 줄)만 꺼냅니다."""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+        section, inside = [], False
+        for line in text:
+            m = LINE.match(line)
+            if m:
+                rest = m.group(2)
+                if inside and re.search(r"exit code (-?\d+)", rest):
+                    section.append(line)
+                    inside = False
+                    continue
+                when = _stamp(m.group(1))
+                if rest and SCRIPT_KEY.get(rest.split()[0]) == key and _iso(when) == started_at:
+                    section, inside = [line], True
+                    continue
+            if inside:
+                section.append(line)
+        return section[-lines:]
+
     def scheduled_runs(self) -> list[dict]:
         """예약 로그에서 수집기별 실행(시작·종료·종료 코드)을 꺼냅니다. 진행 중이면 end가 없습니다."""
         # 종류별로 따로 자릅니다. 한꺼번에 이름순으로 자르면 weekly_*가 쌓일수록 daily_*가 밀려납니다.
@@ -205,9 +254,20 @@ class ExternalDataManager:
         files = sorted((self.data / "youtube" / "keyword_candidates").glob("keyword_candidates_*.csv"))
         return files[-1] if files else None
 
+    def _musinsa_dirs(self) -> list[Path]:
+        return sorted(d for d in (self.data / "musinsa").glob("*") if d.is_dir() and re.fullmatch(r"\d{8}", d.name))
+
     def _latest_musinsa(self) -> Path | None:
-        dirs = sorted(d for d in (self.data / "musinsa").glob("*") if d.is_dir() and re.fullmatch(r"\d{8}", d.name))
-        return dirs[-1] if dirs else None
+        """끝까지 수집을 마친(_complete.json이 있는) 폴더 중 최신. 완료 표시가 있는 폴더가 하나도 없으면
+        (완료 표시 도입 전 수집) 가장 최근 폴더를 씁니다."""
+        dirs = self._musinsa_dirs()
+        complete = [d for d in dirs if (d / "_complete.json").is_file()]
+        return (complete or dirs or [None])[-1]
+
+    def _musinsa_incomplete_after(self, folder: Path) -> Path | None:
+        """보여 주는 폴더보다 새로 생긴 미완성(수집 중·일부 실패) 폴더"""
+        newer = [d for d in self._musinsa_dirs() if d.name > folder.name and not (d / "_complete.json").is_file()]
+        return newer[-1] if newer else None
 
     def data_summary(self, key: str) -> dict:
         """수집기별 최신 데이터: 수집일(collected), 설명 문구(facts), 파일 존재 여부."""
@@ -260,10 +320,15 @@ class ExternalDataManager:
             def compute():
                 counts = {f.stem: (len(_read_csv(f)) if f.exists() else 0) for f in files}
                 n = folder.name
-                return {"exists": True, "collected": f"{n[:4]}-{n[4:6]}-{n[6:]}",
-                        "facts": [["랭킹 상품", f"{counts['ranking']:,}개"], ["리뷰", f"{counts['review']:,}건"],
-                                  ["누적 수집", f"{len([d for d in (self.data / 'musinsa').glob('*') if d.is_dir()])}주"]]}
-            return self._cached(key, files, compute)
+                facts = [["랭킹 상품", f"{counts['ranking']:,}개"], ["리뷰", f"{counts['review']:,}건"],
+                         ["누적 수집", f"{len(self._musinsa_dirs())}주"]]
+                partial = self._musinsa_incomplete_after(folder)
+                if partial:
+                    m = partial.name
+                    facts.append(["미완성 수집", f"{m[:4]}-{m[4:6]}-{m[6:]} (수집 중이거나 일부 실패 · 표시하지 않음)"])
+                return {"exists": True, "collected": f"{n[:4]}-{n[4:6]}-{n[6:]}", "facts": facts}
+            watched = files + [d / "_complete.json" for d in self._musinsa_dirs()] + self._musinsa_dirs()
+            return self._cached(key, watched, compute)
         raise ExternalError(404, "수집기를 찾지 못했습니다.")
 
     # =========================================================
@@ -282,15 +347,17 @@ class ExternalDataManager:
             manual = [h for h in history if h["collector"] == key]
             candidates = [{"source": "예약", "started_at": _iso(r["start"]), "finished_at": _iso(r["end"]),
                            "status": "running" if r["end"] is None and not r.get("stale") else
-                                     "unknown" if r["end"] is None else ("succeeded" if r["exit_code"] == 0 else "failed"),
+                                     "unknown" if r["end"] is None else _exit_status(r["exit_code"]),
                            "exit_code": r["exit_code"], "log": r["log"]} for r in runs]
             candidates += [{"source": "수동", **{k: h.get(k) for k in ("started_at", "finished_at", "status", "exit_code", "log", "error")}} for h in manual]
             last = max(candidates, key=lambda r: r["started_at"] or "", default=None)
             job = jobs.get(key)
             if job and job.get("log"):
                 job["log_tail"] = _tail(self.logs / job["log"])
-            elif last and last.get("status") == "failed" and last.get("log"):
-                last["log_tail"] = _tail(self.logs / last["log"], 8)
+            elif last and last.get("status") in {"failed", "skipped"} and last.get("log"):
+                # 주간 예약 로그는 여러 수집기가 한 파일에 쓰므로 이 수집기 구간만 잘라 보여 줍니다.
+                last["log_tail"] = (self._run_section(self.logs / last["log"], key, last["started_at"])
+                                    if last["source"] == "예약" else _tail(self.logs / last["log"], 8))
             try:
                 data = self.data_summary(key)
             except (OSError, ValueError, KeyError, IndexError):
@@ -299,7 +366,9 @@ class ExternalDataManager:
             items.append({
                 "key": key, "title": c["title"], "script": c["script"], "schedule": c["schedule"], "duration": c["minutes"],
                 "next_run": (nexts.get(c["task"]) or {}).get("next"), "last_run": last, "job": job,
-                "running": bool(job and job["status"] == "running") or any(r["status"] == "running" for r in candidates if r["source"] == "예약"),
+                # 잠금이 잡혀 있으면 예약·수동·대시보드 재시작 전에 시작한 실행 모두 실행 중으로 봅니다.
+                "running": bool(job and job["status"] == "running") or any(r["status"] == "running" for r in candidates if r["source"] == "예약")
+                           or self.lock_held(key),
                 "data": data, "days_old": days_old,
                 "stale": days_old is None or days_old > c["stale_days"], "stale_days": c["stale_days"],
             })
@@ -319,6 +388,8 @@ class ExternalDataManager:
             raise ExternalError(404, f"수집 코드가 없습니다: external_data/{c['script']}")
         if any(r["collector"] == key and r["end"] is None and not r.get("stale") for r in self.scheduled_runs()):
             raise ExternalError(409, "예약 실행이 진행 중입니다. 끝난 뒤 다시 시도해 주세요.")
+        if self.lock_held(key):
+            raise ExternalError(409, "이 수집기가 다른 곳(예약 실행이나 대시보드 재시작 전 실행)에서 실행 중입니다. 끝난 뒤 다시 시도해 주세요.")
         with self._lock:
             if self._jobs.get(key, {}).get("status") == "running":
                 raise ExternalError(409, "이미 실행 중입니다.")
@@ -361,7 +432,10 @@ class ExternalDataManager:
         except OSError as exc:
             error = f"실행하지 못했습니다: {exc.__class__.__name__}"
         with self._lock:
-            job.update(status="succeeded" if code == 0 and not error else "failed", finished_at=_iso(_now()), exit_code=code, error=error)
+            status = "failed" if error else _exit_status(code)
+            if status == "skipped":
+                error = "다른 곳에서 이미 실행 중이라 이번 실행은 건너뛰었습니다."
+            job.update(status=status, finished_at=_iso(_now()), exit_code=code, error=error)
             for item in reversed(self._history):
                 if item["collector"] == key and item["started_at"] == job["started_at"]:
                     item.update(job)

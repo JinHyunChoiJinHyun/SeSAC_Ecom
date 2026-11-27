@@ -72,6 +72,7 @@ def _load_csv(path: Path, kind: str) -> pd.DataFrame:
     if not path.is_file():
         raise FileNotFoundError(f'{kind} 파일이 없습니다: {path}')
     df = pd.read_csv(path, dtype={'item_id': 'string', 'review_id': 'string'})
+    df = df.rename(columns={new: old for new, old in COLUMN_ALIASES.items() if new in df and old not in df})
     if not REQUIRED[kind].issubset(df.columns):
         raise ValueError(f'{path.name}: 누락 컬럼 {sorted(REQUIRED[kind] - set(df.columns))}')
     if not len(df):
@@ -79,15 +80,32 @@ def _load_csv(path: Path, kind: str) -> pd.DataFrame:
     return df
 
 
+def _first(*paths: Path) -> Path:
+    """있는 파일 중 첫 번째(모두 없으면 첫 후보를 돌려 '파일 없음' 오류를 냅니다)."""
+    return next((p for p in paths if p.is_file()), paths[0])
+
+
 def _sources(folder: Path, project: Path) -> dict[str, Path]:
-    """무신사는 Downloads 통합 원본, 네이버·유튜브는 검증된 프로젝트 CSV 우선."""
+    """수집기(external_data/)가 database/ 에 저장한 새 이름을 먼저 찾고, 없으면 예전 이름을 찾습니다.
+
+    무신사: --source 폴더(예: database/musinsa/20261123)의 product_info.csv → add_info.csv
+    네이버: database/naver/keyword_trend.csv → shopping_daily.csv
+    유튜브: database/youtube/keyword_candidates/ 의 가장 최근 파일 → 예전 keyword_candidates_rule_20261123.csv
+    """
+    weekly = sorted((project / 'database/youtube/keyword_candidates').glob('keyword_candidates_*.csv'))
     return {
         'ranking': folder / 'ranking.csv',
-        'add_info': folder / 'add_info.csv',
+        'add_info': _first(folder / 'product_info.csv', folder / 'add_info.csv'),
         'review': folder / 'review.csv',
-        'naver': (project / 'database/naver/shopping_daily.csv') if (project / 'database/naver/shopping_daily.csv').is_file() else (folder / 'shopping_daily.csv'),
-        'youtube': (project / 'database/youtube/keyword_candidates_rule_20261123.csv') if (project / 'database/youtube/keyword_candidates_rule_20261123.csv').is_file() else (folder / 'keyword_candidates_rule_20261123.csv'),
+        'naver': _first(project / 'database/naver/keyword_trend.csv', project / 'database/naver/shopping_daily.csv',
+                        folder / 'keyword_trend.csv', folder / 'shopping_daily.csv'),
+        'youtube': _first(*weekly[-1:], project / 'database/youtube/keyword_candidates_rule_20261123.csv',
+                          folder / 'keyword_candidates_rule_20261123.csv'),
     }
+
+
+# 수집기의 새 컬럼 이름 → 적재 테이블이 쓰는 이름
+COLUMN_ALIASES = {'product_gender': 'gender', 'reviewer_gender': 'gender'}
 
 
 def prepare_frames(source: Path, project: Path = ROOT) -> dict[str, pd.DataFrame]:
@@ -137,7 +155,8 @@ def prepare_frames(source: Path, project: Path = ROOT) -> dict[str, pd.DataFrame
     youtube['channel_count'] = pd.to_numeric(youtube['channel_count'], errors='raise')
     if youtube['channel_count'].isna().any() or (youtube['channel_count'] < 0).any():
         raise ValueError('유튜브 채널 수 오류')
-    youtube['collected_at'] = '2026-11-23' if paths['youtube'].name.endswith('20261123.csv') else None
+    stamp = __import__('re').search(r'(20\d{2})(\d{2})(\d{2})', paths['youtube'].stem)
+    youtube['collected_at'] = '-'.join(stamp.groups()) if stamp else None
     youtube['source_file'] = paths['youtube'].name
     youtube['links'] = youtube['links'].fillna('')
     return {'musinsa_ranking': ranking, 'musinsa_add_info': info,

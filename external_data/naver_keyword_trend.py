@@ -20,7 +20,7 @@ python naver_keyword_trend.py 로퍼 크로스백 --category 패션잡화
 python naver_keyword_trend.py 경량패딩 --start 2025-09-01    # 시작일 변경
 python naver_keyword_trend.py 경량패딩 --preview             # 저장 없이 출력만
 
-저장: data/naver/keyword_trend.csv  (행 = 날짜, 열 = 키워드, 실행할 때마다 덮어씀)
+저장: 프로젝트 루트 database/naver/keyword_trend.csv  (행 = 날짜, 열 = 키워드, 실행할 때마다 덮어씀)
       키워드가 하나라도 실패하면 저장하지 않고 기존 파일을 그대로 둡니다.
 종료 코드: 모두 성공하면 0, 실패가 있으면 1 (자동 실행에서 실패 확인용)
       열 이름은 입력한 그대로입니다. 띄어 쓴 키워드는 공백을 지운 검색어로 조회합니다
@@ -44,7 +44,7 @@ from dotenv import load_dotenv
 # 기본 설정
 # =========================================================
 
-PROJECT_DIR = Path(__file__).resolve().parent          # external_data/ (데이터 저장 기준)
+PROJECT_DIR = Path(__file__).resolve().parent          # external_data/ (수집 코드 위치)
 ROOT_DIR = PROJECT_DIR.parent                          # 프로젝트 루트 (env/ 는 다른 팀 코드와 함께 씀)
 # API 키 위치: 프로젝트 루트 .env 를 먼저 읽고, 없는 값만 예전 위치 env/.env 에서 채웁니다(대시보드와 같은 순서).
 ENV_PATHS = [ROOT_DIR / ".env", ROOT_DIR / "env" / ".env"]
@@ -56,7 +56,7 @@ def load_env():
     for path in ENV_PATHS:
         if path.is_file():
             load_dotenv(path)
-SAVE_DIR = PROJECT_DIR / "data" / "naver"
+SAVE_DIR = ROOT_DIR / "database" / "naver"   # 프로젝트 루트 database/ (에이전트가 읽는 위치)
 CSV_NAME = "keyword_trend.csv"
 
 API_URL = "https://naverapihub.apigw.ntruss.com/shopping/v1/category/keywords"
@@ -275,4 +275,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from _collector_lock import hold  # 예약·수동 실행이 겹치지 않도록 (이미 실행 중이면 종료 코드 75로 건너뜀)
+    hold("naver")
     raise SystemExit(main())

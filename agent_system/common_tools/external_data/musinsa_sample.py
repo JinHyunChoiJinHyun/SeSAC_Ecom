@@ -1,7 +1,12 @@
 """무신사 랭킹·리뷰 CSV 읽기 (로컬 모드 전용, 읽기만 함).
 
 위치: database/musinsa/  (환경변수 CART_SIGNAL_MUSINSA_DIR로 변경)
-두 가지 파일 구성을 모두 읽습니다.
+    수집기(external_data/musinsa_crawler.py)는 주마다 database/musinsa/YYYYMMDD/ 에 저장합니다.
+    날짜 폴더가 있으면 가장 최근 폴더를 읽고, 없으면 database/musinsa/ 바로 아래 파일을 읽습니다.
+    수집기 파일 구성: ranking.csv · product_info.csv · review.csv (맨 앞 collected_date, 그다음 category 열)
+        product_info.product_gender = 제품 성별, review.reviewer_gender = 리뷰 작성자 성별
+        → 읽을 때 예전 이름(add_info.csv, gender, collected_at)으로 맞춰 아래 코드는 그대로 씁니다.
+아래 예전 파일 구성도 계속 읽습니다.
     ① 카테고리별 배치 파일 (11/20 배치 데이터)
         {카테고리}_ranking.csv   item_id, ranking, brand, brand_id, name, price, best_price, original_price, discount_rate
         {카테고리}_add_info.csv  item_id, gender, rating, review_count, img          (선택)
@@ -29,6 +34,10 @@ from common.external_data_store import fetch, LABELS
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 LABEL = "무신사 (랭킹·리뷰)"
 KINDS = ("ranking", "add_info", "review")
+# 수집기의 새 파일 이름 → 이 모듈이 쓰는 이름
+KIND_ALIASES = {"product_info": "add_info"}
+# 수집기의 새 컬럼 이름 → 이 모듈이 쓰는 이름 (예전 이름이 이미 있으면 바꾸지 않음)
+COLUMN_ALIASES = {"product_gender": "gender", "reviewer_gender": "gender", "collected_date": "collected_at"}
 
 _cache: dict = {}
 _lock = threading.Lock()
@@ -36,6 +45,24 @@ _lock = threading.Lock()
 
 def data_dir() -> Path:
     return Path(os.getenv("CART_SIGNAL_MUSINSA_DIR") or PROJECT_ROOT / "database" / "musinsa")
+
+
+def latest_folder(folder: Path | None = None) -> Path:
+    """database/musinsa/YYYYMMDD/ 날짜 폴더가 있으면 가장 최근 폴더, 없으면 기본 폴더."""
+    folder = folder or data_dir()
+    dated = sorted(d for d in folder.glob("*") if d.is_dir() and d.name.isdigit() and len(d.name) == 8
+                   and any(d.glob("*.csv"))) if folder.is_dir() else []
+    return dated[-1] if dated else folder
+
+
+def normalize_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """수집기의 새 컬럼 이름을 이 모듈이 쓰는 이름으로 바꾸고,
+    category 의 영문 코드(knit_sweater 등)를 한글 대분류 이름(니트·스웨터 등)으로 바꿉니다."""
+    renames = {new: old for new, old in COLUMN_ALIASES.items() if new in frame and old not in frame}
+    frame = frame.rename(columns=renames) if renames else frame
+    if "category" in frame and frame["category"].isin(list(LABELS)).any():
+        frame = frame.assign(category=frame["category"].map(lambda c: LABELS.get(c, c)))
+    return frame
 
 
 def _short(path: Path) -> str:
@@ -55,12 +82,15 @@ def file_sets(folder: Path | None = None) -> dict[str, dict[str, Path]]:
 
     예전 샘플(ranking.csv)은 카테고리 "" 로 둡니다.
     """
-    folder = folder or data_dir()
+    folder = latest_folder(folder)
     sets: dict[str, dict[str, Path]] = {}
     if not folder.is_dir():
         return {}
     for path in sorted(folder.glob("*.csv")):
         stem = _nfc(path.stem)
+        for alias, kind in KIND_ALIASES.items():
+            if stem == alias or stem.endswith("_" + alias):
+                stem = stem[: -len(alias)] + kind
         for kind in KINDS:
             if stem == kind:
                 sets.setdefault("", {})[kind] = path
@@ -92,7 +122,7 @@ def load() -> dict:
         return musinsa_snapshot()
     """{"products", "reviews", "collected_at", "categories"} — 파일이 바뀌면 다시 읽습니다."""
     global _cache
-    folder = data_dir()
+    folder = latest_folder()
     sets = file_sets(folder)
     if not sets:
         raise FileNotFoundError(status()["status"])
@@ -104,9 +134,9 @@ def load() -> dict:
             return _cache
         product_parts, review_parts, stamps = [], [], []
         for category, files in sets.items():
-            products = _read(files.get("ranking"), dtype={"item_id": str})
-            info = _read(files.get("add_info"), dtype={"item_id": str})
-            reviews = _read(files.get("review"), dtype={"item_id": str, "review_id": str})
+            products = normalize_columns(_read(files.get("ranking"), dtype={"item_id": str}))
+            info = normalize_columns(_read(files.get("add_info"), dtype={"item_id": str}))
+            reviews = normalize_columns(_read(files.get("review"), dtype={"item_id": str, "review_id": str}))
             if not info.empty and "item_id" in info:
                 extra = [c for c in ("gender", "rating", "review_count") if c in info and c not in products]
                 products = products.merge(info[["item_id", *extra]].drop_duplicates("item_id"), on="item_id",

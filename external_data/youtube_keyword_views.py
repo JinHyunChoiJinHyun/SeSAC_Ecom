@@ -31,7 +31,7 @@ python youtube_keyword_views.py --days 30 --max-videos 100
 python youtube_keyword_views.py 트위드자켓 로퍼             # 키워드 직접 지정
 python youtube_keyword_views.py --preview                  # 저장 없이 출력만
 
-저장: data/youtube/keyword_views/keyword_views.csv 에 계속 쌓습니다(행 = 수집일 × 키워드).
+저장: 프로젝트 루트 database/youtube/keyword_views/keyword_views.csv 에 계속 쌓습니다(행 = 수집일 × 키워드).
       같은 날 같은 키워드를 다시 실행하면 그 행만 새 값으로 바뀝니다.
       키워드가 하나라도 실패하면 저장하지 않고 기존 파일을 그대로 둡니다.
 종료 코드: 모두 성공하면 0, 실패가 있으면 1
@@ -284,4 +284,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from _collector_lock import hold  # 예약·수동 실행이 겹치지 않도록 (이미 실행 중이면 종료 코드 75로 건너뜀)
+    hold("youtube_views")
     raise SystemExit(main())
