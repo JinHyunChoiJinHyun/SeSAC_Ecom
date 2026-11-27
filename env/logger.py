@@ -83,6 +83,11 @@ LOGGER_NAME = (
     "agent_system"
 )
 
+# agent_system 밖에서 쓰는 프로젝트 로거 이름 (Slack 봇·전송·DB·보고서)
+EXTRA_LOGGER_NAMES = (
+    "ecom", "cart_signal", "common", "interfaces", "__main__",
+)
+
 _configured = (
     False
 )
@@ -451,6 +456,20 @@ def configure_logging(
     logger.addHandler(
         file_handler
     )
+
+
+    # =====================================================
+    # agent_system 밖의 프로젝트 로거도 같은 파일에 기록
+    # (연결하지 않으면 INFO는 사라지고 WARNING은 stderr를 거쳐 ERROR로 기록됨)
+    # =====================================================
+
+    for name in EXTRA_LOGGER_NAMES:
+
+        extra = logging.getLogger(name)
+        extra.setLevel(logging.INFO)
+        extra.addHandler(console_handler)
+        extra.addHandler(file_handler)
+        extra.propagate = False
 
 
     # =====================================================

@@ -287,10 +287,14 @@ def run_workflow_node(state) -> dict:
                 saved = target40.score_campaign(campaign, run, root=target39.ROOT)
                 run['campaign_target_r39'] = saved
                 answer = target39.proposal_notice(saved)
+                # 관리자 대시보드 실행 흐름: 고객 타깃 점수 계산 단계
+                run = base.record_run_event(run, "agent_call", step=steps[index][1].no, agent="targeting", error="")
             run.update(status='paused', waiting_key='', target_start_pending=False)
         except Exception as exc:
             import logging
             logging.getLogger(__name__).exception('기획전 구매 모델 분석 실패')
+            run = base.record_run_event(run, "agent_call", step=steps[index][1].no, agent="targeting",
+                                        error=type(exc).__name__)
             run.update(status='paused', waiting_key='', target_start_pending=True)
             answer = f'고객 구매 예측 분석을 완료하지 못했습니다 ({type(exc).__name__}). ' + (str(exc) if isinstance(exc, ValueError) and any(x in str(exc) for x in ('모델 미지원', '단일 모델 품목', '확정 참고 상품', '확정된 기획전 색상', '동일 품목', '고객 연령', '연령 조건', '연령 필터', '지정한 연령', '고객 모집단')) else '모델 파일·DB·확정 품목과 색상을 확인해 주세요.')
         store_turn_result(state['turn_id'], {'turn_type':'workflow', 'final_answer':answer, 'completed_steps':[], 'workflow_run': {'workflow':'trend_planning', 'status':'paused'}})
@@ -360,8 +364,12 @@ def run_workflow_node(state) -> dict:
                     result = build_category_result(run.get("request", ""), output)
             except Exception as exc:
                 run.update(status="blocked", blocked_reason=f"상품군 분석 실패: {type(exc).__name__}: {exc}")
+                # 관리자 대시보드 실행 흐름: 2~3단계 카테고리 비교 실패
+                run = base.record_run_event(run, "agent_call", step=step.no, agent=step.owner, error=type(exc).__name__)
                 sections.append("■ 상품군 비교 실패\n" + run["blocked_reason"])
                 break
+            # 관리자 대시보드 실행 흐름: 2~3단계 카테고리 비교
+            run = base.record_run_event(run, "agent_call", step=step.no, agent=step.owner, error="")
             sections.append(result["final_answer"])
             for skip_idx in (0, 1):
                 _, completed = steps[skip_idx]

@@ -546,6 +546,25 @@ class SlackBridge:
         return True
 
     def _r424_file_batch(self,client,event,jobs):
+        # 첨부 파일 처리도 관리자 대시보드에 하나의 요청으로 기록합니다.
+        from env.logger import request_log
+        from env.model_settings import model_request, ModelSettingsError
+        names = ', '.join(str(f.get('name') or '파일') for _, f in jobs)
+        text = re.sub(r'<@[^>]+>', '', str(event.get('text') or '')).strip()
+        with request_log(f'[파일 첨부] {names}' + (f' | {text}' if text else '')):
+            try:
+                with model_request():
+                    error_type = self._r424_file_batch_run(client, event, jobs)
+            except ModelSettingsError:
+                LOGGER.error("요청 모델 설정을 확인하지 못했습니다.")
+                error_type = 'ModelSettingsError'
+            if error_type:
+                self._record_result(event, 'failed', 'not_attempted', error_type=error_type)
+            else:
+                self._record_result(event, 'completed')
+
+    def _r424_file_batch_run(self,client,event,jobs):
+        """첨부 처리 본문. 실패하면 예외 이름을, 성공하면 None을 돌려줍니다."""
         from interfaces.slack.report_finalize import process_uploaded_png
         from agent_system.approval_demo import recipient_flow as r, delivery_r42 as d
         question = re.sub(r'<@[^>]+>', '', str(event.get('text') or '')).strip()
@@ -557,7 +576,7 @@ class SlackBridge:
             r._check_delivery_state(state,event)
             for fn,f in jobs:
                 ok=fn(client,event,f,defer=True) if fn is process_uploaded_png else fn(client,event,f)
-                if ok is not True: return
+                if ok is not True: return 'FileProcessingFailed'
             if r.MAIL_INTENT.search(question):
                 result=self.runner(question,event)
                 client.chat_postMessage(**kwargs,text=result['final_answer'])
@@ -571,7 +590,10 @@ class SlackBridge:
                     status=(state.get('pending') or {}).get('status')
                     client.chat_postMessage(**kwargs,text='수신자 확인 버튼을 눌러 주세요.' if status=='AWAITING_CONFIRMATION' else '최종 PDF를 확인하고 수신자를 지정해 주세요.' if state.get('pdf') else '수정 Word를 첨부해 주세요.')
         except Exception as exc:
+            LOGGER.exception('첨부 파일 처리 실패: %s', type(exc).__name__)
             client.chat_postMessage(**kwargs,text='파일 처리 실패: '+(str(exc) if isinstance(exc,ValueError) else type(exc).__name__))
+            return type(exc).__name__
+        return None
 
     # =====================================================
     # DM 수신
@@ -1001,6 +1023,10 @@ class SlackBridge:
         """안내 문구 대신 명시적인 처리 결과를 공통 로그에 기록합니다."""
         from env.logger import get_logger
 
+        # 답변 본문은 로그 파일에 30일 보관되므로 이메일 주소를 가린 뒤 기록합니다.
+        if isinstance(details.get("answer"), str):
+            details["answer"] = re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[이메일 가림]", details["answer"])
+
         get_logger().info(
             "ADMIN_RESULT %s",
             json.dumps(
@@ -1059,7 +1085,13 @@ class SlackBridge:
         # 답변 생성·검증 완료 안내 및 결과 전송 시작
         # 표시 시간은 결과 생성·검증까지이며 Slack 전송 완료를 뜻하지 않습니다.
         # =================================================
-        self._record_result(event, "completed")
+        # 관리자 대시보드 요청 상세에서 최종 답변을 확인할 수 있도록 앞부분만 기록합니다.
+        # 워크플로 단계가 실패해 멈췄으면 답변(재시도 안내)은 보내되 처리 결과는 실패로 기록합니다.
+        workflow_blocked = (result.get("turn_type") == "workflow"
+                            and (result.get("workflow_run") or {}).get("status") == "blocked")
+        outcome = "failed" if workflow_blocked else "completed"
+        blocked_detail = {"error_type": "WorkflowBlocked"} if workflow_blocked else {}
+        self._record_result(event, outcome, answer=answer[:4000], **blocked_detail)
         elapsed = time.perf_counter() - started
         self._set_status(
             client, event, status_ts,
@@ -1106,7 +1138,7 @@ class SlackBridge:
         except Exception as exc:
 
             self._record_result(
-                event, "completed", "failed", error_type=type(exc).__name__,
+                event, outcome, "failed", error_type=type(exc).__name__,
             )
             LOGGER.exception(
                 "Delivery Agent 실행 실패 (%s)",
@@ -1135,7 +1167,7 @@ class SlackBridge:
         delivery_status = delivery_result.get("status", "unknown")
         if delivery_status not in {"success", "failed", "partial_success"}:
             delivery_status = "unknown"
-        self._record_result(event, "completed", delivery_status)
+        self._record_result(event, outcome, delivery_status, **blocked_detail)
 
         # =================================================
         # Delivery 실패
@@ -1922,9 +1954,16 @@ def main():
         # Slack 앱 설정에서 Interactivity & Shortcuts를 켜야 합니다.
         # =================================================
 
+        RECIPIENT_BUTTON_LABELS = {
+            'cartrecipient_yes': '수신자 확인 · 네', 'cartrecipient_no': '수신자 확인 · 아니요',
+            'cartrecipient_send': '발송', 'cartrecipient_cancel': '발송 취소',
+        }
+
         @app.action(re.compile("^cartrecipient_"))
         def handle_recipient_button(ack, body, client):
             ack()
+            # 관리자 대시보드 요청 기록용 결과 (버튼 처리 성공·실패와 마지막 안내문)
+            outcome = {}
             # 이메일 작업은 Slack 3초 응답 제한 밖에서 워커로 처리
             def _job():
                 import json as _json
@@ -2013,10 +2052,28 @@ def main():
                             except Exception:
                                 LOGGER.exception('R39_REPORT_COMPLETION_FAILED')
                                 message += '\n발송은 완료됐지만 워크플로 종료 상태를 저장하지 못했습니다.'
+                    outcome['answer'] = message
                     client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text=message)
                 except Exception as exc:
+                    outcome['error_type'] = type(exc).__name__
                     LOGGER.exception('승인 수신자 처리 실패: %s', type(exc).__name__)
-            bridge.executor.submit(_job)
+
+            def _logged_job():
+                # 메일 버튼도 일반 요청처럼 시작·결과·종료를 같은 요청 ID로 기록합니다.
+                from env.logger import request_log
+                action_id = ((body.get('actions') or [{}])[0]).get('action_id') or ''
+                label = RECIPIENT_BUTTON_LABELS.get(action_id) or (
+                    '담당자 선택' if action_id.startswith('cartrecipient_pick_') else action_id)
+                channel = (body.get('channel') or {}).get('id') or (body.get('container') or {}).get('channel_id') or ''
+                with request_log(f'[메일 버튼] {label}'):
+                    _job()
+                    if outcome.get('error_type'):
+                        bridge._record_result({'channel': channel}, 'failed', 'not_attempted',
+                                              error_type=outcome['error_type'])
+                    else:
+                        details = {'answer': outcome['answer'][:4000]} if outcome.get('answer') else {}
+                        bridge._record_result({'channel': channel}, 'completed', **details)
+            bridge.executor.submit(_logged_job)
 
         @app.action(re.compile("^carttopic_"))
         def handle_topic_button(ack, body, client):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import io
@@ -9,9 +10,11 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +25,29 @@ STAGES = {
     "Supervisor Agent": "Supervisor", "Data Agent": "Data", "SQL Executor": "SQL 실행",
     "Prep Agent": "전처리", "Model Agent": "모델", "Experiment Agent": "실험",
     "Visualization Agent": "시각화", "Final Response": "최종 응답",
+    # Orchestrator 구조: 총괄 에이전트와 Slack 전달 단계
+    "Orchestrator": "총괄 에이전트", "Slack Delivery": "Slack 전달",
 }
+# 워크플로 단계에서 실행된 전문 에이전트 이름(registry name → 화면 표시 이름)
+AGENT_TITLES = {
+    "market_analysis": "시장 분석", "product_analysis": "상품 분석", "targeting": "고객 타깃 선정",
+    "content_generation": "콘텐츠 생성", "validation": "검증", "reporting": "결과 정리",
+    "campaign_execution": "캠페인 실행", "general_analysis": "일반 분석",
+}
+INTENT_TITLES = {"chitchat": "일반 대화", "analysis": "분석", "decision": "결정 반영", "workflow": "업무 흐름"}
+WORKFLOW_EVENT = re.compile(r"^\[워크플로\] \S+ run=\S+ (\w+) (\{.*\})\s*$")
+INTENT_LINE = re.compile(r"^intent\s*=\s*(\w+)\s*/\s*reason\s*=\s*(.*)$")
+# 분석 요청: 총괄 에이전트가 고른 전문 에이전트와 그 실행 표시
+ROUTE_LINE = re.compile(r"^route\s*=\s*(\w+)\s*/\s*(.*)$")
+AGENT_RUN_LINE = re.compile(r"^\[[^\]]+ Agent\] (\w+) 실행")
+# ADMIN_RESULT 실패 유형별 안내 (그 밖의 유형은 이름을 그대로 표시)
+FAILURE_TEXT = {
+    "WorkflowBlocked": "워크플로 단계가 실패해 멈췄습니다. 사용자는 [다시 시도] 버튼으로 이어갈 수 있습니다.",
+    "FileProcessingFailed": "첨부 파일을 처리하지 못했습니다.",
+    "ModelSettingsError": "LLM 모델 설정을 읽지 못해 요청을 처리하지 않았습니다.",
+}
+# 종료 기록 없이 이 시간이 지나면 처리 중이 아니라 '종료 미확인'으로 봅니다.
+RUNNING_LIMIT = timedelta(minutes=30)
 ERROR_SIGNAL = re.compile(r"Traceback|\b(?:FileNotFoundError|ModuleNotFoundError|RuntimeError|ValueError|PermissionError)\b|\[(?:DuckDB 연결 오류|SQL 실행 오류)\]")
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".csv", ".json", ".pdf"}
 OUTPUT_FOLDERS = ("visualization_output", "delivery_output")
@@ -37,6 +62,8 @@ def redact(value: Any) -> str:
     text = str(value)
     text = re.sub(r"\b(?:xox[baprs]-|xapp-|sk-)[A-Za-z0-9_\-]{8,}", "[인증정보 가림]", text)
     text = re.sub(r"(?i)((?:api[_ -]?key|access[_ -]?token|authorization|password|secret)\s*[=:]\s*)[^\s,;]+", r"\1[가림]", text)
+    # 수신자 확인 답변 등에 들어가는 이메일 주소도 가립니다.
+    text = re.sub(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", "[이메일 가림]", text)
     return text
 
 
@@ -53,6 +80,23 @@ def empty_run(run_id: str, source: str = "log") -> dict:
             "channel": "미기록", "answer": None, "llm_provider": None, "llm_model": None,
             "stages": [], "decisions": [], "sql": "", "errors": [], "logs": [],
             "files": [], "origin": source, "warnings": []}
+
+
+def _still_running(started_at: str | None) -> bool:
+    """시작 후 RUNNING_LIMIT 안이면 아직 처리 중인 요청으로 봅니다(로그 시각은 이 PC 현지 시각)."""
+    if not started_at:
+        return False
+    try:
+        started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    return datetime.now() - started < RUNNING_LIMIT
+
+
+def _add_stage(run: dict, title: str, stamp: str) -> None:
+    """같은 단계가 연속으로 기록되면 한 번만 표시합니다."""
+    if not run["stages"] or run["stages"][-1]["name"] != title:
+        run["stages"].append({"name": title, "time": stamp})
 
 
 def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict], list[str]]:
@@ -72,13 +116,22 @@ def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict
         except OSError:
             notices.append(f"{path.name}: 읽을 수 없습니다.")
             continue
+        previous = None  # 여러 줄 레코드(트레이스백)의 이어지는 줄을 붙일 직전 레코드
         for line in content.splitlines():
             match = LOG_LINE.match(line)
             if not match:
+                # 시각·요청 ID가 없는 줄은 직전 레코드(logger.exception 트레이스백 등)의 이어지는 줄입니다.
+                if previous and line.strip():
+                    prev_run, prev_stamp, prev_level, is_error = previous
+                    text = redact(line)
+                    prev_run["logs"].append({"time": prev_stamp, "level": prev_level, "message": text})
+                    if is_error and prev_run["errors"]:
+                        prev_run["errors"][-1] += "\n" + text
                 continue
             stamp, level, run_id, message = match.groups()
             run_id = run_id.strip()
             if run_id == "-":
+                previous = None
                 continue  # 요청 ID 없는 Delivery 로그를 특정 요청에 추측해서 붙이지 않습니다.
             run = runs.setdefault(run_id, empty_run(run_id))
             # 구조화된 결과는 가림 처리 전 JSON으로 해석하고 표시할 때 가립니다.
@@ -97,12 +150,46 @@ def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict
                 run["handler_status"] = status.group(1) if status else "unknown"
                 run["duration"] = float(duration.group(1)) if duration else None
             for label, title in STAGES.items():
-                if f"[{label}]" in message and (not run["stages"] or run["stages"][-1]["name"] != title):
-                    run["stages"].append({"name": title, "time": stamp})
-            if message.startswith("reason ="):
+                if f"[{label}]" in message:
+                    _add_stage(run, title, stamp)
+            # 워크플로 이벤트에서 실제 실행된 전문 에이전트와 입력 대기·중단 단계를 읽습니다.
+            event = WORKFLOW_EVENT.match(raw_message)
+            if event:
+                try:
+                    payload = ast.literal_eval(event.group(2))
+                except (ValueError, SyntaxError):
+                    payload = {}
+                payload = payload if isinstance(payload, dict) else {}
+                kind, step = event.group(1), payload.get("step")
+                if kind == "agent_call" and isinstance(payload.get("agent"), str):
+                    title = AGENT_TITLES.get(payload["agent"], payload["agent"])
+                    _add_stage(run, f"{title} (실패)" if payload.get("error") else title, stamp)
+                elif kind in {"waiting_input", "blocked"} and isinstance(step, int):
+                    _add_stage(run, f"{'입력 대기' if kind == 'waiting_input' else '중단'} ({step}단계)", stamp)
+            intent = INTENT_LINE.match(message)
+            if intent:
+                name, reason = intent.groups()
+                run["decisions"].append(f"판단: {INTENT_TITLES.get(name, name)}\n이유: {reason.strip() or '기록 없음'}")
+            elif message.startswith("reason ="):
                 run["decisions"].append(message.split("=", 1)[1].strip())
-            if level in {"ERROR", "CRITICAL"} or ERROR_SIGNAL.search(message):
+            # 분석 요청: 총괄 에이전트가 고른 전문 에이전트와 실제 실행 표시
+            route = ROUTE_LINE.match(message)
+            if route:
+                name, reason = route.groups()
+                run["decisions"].append(f"담당: {AGENT_TITLES.get(name, name)}\n이유: {reason.strip() or '기록 없음'}")
+            agent_run = AGENT_RUN_LINE.match(message)
+            if agent_run:
+                _add_stage(run, AGENT_TITLES.get(agent_run.group(1), agent_run.group(1)), stamp)
+            # Slack에 올린 파일 경로는 업로드 완료 표시 다음 줄에 기록됩니다.
+            if run.pop("_upload", False) and not message.startswith("["):
+                if message.strip() not in run["files"]:
+                    run["files"].append(message.strip())
+            if message.startswith("[Slack 파일 업로드 완료]"):
+                run["_upload"] = True
+            is_error = level in {"ERROR", "CRITICAL"} or bool(ERROR_SIGNAL.search(message))
+            if is_error:
                 run["errors"].append(message)
+            previous = (run, stamp, level, is_error)
             if "[생성된 SQL]" in message:
                 run["_sql"] = True
                 continue
@@ -141,11 +228,16 @@ def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict
                         run["channel"] = redact(data["channel"])
                     if isinstance(data.get("answer"), str):
                         run["answer"] = redact(data["answer"])
+                    error_type = data.get("error_type")
+                    run["error_type"] = redact(error_type) if isinstance(error_type, str) else None
                 except (ValueError, TypeError, AttributeError):
                     pass
 
     for run in runs.values():
         run.pop("_sql", None)
+        run.pop("_upload", None)
+        if run.get("analysis_status") == "failed" and run.get("error_type"):
+            run["warnings"].append(FAILURE_TEXT.get(run["error_type"], f"실패 유형: {run['error_type']}"))
         run["sql"] = run["sql"].strip()
         # 로그 구간의 정상 종료와 사용자 요청의 처리 결과는 별개입니다.
         if run["analysis_status"] in {"completed", "failed"}:
@@ -154,6 +246,9 @@ def parse_logs(paths: list[Path], max_bytes: int = 4_000_000) -> tuple[list[dict
                 run["warnings"].append("중간 오류 기록은 있지만 명시적인 최종 결과에 따라 요청 처리는 성공으로 분류합니다.")
             elif run["status"] == "failed":
                 run["warnings"].append("명시적인 결과 기록으로 요청 처리 실패를 확인했습니다. 처리 로그의 success와는 별개입니다.")
+        elif not run["ended_at"] and _still_running(run["started_at"]):
+            # 종료 기록 전에는 중간 오류 줄이 있어도 처리 중으로 둡니다.
+            run["status"] = "running"
         elif run["errors"] or run["handler_status"] == "error":
             run["status"] = "failed"
         elif run["ended_at"]:
@@ -201,6 +296,8 @@ class Dashboard:
         paths = [p for p in candidates if p.is_file() and not p.is_symlink() and p.suffix != ".gz"][-15:]
         # 수정 시각과 파일 크기로 캐시 갱신 여부를 판단합니다.
         key = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths if p.exists())
+        # '처리 중' 판정이 시간에 따라 바뀌므로 1분마다 다시 해석합니다.
+        key += (int(time.time() // 60),)
         db = self.settings.db or self.settings.project / "admin_data" / "requests.sqlite3"
         if db.exists():
             key += ((str(db), db.stat().st_mtime_ns, db.stat().st_size),)
@@ -227,6 +324,9 @@ class Dashboard:
                         record["stages"] = old.get("stages") or record.get("stages", [])
                         record["decisions"] = old.get("decisions", [])
                         record["sql"] = old.get("sql") or record.get("sql", "")
+                        record["files"] = record.get("files") or old.get("files", [])
+                        if old.get("answer") and not record.get("answer"):
+                            record["answer"] = old["answer"]
                         if old.get("outcome_recorded_at") and old["outcome_recorded_at"] >= (record.get("ended_at") or ""):
                             for field in ("status", "analysis_status", "delivery_status", "failure_notice_status", "outcome_recorded_at", "warnings", "errors"):
                                 record[field] = old.get(field)
