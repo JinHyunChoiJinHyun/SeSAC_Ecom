@@ -1,2 +1,2 @@
-"""SeSAC Ecom 관리자 웹앱."""
+"""CART_SIGNAL 관리자 웹앱."""
 

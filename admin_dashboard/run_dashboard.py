@@ -97,7 +97,7 @@ def main(argv=None):
     # -----------------------------------------------------
     # 실행 옵션, 프로젝트 경로 및 정적 파일 검증
     # -----------------------------------------------------
-    parser = argparse.ArgumentParser(description="SeSAC Ecom 관리자 대시보드 실행")
+    parser = argparse.ArgumentParser(description="CART_SIGNAL 관리자 대시보드 실행")
     parser.add_argument("--project", help="프로젝트 경로. 생략하면 자동 탐색")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--local-only", action="store_true", help="내 PC에서만 접속")

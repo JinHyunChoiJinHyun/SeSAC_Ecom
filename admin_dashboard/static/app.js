@@ -27,14 +27,27 @@
   // =========================================================
   const labels = { completed: '분석 완료', failed: '실패·오류', running: '처리 중', unverified: '검증 필요', unfinished: '종료 미확인', unknown: '확인 불가' };
   const deliveryLabels = { success: '전송 완료', partial_success: '일부 실패', failed: '전송 실패', unknown: '미기록' };
-  const viewLabels = { overview: ['운영 현황', 'OVERVIEW', '분석 요청의 흐름과 처리 결과를 확인하세요.'], requests: ['요청 내역', 'REQUESTS', '질문부터 최종 결과까지, 요청별 처리 기록을 살펴보세요.'], errors: ['오류 모니터링', 'ERROR MONITOR', '분석 실패와 오류 신호가 남은 요청을 확인하세요.'], guide: ['연결 안내', 'GETTING STARTED', '기존 프로젝트와 안전하게 연결하는 방법을 확인하세요.'], retrain: ['모델 재학습', 'PURCHASE MODEL', '구매 예측 모델을 새로 학습하고, 자동 점검을 확인한 뒤 적용하세요.'], external: ['외부 데이터', 'EXTERNAL DATA', '무신사·네이버·유튜브 수집 상태와 최신 데이터를 확인하고, 필요하면 수집을 직접 실행하세요.'] };
+  const viewLabels = { overview: ['운영 현황', '요청 처리 결과와 에이전트 실행, 데이터·모델 상태를 한눈에 확인하세요.'], requests: ['요청 내역', '질문부터 최종 답변까지, 요청별 처리 기록을 살펴보세요.'], errors: ['오류 모니터링', '실패하거나 오류가 남은 요청을 확인하세요.'], guide: ['연결 안내', '대시보드 실행 방법과 기록을 읽는 방식을 확인하세요.'], models: ['모델 관리', '대화에 쓰는 LLM과 고객 타깃 선정에 쓰는 구매 예측 모델을 관리하세요.'], external: ['외부 데이터', '네이버·유튜브·무신사 수집 상태와 최신 데이터를 확인하고, 필요하면 직접 수집하세요.'] };
+  // 요청 기록을 쓰지 않는 화면
+  const toolViews = ['guide', 'models', 'external'];
+  // 실행 흐름 중 에이전트로 집계할 이름 (그 밖의 '입력 대기'·'Slack 전달' 같은 단계는 제외)
+  const AGENTS = ['총괄 에이전트', '시장 분석', '상품 분석', '고객 타깃 선정', '콘텐츠 생성', '검증', '결과 정리', '캠페인 실행', '일반 분석'];
+  // 질문 앞의 Slack 멘션을 지우고, 버튼·메일·파일 요청은 유형 표시로 바꿉니다.
+  function questionParts(raw) {
+    let text = String(raw ?? '').replace(/<@[A-Z0-9]+>/g, '').trim();
+    const kinds = [['[메일 버튼]', '메일', 'mail'], ['[파일 첨부]', '파일', 'file'], ['[버튼]', '버튼', '']];
+    for (const [prefix, label, cls] of kinds) {
+      if (text.startsWith(prefix)) return { tag: label, cls, text: text.slice(prefix.length).trim() || label };
+    }
+    return { tag: '', cls: '', text: text || '질문 기록 없음' };
+  }
+  const questionHTML = raw => { const q = questionParts(raw); return `${q.tag ? `<span class="q-tag ${q.cls}">${esc(q.tag)}</span>` : ''}${esc(q.text)}`; };
   const state = { view: 'overview', page: 1, pageSize: 12, data: null, loading: false, sequence: 0, selected: null, detailSequence: 0, controller: null, timer: null, previousFocus: null, period: '30', dateContext: null, periodTimer: null };
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const number = n => new Intl.NumberFormat('ko-KR').format(n);
   const seconds = n => typeof n === 'number' && Number.isFinite(n) ? n.toFixed(1) : '—';
   const badge = status => `<span class="badge ${Object.hasOwn(labels, status) ? status : 'unknown'}">${esc(labels[status] || '확인 불가')}</span>`;
   const deliveryText = status => deliveryLabels[status] || '미기록';
-  const sourceText = source => ({ log: '기존 로그', telemetry: '운영 기록' }[source] || '미기록');
 
   // =========================================================
   // 현재 화면과 입력값을 API 검색 조건으로 변환
@@ -115,13 +128,15 @@
   let modelOptions = [], modelBusy = false;
   function renderModelSettings(data) {
     modelOptions = data.options;
-    const currentOption = modelOptions.find(item => item.provider === data.current.provider && item.model === data.current.model);
-    $('llm-current').textContent = `${currentOption?.label || data.current.provider} · ${data.current.model}`;
+    // 설정 파일이 잘못되면 current가 없습니다. 이때도 모델을 다시 골라 적용할 수 있게 둡니다.
+    const current = data.current;
+    const currentOption = current && modelOptions.find(item => item.provider === current.provider && item.model === current.model);
+    $('llm-current').textContent = current ? `${currentOption?.label || current.provider} · ${current.model}` : '설정 오류 · 모델을 다시 골라 적용해 주세요';
     $('llm-choice').replaceChildren(...modelOptions.map(item => {
       const option = document.createElement('option');
       option.value = item.provider;
       option.textContent = `${item.label} · ${item.model}${item.available ? '' : ' (API 키 미설정)'}`;
-      option.selected = item.provider === data.current.provider;
+      option.selected = !!current && item.provider === current.provider;
       return option;
     }));
     $('llm-choice').disabled = false;
@@ -189,6 +204,7 @@
       if (state.page > 1 && data.items.length === 0) { state.page = Math.max(1, Math.ceil(data.total / state.pageSize)); return load(); }
       state.data = data;
       render(data, query);
+      if (state.view === 'overview') loadOverviewCards();
       $('connection-error').hidden = true;
       $('updated-at').textContent = `최근 갱신 ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       if (quiet && state.selected && $('detail-dialog').open) showDetail(state.selected, true);
@@ -209,8 +225,7 @@
   // =========================================================
   function render(data, query) {
     const s = data.summary, counts = s.counts;
-    $('mode-chip').textContent = 'PROJECT LOGS';
-    $('side-mode').textContent = `프로젝트 기록 · 로그 ${data.log_files}개`;
+    $('side-mode').textContent = `운영 로그 ${data.log_files}개 연결됨`;
     $('metric-total').innerHTML = `${number(s.total)}<small>건</small>`;
     $('metric-completed').innerHTML = `${number(counts.completed || 0)}<small>건</small>`;
     $('metric-failed').innerHTML = `${number(counts.failed || 0)}<small>건</small>`;
@@ -218,14 +233,17 @@
     $('duration-note').textContent = `소요 시간 기록 ${number(s.duration_count)}건 기준`;
     $('completed-ratio').textContent = s.total ? `${Math.round((counts.completed || 0) / s.total * 100)}%` : '—';
     $('delivery-failed').textContent = `${s.delivery_failed}건`;
-    // 오류 모니터링은 실패만 거른 건수라 사이드바 '요청 내역' 숫자를 바꾸지 않습니다.
-    if (state.view !== 'errors') $('nav-count').textContent = number(data.total);
-    $('status-strip').innerHTML = `<span>처리 중 <b>${counts.running || 0}</b></span><span class="strip-divider"></span><span>검증 필요 <b>${counts.unverified || 0}</b></span><span>종료 미확인 <b>${counts.unfinished || 0}</b></span><span>확인 불가 <b>${counts.unknown || 0}</b></span><span>· 종료 기록만으로 분석 성공을 확정하지 않습니다.</span>`;
+    const pill = (label, n) => `<span class="pill">${esc(label)} <b>${number(n || 0)}</b></span>`;
+    $('status-strip').innerHTML = `${pill('처리 중', counts.running)}${pill('검증 필요', counts.unverified)}${pill('종료 미확인', counts.unfinished)}${pill('확인 불가', counts.unknown)}<span class="note">종료 기록만으로 분석 성공을 확정하지 않습니다.</span>`;
     drawTrend(s.timeline);
-    const entries = Object.entries(s.agents).sort((a, b) => b[1] - a[1]).slice(0, 6), max = Math.max(1, ...entries.map(x => x[1]));
-    $('agent-chart').innerHTML = entries.length ? entries.map(([name, value]) => `<div class="agent-row"><span>${esc(name)}</span><div class="agent-track"><span class="agent-fill" style="width:${value / max * 100}%"></span></div><b>${number(value)}</b></div>`).join('') : '<div class="chart-empty">실행 단계 기록 없음</div>';
+    drawAgents(s.agents);
     $('table-count').textContent = number(data.total);
-    $('request-body').innerHTML = data.items.map(r => `<tr><td class="question-cell"><button class="question-button" data-request="${esc(r.id)}">${esc(r.question)}</button><span class="request-id">${esc(r.id)} · ${esc(r.channel)} · ${sourceText(r.origin)}</span></td><td>${badge(r.status)}</td><td><span class="delivery-${r.delivery_status === 'success' ? 'success' : ['failed', 'partial_success'].includes(r.delivery_status) ? 'failed' : 'unknown'}">${deliveryText(r.delivery_status)}</span></td><td>${r.started_at ? `<span>${esc(r.started_at.slice(5, 10).replace('-', '.'))}</span> <span>${esc(r.started_at.slice(11, 16))}</span>` : '미기록'}</td><td class="align-right">${seconds(r.duration)}${r.duration != null ? '초' : ''}</td><td><button class="row-open" data-request="${esc(r.id)}" aria-label="${esc(r.id)} 상세 보기">↗</button></td></tr>`).join('');
+    $('request-body').innerHTML = data.items.map(r => {
+      // Slack 전달은 실패·일부 실패만 강조하고, 나머지는 흐리게 표시합니다.
+      const bad = ['failed', 'partial_success'].includes(r.delivery_status);
+      const when = r.started_at ? `${r.started_at.slice(5, 10).replace('-', '.')} ${r.started_at.slice(11, 16)}` : '미기록';
+      return `<tr><td class="question-cell"><div class="question-line"><button class="question-button" data-request="${esc(r.id)}" title="${esc(questionParts(r.question).text)}">${questionHTML(r.question)}</button></div><span class="request-id">${esc(r.id)}${r.llm_model ? ` · ${esc(r.llm_model)}` : ''}</span></td><td>${badge(r.status)}</td><td><span class="${bad ? 'delivery-failed' : 'delivery-muted'}">${deliveryText(r.delivery_status)}</span></td><td>${esc(when)}</td><td class="align-right">${seconds(r.duration)}${r.duration != null ? '초' : ''}</td><td><button class="row-open" data-request="${esc(r.id)}" aria-label="${esc(r.id)} 상세 보기">↗</button></td></tr>`;
+    }).join('');
     $('empty-state').hidden = data.items.length !== 0;
     $('empty-state').querySelector('h3').textContent = '표시할 요청이 없습니다';
     $('page-info').textContent = data.total ? `전체 ${number(data.total)}건 중 ${number((state.page - 1) * state.pageSize + 1)}–${number(Math.min(state.page * state.pageSize, data.total))}건` : '0건';
@@ -243,18 +261,102 @@
   // =========================================================
   // 일별 요청·실패 건수를 SVG 차트로 표현
   // =========================================================
-  function drawTrend(days) {
+  // 차트 공통 색: 기본 계열은 브랜드 그린, 실패는 상태 레드(아이콘·범례와 함께 씀)
+  const CHART = { line: '#2e9b63', bad: '#c8322a', grid: '#e3ebe6', axis: '#56655d' };
+
+  // 요청이 없는 날을 0건으로 채워 날짜 간격이 실제와 같게 보이도록 합니다.
+  function fillDays(days) {
+    if (!days.length) return days;
+    const start = $('start-date').value || days[0].date, end = $('end-date').value || days[days.length - 1].date;
+    const byDate = Object.fromEntries(days.map(d => [d.date, d]));
+    const out = [], cursor = new Date(`${start}T00:00:00Z`), last = new Date(`${end}T00:00:00Z`);
+    for (let i = 0; cursor <= last && i < 800; i++) {
+      const key = cursor.toISOString().slice(0, 10);
+      out.push(byDate[key] || { date: key, total: 0, failed: 0 });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+    return out.length ? out : days;
+  }
+
+  // 마우스 위치의 가장 가까운 날짜를 툴팁으로 보여 줍니다(차트마다 하나).
+  function attachHover(container, points, x, text) {
+    const svg = container.querySelector('svg'); if (!svg) return;
+    let tip = container.querySelector('.chart-tip');
+    if (!tip) { tip = document.createElement('div'); tip.className = 'chart-tip'; tip.hidden = true; container.appendChild(tip); }
+    const guide = svg.querySelector('.hover-guide');
+    svg.addEventListener('pointermove', event => {
+      const box = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal, px = (event.clientX - box.left) * vb.width / box.width;
+      let best = 0; points.forEach((_, i) => { if (Math.abs(x(i) - px) < Math.abs(x(best) - px)) best = i; });
+      if (guide) { guide.setAttribute('x1', x(best)); guide.setAttribute('x2', x(best)); guide.style.display = ''; }
+      tip.innerHTML = text(points[best]); tip.hidden = false;
+      tip.style.left = `${x(best) * box.width / vb.width + svg.getBoundingClientRect().left - container.getBoundingClientRect().left}px`;
+      tip.style.top = `${event.clientY - container.getBoundingClientRect().top}px`;
+    });
+    svg.addEventListener('pointerleave', () => { tip.hidden = true; if (guide) guide.style.display = 'none'; });
+  }
+
+  function drawTrend(raw) {
     const container = $('trend-chart');
-    if (!days.length) { container.innerHTML = '<div class="chart-empty">선택한 기간에 요청 기록이 없습니다.</div>'; return; }
-    const w = Math.max(250, container.clientWidth - 26), h = 188, left = 33, right = 17, top = 16, bottom = 28;
-    const max = Math.max(1, ...days.map(d => d.total)), ceiling = Math.max(2, Math.ceil(max / 4) * 4);
+    if (!raw.length) { container.innerHTML = '<div class="chart-empty">선택한 기간에 요청 기록이 없습니다.</div>'; return; }
+    const days = fillDays(raw);
+    const w = Math.max(260, container.clientWidth - 32), h = 210, left = 34, right = 12, top = 12, bottom = 26;
+    const max = Math.max(1, ...days.map(d => d.total)), ceiling = Math.max(4, Math.ceil(max / 4) * 4);
     const x = i => days.length === 1 ? (left + w - right) / 2 : left + i / (days.length - 1) * (w - left - right);
     const y = value => h - bottom - value / ceiling * (h - bottom - top);
-    const line = key => days.map((d, i) => `${i ? 'L' : 'M'}${x(i)},${y(d[key])}`).join(' ');
+    const line = key => days.map((d, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(d[key]).toFixed(1)}`).join(' ');
     const ticks = Array.from({ length: 5 }, (_, i) => ceiling * i / 4);
-    const step = Math.max(1, Math.ceil(days.length / (w < 350 ? 3 : 6)));
-    const marks = days.map((d, i) => `<circle cx="${x(i)}" cy="${y(d.total)}" r="3" fill="#7d86ec"><title>${esc(d.date)}: 전체 ${d.total}건, 오류 ${d.failed}건</title></circle><circle cx="${x(i)}" cy="${y(d.failed)}" r="2.3" fill="#e3a0ad"/>`).join('');
-    container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="일별 요청 수. ${esc(days.map(d => `${d.date} 전체 ${d.total}건 오류 ${d.failed}건`).join(', '))}">${ticks.map(v => `<line x1="${left}" y1="${y(v)}" x2="${w - right}" y2="${y(v)}" stroke="#edf0f6"/><text x="${left - 10}" y="${y(v) + 3}" text-anchor="end" fill="#adb6c7" font-size="9">${v}</text>`).join('')}<text x="${left - 10}" y="8" text-anchor="end" fill="#adb6c7" font-size="9">건</text><path d="${line('total')} L${x(days.length - 1)},${h - bottom} L${x(0)},${h - bottom}Z" fill="#7b83ed" opacity=".06"/><path d="${line('total')}" fill="none" stroke="#7b83ed" stroke-width="2"/><path d="${line('failed')}" fill="none" stroke="#e3a0ad" stroke-width="1.5"/>${marks}${days.map((d, i) => i % step === 0 || i === days.length - 1 ? `<text x="${x(i)}" y="${h - 6}" text-anchor="${i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'}" font-size="9" fill="#a3aec2">${esc(d.date.slice(5).replace('-', '.'))}</text>` : '').join('')}</svg>`;
+    const step = Math.max(1, Math.ceil(days.length / (w < 420 ? 4 : 7)));
+    // 요청이 있었던 날만 점을 찍습니다(0건 날은 선만).
+    const dots = days.map((d, i) => d.total ? `<circle cx="${x(i)}" cy="${y(d.total)}" r="4" fill="${CHART.line}" stroke="#fff" stroke-width="2"/>` : '').join('')
+      + days.map((d, i) => d.failed ? `<circle cx="${x(i)}" cy="${y(d.failed)}" r="4" fill="${CHART.bad}" stroke="#fff" stroke-width="2"/>` : '').join('');
+    container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="일별 요청 수. ${esc(raw.map(d => `${d.date} 전체 ${d.total}건 실패 ${d.failed}건`).join(', '))}">`
+      + ticks.map(v => `<line x1="${left}" y1="${y(v)}" x2="${w - right}" y2="${y(v)}" stroke="${CHART.grid}"/><text x="${left - 8}" y="${y(v) + 4}" text-anchor="end" fill="${CHART.axis}" font-size="11">${v}</text>`).join('')
+      + `<line class="hover-guide" x1="0" y1="${top}" x2="0" y2="${h - bottom}" stroke="#9fb6a9" stroke-dasharray="3 3" style="display:none"/>`
+      + `<path d="${line('total')}" fill="none" stroke="${CHART.line}" stroke-width="2" stroke-linejoin="round"/><path d="${line('failed')}" fill="none" stroke="${CHART.bad}" stroke-width="2" stroke-linejoin="round"/>${dots}`
+      + days.map((d, i) => (i % step === 0 && days.length - 1 - i >= step / 2) || i === days.length - 1 ? `<text x="${x(i)}" y="${h - 6}" text-anchor="${days.length === 1 ? 'middle' : i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'}" font-size="11" fill="${CHART.axis}">${esc(d.date.slice(5).replace('-', '.'))}</text>` : '').join('')
+      + '</svg>';
+    attachHover(container, days, x, d => `<b>${esc(d.date)}</b><br>전체 ${number(d.total)}건 · 실패 ${number(d.failed)}건`);
+  }
+
+  // 현재 구조의 에이전트만 집계합니다(예전 Supervisor 구조의 단계와 'Slack 전달' 같은 단계는 제외).
+  function drawAgents(agents) {
+    const totals = {};
+    Object.entries(agents || {}).forEach(([name, n]) => {
+      const base = name.replace(/ \(실패\)$/, '');
+      if (AGENTS.includes(base)) totals[base] = (totals[base] || 0) + n;
+    });
+    const rows = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+    const max = Math.max(1, ...rows.map(r => r[1]));
+    $('agent-chart').innerHTML = rows.length
+      ? rows.map(([name, value]) => `<div class="agent-row" title="${esc(name)} ${number(value)}회"><span>${esc(name)}</span><div class="agent-track"><span class="agent-fill" style="width:${value / max * 100}%"></span></div><b>${number(value)}</b></div>`).join('')
+      : '<div class="chart-empty">기간 안에 기록된 에이전트 실행이 없습니다.</div>';
+  }
+
+  // =========================================================
+  // 운영 현황 요약 카드: 최근 오류, 외부 데이터, 사용 중인 모델
+  // =========================================================
+  async function loadOverviewCards() {
+    const [errors, external, llm, retrain] = await Promise.allSettled([
+      fetchJSON(`/api/requests?${new URLSearchParams({ status: 'failed', start: $('start-date').value, end: $('end-date').value, page: 1, page_size: 5 })}`),
+      fetchJSON('/api/external/status'), fetchJSON('/api/model-settings'), fetchJSON('/api/retrain/status')]);
+    if (state.view !== 'overview') return;
+    if (errors.status === 'fulfilled') {
+      const items = errors.value.items;
+      $('ov-errors-card').classList.toggle('highlight', items.length > 0);
+      $('ov-errors').innerHTML = items.length
+        ? items.map(r => `<li><div class="ov-main"><button data-request="${esc(r.id)}">${esc(questionParts(r.question).text)}</button><small>${esc((r.started_at || '').slice(5, 16).replace('-', '.'))} · ${esc(r.id)}</small></div>${badge(r.status)}</li>`).join('')
+        : '<li class="ov-empty">선택한 기간에 실패한 요청이 없습니다.</li>';
+    } else $('ov-errors').innerHTML = `<li class="ov-empty">불러오지 못했습니다: ${esc(errors.reason.message)}</li>`;
+    if (external.status === 'fulfilled') {
+      $('ov-external').innerHTML = external.value.collectors.map(c => {
+        const d = c.data, fresh = c.running ? ['실행 중', 'running'] : !d.exists ? ['없음', 'failed'] : c.stale ? ['오래됨', 'unverified'] : ['최신', 'completed'];
+        return `<li><div class="ov-main"><span>${esc(c.title)}</span><small>${d.collected ? `${esc(d.collected)} · ${c.days_old === 0 ? '오늘' : `${c.days_old}일 전`}` : '데이터 없음'}</small></div><span class="badge ${fresh[1]}">${esc(fresh[0])}</span></li>`;
+      }).join('');
+    } else $('ov-external').innerHTML = `<li class="ov-empty">불러오지 못했습니다: ${esc(external.reason.message)}</li>`;
+    const cur = llm.status === 'fulfilled' ? llm.value.current : null;
+    const label = cur ? `${(llm.value.options.find(o => o.provider === cur.provider) || {}).label || cur.provider} · ${cur.model}` : '설정 확인 필요';
+    const serving = retrain.status === 'fulfilled' ? retrain.value.serving_model : null;
+    $('ov-model').innerHTML = `<span class="muted">LLM</span><strong>${esc(label)}</strong><span class="muted" style="margin-top:6px">구매 예측 모델</span><strong>${serving ? `${esc(serving.as_of)} 기준` : '없음'}</strong>${serving ? `<small class="muted">${esc(serving.run_id)} · 조합 ${serving.combos != null ? number(serving.combos) : '—'}개</small>` : ''}`;
   }
 
   // =========================================================
@@ -282,9 +384,25 @@
         const url = `/api/files/${encodeURIComponent(r.id)}/${encodeURIComponent(f.id)}`;
         return `<div class="file-entry"><div><strong>${esc(f.name)}</strong><small>${esc(f.kind.toUpperCase())} · ${bytes(f.size)}</small></div><a href="${url}?download=true">다운로드 ↓</a></div>${['png', 'jpg', 'jpeg'].includes(f.kind) ? `<img class="chart-preview" src="${url}" alt="${esc(f.name)} 분석 차트" loading="lazy">` : ''}`;
       }).join('');
-      const originMessage = r.origin === 'log' ? '기존 로그에 최종 답변 본문이 없습니다. 현재 로그만으로는 확인할 수 없습니다.' : r.status === 'running' ? '요청을 처리하고 있습니다. 자동 갱신을 켜면 상태를 다시 확인합니다.' : '저장된 최종 답변이 없습니다.';
+      const originMessage = r.status === 'running' ? '요청을 처리하고 있습니다. 자동 갱신을 켜면 상태를 다시 확인합니다.' : '이 요청의 답변은 로그에 기록되지 않았습니다. 답변 기록 기능을 넣기 전의 요청이거나 답변 없이 끝난 요청입니다.';
       const oldOpen = quiet ? Array.from($('detail-content').querySelectorAll('details')).map(x => x.open) : [];
-      $('detail-content').innerHTML = `<div class="detail-inner"><div class="detail-statuses">${badge(r.status)}<span class="badge">Slack · ${deliveryText(r.delivery_status)}</span><span class="badge">${sourceText(r.origin)}</span></div><p class="detail-question">${esc(r.question)}</p><div class="detail-meta"><span>접수 ${esc(r.started_at || '미기록')}</span><span>종료 ${esc(r.ended_at || '미기록')}</span><span>소요 ${seconds(r.duration)}${r.duration == null ? '' : '초'}</span><span>채널 ${esc(r.channel)}</span><span>사용 모델 ${esc(r.llm_provider || '미기록')} · ${esc(r.llm_model || '미기록')}</span><span>처리 로그 ${esc(r.handler_status)}</span></div>${(r.warnings || []).map(w => `<p class="detail-warning">${esc(w)}</p>`).join('')}<section class="detail-section"><h3>최종 답변</h3><div class="answer-block ${r.answer ? '' : 'absent'}">${esc(r.answer || originMessage)}</div></section><section class="detail-section"><h3>실행 흐름</h3><div class="stage-list">${r.stages.length ? r.stages.map((s, i) => `${i ? '<span class="stage-arrow">→</span>' : ''}<span class="stage">${esc(s.name)}</span>`).join('') : '<p class="detail-empty">실행 단계 기록 없음</p>'}</div></section><section class="detail-section"><h3>생성 파일</h3>${files || `<p class="detail-empty">${'요청에 연결된 파일 기록이 없거나 파일이 존재하지 않습니다.'}</p>`}</section>${r.errors?.length ? `<section class="detail-section"><h3>오류 신호</h3>${r.errors.map(e => `<p class="error-line">${esc(e)}</p>`).join('')}</section>` : ''}<details><summary>Supervisor 판단 이유</summary><pre class="code-block">${esc(r.decisions?.join('\n\n') || '판단 이유 기록 없음')}</pre></details><details><summary>생성 SQL</summary><pre class="code-block">${esc(r.sql || 'SQL 기록 없음')}</pre></details><details><summary>상세 로그 · 최근 최대 2,000줄</summary><pre class="code-block">${esc(r.logs?.map(l => `${l.time} | ${l.level} | ${l.message}`).join('\n') || '로그 기록 없음')}</pre></details></div>`;
+      const stageClass = name => /\(실패\)$|^중단/.test(name) ? ' bad' : /^입력 대기/.test(name) ? ' wait' : '';
+      const meta = [['접수', r.started_at || '미기록'], ['종료', r.ended_at || '미기록'], ['소요', r.duration == null ? '—' : `${seconds(r.duration)}초`],
+        ['Slack 전달', deliveryText(r.delivery_status)], ['LLM', r.llm_model ? `${r.llm_provider || ''} · ${r.llm_model}` : '미기록'], ['채널', r.channel]];
+      const q = questionParts(r.question);
+      $('detail-content').innerHTML = `<div class="detail-inner">
+        <div class="detail-statuses">${badge(r.status)}${q.tag ? `<span class="q-tag ${q.cls}">${esc(q.tag)}</span>` : ''}</div>
+        <p class="detail-question">${esc(q.text)}</p>
+        <dl class="detail-meta">${meta.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>
+        ${(r.warnings || []).map(w => `<p class="detail-warning">${esc(w)}</p>`).join('')}
+        <section class="detail-section"><h3>최종 답변</h3><div class="answer-block ${r.answer ? '' : 'absent'}">${esc(r.answer || originMessage)}</div></section>
+        <section class="detail-section"><h3>실행 흐름</h3><div class="stage-list">${r.stages.length ? r.stages.map((s, i) => `${i ? '<span class="stage-arrow">→</span>' : ''}<span class="stage${stageClass(s.name)}">${esc(s.name)}</span>`).join('') : '<p class="detail-empty">실행 단계 기록 없음</p>'}</div></section>
+        <section class="detail-section"><h3>판단 이유</h3>${r.decisions?.length ? r.decisions.map(d => `<div class="decision">${esc(d)}</div>`).join('') : '<p class="detail-empty">판단 이유 기록 없음</p>'}</section>
+        <section class="detail-section"><h3>생성 파일</h3>${files || '<p class="detail-empty">이 요청에서 만든 파일이 없습니다.</p>'}</section>
+        ${r.errors?.length ? `<section class="detail-section"><h3>오류 신호 <span class="count-chip">${r.errors.length}</span></h3>${r.errors.map(e => `<p class="error-line">${esc(e)}</p>`).join('')}</section>` : ''}
+        ${r.sql ? `<details><summary>생성 SQL</summary><pre class="code-block">${esc(r.sql)}</pre></details>` : ''}
+        <details><summary>상세 로그 · 최근 최대 2,000줄</summary><pre class="code-block">${esc(r.logs?.map(l => `${l.time} | ${l.level} | ${l.message}`).join('\n') || '로그 기록 없음')}</pre></details>
+      </div>`;
       if (quiet) $('detail-content').querySelectorAll('details').forEach((x, i) => { x.open = oldOpen[i]; });
     } catch (error) {
       if (seq === state.detailSequence && $('detail-dialog').open) $('detail-content').innerHTML = `<div class="loading-block">${esc(error.message)}<p>창을 닫고 요청을 다시 선택해 주세요.</p></div>`;
@@ -296,16 +414,20 @@
   // =========================================================
   function setView(view) {
     state.view = view; state.page = 1;
-    const [title, eyebrow, subtitle] = viewLabels[view];
-    $('page-title').textContent = title; $('breadcrumb-title').textContent = title; $('eyebrow').textContent = eyebrow; $('page-subtitle').textContent = subtitle;
-    document.querySelectorAll('[data-view]').forEach(b => { const active = b.dataset.view === view; b.classList.toggle('active', active); if (active) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
-    const dataView = !['guide', 'retrain', 'external'].includes(view);
-    $('guide-view').hidden = view !== 'guide'; $('retrain-view').hidden = view !== 'retrain'; $('external-view').hidden = view !== 'external'; $('data-view').hidden = !dataView;
-    $('charts-section').hidden = view !== 'overview'; $('metrics').hidden = view === 'requests'; $('status-strip').hidden = view === 'requests';
+    const [title, subtitle] = viewLabels[view];
+    $('page-title').textContent = title; $('breadcrumb-title').textContent = title; $('page-subtitle').textContent = subtitle;
+    document.title = `${title} · CART_SIGNAL`;
+    document.querySelectorAll('.nav-item[data-view]').forEach(b => { const active = b.dataset.view === view; b.classList.toggle('active', active); if (active) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    const dataView = !toolViews.includes(view), overview = view === 'overview';
+    $('guide-view').hidden = view !== 'guide'; $('models-view').hidden = view !== 'models'; $('external-view').hidden = view !== 'external'; $('data-view').hidden = !dataView;
+    // 운영 현황은 요약만, 요청 내역·오류 모니터링은 목록 중심으로 보여 줍니다.
+    $('charts-section').hidden = !overview; $('ov-section').hidden = !overview; $('requests-panel').hidden = overview;
+    // 지표 카드는 전체 요청 기준이라 운영 현황에서만 보여 줍니다(오류 화면은 실패만 걸러 의미가 달라짐).
+    $('metrics').hidden = !overview; $('status-strip').hidden = !overview;
     $('status-filter').disabled = view === 'errors';
-    $('table-title').firstChild.textContent = view === 'errors' ? '오류 요청 ' : view === 'requests' ? '요청 내역 ' : '최근 요청 ';
+    $('table-title').firstChild.textContent = view === 'errors' ? '오류 요청 ' : '요청 내역 ';
     $('export').hidden = !dataView;
-    if (view === 'retrain') loadRetrain(); else stopRetrainPolling();
+    if (view === 'models') { loadModelSettings(); loadRetrain(); } else stopRetrainPolling();
     if (view === 'external') loadExternal(true); else stopExternalPolling();
     if (dataView) load();
   }
@@ -338,15 +460,17 @@
     if (await load(true)) window.location.assign($('export').href);
   });
   $('clear-filters').addEventListener('click', resetFilters);
-  $('refresh').addEventListener('click', () => state.view === 'retrain' ? loadRetrain() : state.view === 'external' ? loadExternal(true) : load()); $('retry').addEventListener('click', () => load());
+  $('refresh').addEventListener('click', () => state.view === 'models' ? (loadModelSettings(), loadRetrain()) : state.view === 'external' ? loadExternal(true) : load()); $('retry').addEventListener('click', () => load());
   $('prev-page').addEventListener('click', () => { if (state.page > 1) { state.page--; load(); } });
   $('next-page').addEventListener('click', () => { if (state.data && state.page * state.pageSize < state.data.total) { state.page++; load(); } });
   $('request-body').addEventListener('click', event => { const b = event.target.closest('[data-request]'); if (b) showDetail(b.dataset.request); });
-  document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+  $('ov-errors').addEventListener('click', event => { const b = event.target.closest('[data-request]'); if (b) showDetail(b.dataset.request); });
+  document.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => setView(b.dataset.go)));
+  document.querySelectorAll('.nav-item[data-view]').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
   $('close-detail').addEventListener('click', () => $('detail-dialog').close());
   $('detail-dialog').addEventListener('click', event => { if (event.target === $('detail-dialog')) { const r = event.target.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) event.target.close(); } });
   $('detail-dialog').addEventListener('close', () => { state.selected = null; state.detailSequence++; state.previousFocus?.focus(); });
-  $('auto-refresh').addEventListener('change', () => { clearInterval(state.timer); if ($('auto-refresh').checked) { state.timer = setInterval(() => { if (!document.hidden && !['guide', 'retrain', 'external'].includes(state.view) && !state.loading) load(true); }, 10000); toast('화면이 열려 있는 동안 10초마다 갱신합니다.'); } });
+  $('auto-refresh').addEventListener('change', () => { clearInterval(state.timer); if ($('auto-refresh').checked) { state.timer = setInterval(() => { if (!document.hidden && !toolViews.includes(state.view) && !state.loading) load(true); }, 10000); toast('화면이 열려 있는 동안 10초마다 갱신합니다.'); } });
   // =========================================================
   // 화면 크기 변경에 따른 차트 갱신
   // =========================================================
@@ -355,9 +479,9 @@
   // =========================================================
   // 구매 예측 모델 재학습: 상태 조회, 시작, 적용·버리기, 이력
   // =========================================================
-  const rtLabels = { training: ['학습 중', 'running'], checking: ['자동 점검 중', 'running'], ready: ['적용 대기', 'unverified'], applied: ['적용 완료', 'completed'], discarded: ['버림', 'unknown'], failed: ['실패', 'failed'] };
+  const rtLabels = { training: ['학습 중', 'running'], checking: ['자동 점검 중', 'running'], ready: ['적용 대기', 'unverified'], applied: ['적용 완료', 'completed'], discarded: ['버림', 'unknown'], failed: ['실패', 'failed'], rolled_back: ['되돌림', 'unknown'] };
   const levelLabels = { ok: '통과', warn: '경고', block: '적용 불가', info: '안내' };
-  const rt = { job: null, timer: null, busy: false, seq: 0 };
+  const rt = { job: null, timer: null, busy: false, seq: 0, serving: null, servingAsOf: null };
   const rtBadge = status => { const [text, cls] = rtLabels[status] || ['확인 불가', 'unknown']; return `<span class="badge ${cls}">${esc(text)}</span>`; };
   const localTime = iso => iso ? new Date(iso).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
   function stopRetrainPolling() { clearTimeout(rt.timer); rt.timer = null; rt.seq++; }
@@ -373,24 +497,33 @@
     return data;
   }
 
-  function renderCurrentModel(m, available) {
+  function renderCurrentModel(latest, available, serving, servingAsOf) {
+    // 상단 카드는 에이전트가 실제로 쓰는 모델(점수 기준일 이하 최신)을 보여 줍니다.
+    const m = serving;
+    rt.serving = serving; rt.servingAsOf = servingAsOf;
     const rows = !available ? [['상태', '이 프로젝트에는 구매 예측 모델 코드가 없습니다.']]
-      : !m ? [['상태', '저장된 모델이 없습니다. 먼저 학습해 주세요.']]
+      : !m ? [['상태', latest ? `에이전트 점수 기준일(${servingAsOf}) 이하로 학습된 모델이 없습니다.` : '저장된 모델이 없습니다. 먼저 학습해 주세요.']]
       : [['기준일 (as_of)', m.as_of], ['run_id', m.run_id], ['학습 포함 조합', m.combos != null ? `${number(m.combos)}개` : '—'], ['데이터 완료일', m.complete_through || '—'], ['데이터 마지막 거래일', m.data_max || '—'], ['저장된 모델 수', `${number(m.count)}개`]];
+    if (latest && (!m || latest.as_of !== m.as_of || latest.run_id !== m.run_id)) rows.push(['가장 최근 모델', `${latest.as_of} · ${latest.run_id} (에이전트 미사용)`]);
     $('rt-current').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    if (servingAsOf) $('rt-serving-note').textContent = `에이전트는 점수 기준일 ${servingAsOf} 이하로 학습된 모델 중 가장 최근 모델을 씁니다. 더 늦은 기준일로 학습한 모델은 적용해도 쓰이지 않습니다.`;
+    const active = rt.job && ['training', 'checking', 'ready'].includes(rt.job.status);
+    $('rt-rollback').hidden = !(m && m.can_rollback);
+    $('rt-rollback').disabled = !!active || rt.busy;
     $('rt-start').hidden = !available;
     if (m?.data_max) {
       const next = new Date(`${m.data_max}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
       const max = next.toISOString().slice(0, 10);
       $('rt-asof').max = max;
       if (!$('rt-asof').value) $('rt-asof').value = m.as_of;
-      $('rt-hint').textContent = `현재 모델 학습 데이터의 마지막 거래일은 ${m.data_max}이라 기준일은 최대 ${max}입니다(데이터가 늘었다면 더 늦은 날짜도 가능). 학습은 약 2.5분, 자동 점검은 약 30초 걸리며, 학습한 모델은 [적용]을 눌러야 쓰입니다.`;
+      $('rt-hint').textContent = `현재 모델 학습 데이터의 마지막 거래일은 ${m.data_max}이라 기준일은 최대 ${max}입니다. 에이전트는 기준일 ${servingAsOf || '—'} 이하 모델만 쓰므로 이보다 늦은 기준일은 적용해도 반영되지 않습니다. 학습은 약 2.5분, 자동 점검은 약 30초 걸리며, 학습한 모델은 [적용]을 눌러야 쓰입니다.`;
     }
   }
 
   function renderJob(job) {
     rt.job = job;
     $('rt-job-panel').hidden = !job;
+    $('rt-job-panel').classList.toggle('highlight', job?.status === 'ready');
     const active = job && ['training', 'checking', 'ready'].includes(job.status);
     $('rt-start').disabled = !!active || rt.busy;
     if (!job) return;
@@ -406,6 +539,7 @@
     if (job.train?.combos != null) facts.push(['학습 포함 조합', `${number(job.train.combos)}개`]);
     if (job.train?.seconds != null) facts.push(['학습 시간', `${seconds(job.train.seconds)}초`]);
     if (job.duplicate) facts.push(['참고', '같은 기준일 모델이 이미 있습니다. 적용하면 새 모델이 쓰입니다.']);
+    if (job.status === 'ready' && job.serves_agents === false) facts.push(['주의', `이 모델은 적용해도 에이전트가 쓰지 않습니다. 에이전트는 기준일 ${rt.servingAsOf || '—'} 이하 모델 중 가장 최근 모델을 씁니다.`]);
     $('rt-job').innerHTML = `<div class="retrain-steps">${steps}</div>${job.error ? `<p class="retrain-error">${esc(job.error)}</p>` : ''}<dl class="retrain-facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>`;
     const check = job.check;
     $('rt-checks').innerHTML = check
@@ -420,7 +554,7 @@
 
   function renderHistory(items) {
     $('rt-history').innerHTML = items.length
-      ? items.map(h => `<tr><td>${esc(localTime(h.started_at))}</td><td>${esc(h.as_of)}</td><td>${rtBadge(h.status)}${h.error ? `<span class="request-id" title="${esc(h.error)}">${esc(h.error.slice(0, 60))}</span>` : ''}</td><td class="align-right">${h.combos != null ? number(h.combos) : '—'}</td><td class="align-right">${h.warnings ?? '—'}</td><td class="align-right">${h.train_seconds != null ? `${seconds(h.train_seconds)}초` : '—'}</td></tr>`).join('')
+      ? items.map(h => `<tr><td>${esc(localTime(h.started_at))}</td><td>${esc(h.as_of)}</td><td>${rtBadge(h.status)}${h.error ? `<span class="request-id" title="${esc(h.error)}">${esc(h.error.slice(0, 60))}</span>` : ''}${h.restored ? `<span class="request-id">복원: ${esc(h.restored)}</span>` : ''}</td><td class="align-right">${h.combos != null ? number(h.combos) : '—'}</td><td class="align-right">${h.warnings ?? '—'}</td><td class="align-right">${h.train_seconds != null ? `${seconds(h.train_seconds)}초` : '—'}</td></tr>`).join('')
       : '<tr><td colspan="6">재학습 이력이 없습니다.</td></tr>';
   }
 
@@ -429,8 +563,9 @@
     const seq = rt.seq;
     try {
       const [status, history] = await Promise.all([fetchJSON('/api/retrain/status'), fetchJSON('/api/retrain/history')]);
-      if (seq !== rt.seq || state.view !== 'retrain') return;
-      renderCurrentModel(status.current_model, status.available);
+      if (seq !== rt.seq || state.view !== 'models') return;
+      rt.job = status.job;
+      renderCurrentModel(status.current_model, status.available, status.serving_model, status.serving_as_of);
       renderJob(status.job);
       renderHistory(history.items);
       // 조회가 성공하면 이전의 빨간 오류 문구만 지웁니다(적용·버리기 안내는 유지).
@@ -438,7 +573,7 @@
       $('updated-at').textContent = `최근 갱신 ${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
       if (status.job && ['training', 'checking'].includes(status.job.status)) rt.timer = setTimeout(loadRetrain, 3000);
     } catch (error) {
-      if (seq === rt.seq && state.view === 'retrain') { rtFeedback(error.message, true); rt.timer = setTimeout(loadRetrain, 10000); }
+      if (seq === rt.seq && state.view === 'models') { rtFeedback(error.message, true); rt.timer = setTimeout(loadRetrain, 10000); }
     }
   }
 
@@ -467,19 +602,27 @@
     finally { rt.busy = false; await loadRetrain(); }
   });
   $('rt-apply').addEventListener('click', () => {
-    if (!rt.job || !window.confirm(`기준일 ${rt.job.as_of} 새 모델(run_id ${rt.job.run_id})을 적용할까요?\n적용하면 다음 점수 계산부터 이 모델이 쓰입니다.`)) return;
-    retrainAction('/api/retrain/apply', { job_id: rt.job.job_id }, '적용했습니다. 다음 점수 계산부터 새 모델이 쓰입니다.');
+    if (!rt.job) return;
+    const serves = rt.job.serves_agents !== false;
+    const effect = serves ? '적용하면 다음 점수 계산부터 이 모델이 쓰입니다.' : `주의: 이 모델은 적용해도 에이전트가 쓰지 않습니다(에이전트 기준일 ${rt.servingAsOf || '—'}).`;
+    if (!window.confirm(`기준일 ${rt.job.as_of} 새 모델(run_id ${rt.job.run_id})을 적용할까요?\n${effect}`)) return;
+    retrainAction('/api/retrain/apply', { job_id: rt.job.job_id }, serves ? '적용했습니다. 다음 점수 계산부터 새 모델이 쓰입니다.' : '적용했습니다. 이 모델은 에이전트 점수 계산에는 쓰이지 않습니다.');
   });
   $('rt-discard').addEventListener('click', () => {
     if (!rt.job || !window.confirm('학습한 모델을 버릴까요? 대기 폴더의 모델 파일이 삭제됩니다.')) return;
     retrainAction('/api/retrain/discard', { job_id: rt.job.job_id }, '버렸습니다. 현재 모델은 그대로입니다.');
   });
   $('rt-dismiss').addEventListener('click', () => { if (rt.job) retrainAction('/api/retrain/dismiss', { job_id: rt.job.job_id }, ''); });
+  $('rt-rollback').addEventListener('click', () => {
+    const m = rt.serving;
+    if (!m || !window.confirm(`에이전트가 쓰는 모델(${m.as_of} · ${m.run_id})을 보관 폴더로 옮기고 이전 모델로 되돌릴까요?\n모델 파일은 삭제하지 않고 models/.retired 폴더에 보관합니다.`)) return;
+    retrainAction('/api/retrain/rollback', { run_id: m.run_id }, '이전 모델로 되돌렸습니다. 다음 점수 계산부터 이전 모델이 쓰입니다.');
+  });
 
   // =========================================================
   // 외부 데이터: 수집기 상태·수동 실행, 그래프, 미리보기
   // =========================================================
-  const extRunLabels = { succeeded: ['성공', 'completed'], failed: ['실패', 'failed'], running: ['실행 중', 'running'], interrupted: ['중단됨', 'unfinished'], unknown: ['확인 불가', 'unknown'] };
+  const extRunLabels = { succeeded: ['성공', 'completed'], failed: ['실패', 'failed'], running: ['실행 중', 'running'], interrupted: ['중단됨', 'unfinished'], skipped: ['건너뜀', 'unknown'], unknown: ['확인 불가', 'unknown'] };
   const msCategory = { knit_sweater: '니트·스웨터', short_sleeve_tee: '반소매 티셔츠', long_sleeve_tee: '긴소매 티셔츠', shirt_blouse: '셔츠·블라우스', outer: '아우터' };
   const ext = { timer: null, seq: 0, busy: new Set(), naver: null, views: null, msCategory: '', msSeq: 0 };
   const extBadge = status => { const [text, cls] = extRunLabels[status] || ['기록 없음', 'unknown']; return `<span class="badge ${cls}">${esc(text)}</span>`; };
@@ -516,17 +659,39 @@
     const container = $(containerId);
     const points = dates.map((date, i) => ({ date, value: values[i] })).filter(p => p.value != null);
     if (!points.length) { container.innerHTML = '<div class="chart-empty">표시할 데이터가 없습니다.</div>'; return; }
-    const w = Math.max(250, container.clientWidth - 26), h = 188, left = 48, right = 17, top = 16, bottom = 28;
+    const w = Math.max(260, container.clientWidth), h = 210, left = 46, right = 10, top = 12, bottom = 26;
     // 네이버 지수(최대 100)는 100을 위끝으로, 조회수는 최대값보다 조금 높게 잡습니다.
     const max = Math.max(...points.map(p => p.value)), ceiling = unit === '' && max <= 100 ? 100 : max > 0 ? max * 1.1 : 1;
     const x = i => points.length === 1 ? (left + w - right) / 2 : left + i / (points.length - 1) * (w - left - right);
     const y = v => h - bottom - v / ceiling * (h - bottom - top);
     const short = v => v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : `${Math.round(v)}`;
     const ticks = Array.from({ length: 5 }, (_, i) => ceiling * i / 4);
-    const step = Math.max(1, Math.ceil(points.length / (w < 350 ? 3 : 6)));
-    const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i)},${y(p.value)}`).join(' ');
-    const label = points.length === 1 ? `<text x="${x(0)}" y="${y(points[0].value) - 9}" text-anchor="middle" font-size="10" fill="#5b6270">${esc(number(points[0].value))}${esc(unit)}</text>` : '';
-    container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(points.map(p => `${p.date} ${p.value}`).slice(-30).join(', '))}">${ticks.map(v => `<line x1="${left}" y1="${y(v)}" x2="${w - right}" y2="${y(v)}" stroke="#edf0f6"/><text x="${left - 8}" y="${y(v) + 3}" text-anchor="end" fill="#adb6c7" font-size="9">${short(v)}</text>`).join('')}${points.length > 1 ? `<path d="${path} L${x(points.length - 1)},${h - bottom} L${x(0)},${h - bottom}Z" fill="#7b83ed" opacity=".06"/><path d="${path}" fill="none" stroke="#7b83ed" stroke-width="1.8"/>` : ''}${points.length <= 60 ? points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.value)}" r="${points.length === 1 ? 4 : 2.2}" fill="#7d86ec"><title>${esc(p.date)}: ${esc(number(p.value))}${esc(unit)}</title></circle>`).join('') : ''}${label}${points.map((p, i) => i % step === 0 || i === points.length - 1 ? `<text x="${x(i)}" y="${h - 6}" text-anchor="${points.length === 1 ? 'middle' : i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle'}" font-size="9" fill="#a3aec2">${esc(p.date.slice(5).replace('-', '.'))}</text>` : '').join('')}</svg>`;
+    const step = Math.max(1, Math.ceil(points.length / (w < 420 ? 4 : 6)));
+    const path = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ');
+    // 점은 데이터가 적을 때만 찍고, 마지막 값은 직접 표시합니다.
+    const lastI = points.length - 1;
+    const dots = points.length <= 40 ? points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.value)}" r="4" fill="${CHART.line}" stroke="#fff" stroke-width="2"/>`).join('') : `<circle cx="${x(lastI)}" cy="${y(points[lastI].value)}" r="4" fill="${CHART.line}" stroke="#fff" stroke-width="2"/>`;
+    const lastLabel = `<text x="${x(lastI) - 6}" y="${y(points[lastI].value) - 9}" text-anchor="end" font-size="12" font-weight="600" fill="#1c2722">${esc(short(points[lastI].value))}${esc(unit)}</text>`;
+    container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(points.map(p => `${p.date} ${p.value}`).slice(-30).join(', '))}">`
+      + ticks.map(v => `<line x1="${left}" y1="${y(v)}" x2="${w - right}" y2="${y(v)}" stroke="${CHART.grid}"/><text x="${left - 8}" y="${y(v) + 4}" text-anchor="end" fill="${CHART.axis}" font-size="11">${short(v)}</text>`).join('')
+      + `<line class="hover-guide" x1="0" y1="${top}" x2="0" y2="${h - bottom}" stroke="#9fb6a9" stroke-dasharray="3 3" style="display:none"/>`
+      + (points.length > 1 ? `<path d="${path}" fill="none" stroke="${CHART.line}" stroke-width="2" stroke-linejoin="round"/>` : '') + dots + (points.length <= 40 ? lastLabel : '')
+      + points.map((p, i) => (i % step === 0 && lastI - i >= step / 2) || i === lastI ? `<text x="${x(i)}" y="${h - 6}" text-anchor="${points.length === 1 ? 'middle' : i === 0 ? 'start' : i === lastI ? 'end' : 'middle'}" font-size="11" fill="${CHART.axis}">${esc(p.date.slice(5).replace('-', '.'))}</text>` : '').join('')
+      + '</svg>';
+    attachHover(container, points, x, p => `<b>${esc(p.date)}</b><br>${esc(number(p.value))}${esc(unit)}`);
+  }
+
+  // 긴 표는 처음 PREVIEW_ROWS줄만 보여 주고 '더 보기'로 나머지를 펼칩니다.
+  const PREVIEW_ROWS = 10;
+  function setMore(buttonId, bodyId, total) {
+    const button = $(buttonId);
+    button.hidden = total <= PREVIEW_ROWS;
+    button.textContent = `더 보기 (${total - PREVIEW_ROWS}개)`;
+    button.onclick = () => {
+      const rows = $(bodyId).querySelectorAll('.extra-row'), open = rows[0]?.hidden;
+      rows.forEach(r => { r.hidden = !open; });
+      button.textContent = open ? '접기' : `더 보기 (${total - PREVIEW_ROWS}개)`;
+    };
   }
 
   function fillSelect(id, options, current) {
@@ -546,7 +711,8 @@
       if (seq !== ext.msSeq) return;
       ext.msCategory = fillSelect('ext-ms-cat', m.categories.map(c => [c, msCategory[c] || c]), m.category);
       $('ext-ms-note').textContent = m.date ? `${m.date} 수집 · ${msCategory[m.category] || m.category} 상위 ${m.items.length}개` : '수집된 무신사 데이터가 없습니다.';
-      $('ext-ms-body').innerHTML = m.items.length ? m.items.map(r => `<tr><td class="align-right">${r.ranking ?? '—'}</td><td class="ext-name"><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a><span class="request-id">${esc(r.brand)}</span></td><td class="align-right">${won(r.price)}</td><td class="align-right">${r.discount_rate ? `${r.discount_rate}%` : '—'}</td><td>${esc(r.product_gender)}</td><td class="align-right">${r.rating ? r.rating.toFixed(1) : '—'}</td></tr>`).join('') : '<tr><td colspan="6">데이터가 없습니다.</td></tr>';
+      $('ext-ms-body').innerHTML = m.items.length ? m.items.map((r, i) => `<tr${i >= PREVIEW_ROWS ? ' class="extra-row" hidden' : ''}><td class="align-right">${r.ranking ?? '—'}</td><td class="ext-name"><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a><span class="request-id">${esc(r.brand)}</span></td><td class="align-right">${won(r.price)}</td><td class="align-right">${r.discount_rate ? `${r.discount_rate}%` : '—'}</td><td>${esc(r.product_gender)}</td><td class="align-right">${r.rating ? r.rating.toFixed(1) : '—'}</td></tr>`).join('') : '<tr><td colspan="6">데이터가 없습니다.</td></tr>';
+      setMore('ext-ms-more', 'ext-ms-body', m.items.length);
     } catch (error) { if (seq === ext.msSeq) { $('ext-ms-note').textContent = `불러오지 못했습니다: ${error.message}`; $('ext-ms-body').innerHTML = '<tr><td colspan="6">—</td></tr>'; } }
   }
 
@@ -578,7 +744,8 @@
           const c = cand.value;
           $('ext-yc-count').textContent = number(c.total);
           $('ext-yc-note').textContent = c.date ? `${c.date} 수집 · 등장 채널 수 상위 ${c.items.length}개 (전체 ${number(c.total)}개)` : '수집된 키워드 후보가 없습니다.';
-          $('ext-yc-body').innerHTML = c.items.length ? c.items.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.keyword)}</td><td>${esc(r.category)}</td><td class="align-right">${r.channels == null ? '—' : number(r.channels)}</td><td>${r.link ? `<a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">영상 ↗</a>` : ''}</td></tr>`).join('') : '<tr><td colspan="5">데이터가 없습니다.</td></tr>';
+          $('ext-yc-body').innerHTML = c.items.length ? c.items.map((r, i) => `<tr${i >= PREVIEW_ROWS ? ' class="extra-row" hidden' : ''}><td>${i + 1}</td><td>${esc(r.keyword)}</td><td>${esc(r.category)}</td><td class="align-right">${r.channels == null ? '—' : number(r.channels)}</td><td>${r.link ? `<a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">영상 ↗</a>` : ''}</td></tr>`).join('') : '<tr><td colspan="5">데이터가 없습니다.</td></tr>';
+          setMore('ext-yc-more', 'ext-yc-body', c.items.length);
         } else { $('ext-yc-note').textContent = `불러오지 못했습니다: ${cand.reason.message}`; $('ext-yc-body').innerHTML = '<tr><td colspan="5">—</td></tr>'; }
         await loadMusinsa(ext.msCategory);
       }
@@ -612,6 +779,5 @@
   // =========================================================
   // 화면 진입 시 모델 설정과 최초 요청 목록 조회
   // =========================================================
-  loadModelSettings();
-  load();
+  setView('overview');
 })();
