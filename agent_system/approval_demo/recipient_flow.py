@@ -12,6 +12,33 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+
+def _lock_file(f):
+    """파일 배타 잠금. Linux·Mac은 fcntl, Windows는 msvcrt를 사용한다."""
+    if os.name == 'nt':
+        import msvcrt
+        import time
+        f.seek(0)
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+    import fcntl
+    fcntl.flock(f, fcntl.LOCK_EX)
+
+
+def _unlock_file(f):
+    if os.name == 'nt':
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+    fcntl.flock(f, fcntl.LOCK_UN)
+
+
 ROLES = ('과장', '팀장', '대리', '사원')
 MAIL_INTENT = re.compile(r'보내|보낼|전달|발송|전송|메일|이메일|승인\s*요청|공유')
 ROLE_PATTERN = re.compile(r'(과장|팀장|대리|사원)(?:님)?(?:께|에게|한테|으로|한테도)?')
@@ -96,13 +123,12 @@ def _locked_delivery(fn):
     from inspect import signature
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        import fcntl
         bound = signature(fn).bind(*args, **kwargs)
         root, event = bound.arguments['root'], bound.arguments['event']
         path = _state_path(root, event).with_suffix('.lock')
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('a+') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _lock_file(lock)
             return fn(*args, **kwargs)
     return wrapped
 
@@ -621,12 +647,11 @@ def _build_review(summary, person):
 
 def confirm_recipient(root, event, nonce, yes, *, final=False):
     """최종 버튼에서만 SMTP 실행. 다른 사용자·오래된 버튼·두 번 클릭 차단."""
-    import fcntl
     path = _state_path(root, event)
     lock_path = path.with_suffix('.lock')
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open('a+') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock_file(lock)
         try:
             state = _read_state(root, event)
             target = state.get('target') or {}
@@ -686,7 +711,7 @@ def confirm_recipient(root, event, nonce, yes, *, final=False):
                                 'pdf_hash': state['pdf']['sha256'], 'png_hash': pending.get('png_hash'), 'mail_hash': pending.get('mail_hash')})
             _write_state(root, event, state)
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            _unlock_file(lock)
     # 중복 발송 방지를 위해 SENDING 기록을 먼저 남기고 SMTP 실행.
     from .workflow import store_review
     from .mail import send_team_approval
@@ -711,7 +736,7 @@ def confirm_recipient(root, event, nonce, yes, *, final=False):
     except Exception as exc:
         # SMTP가 전송 후 연결 실패하면 실제 도착 여부가 불분명하므로 자동 재시도하지 않는다.
         with lock_path.open('a+') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _lock_file(lock)
             current = _read_state(root, event)
             if (current.get('pending') or {}).get('nonce') == nonce:
                 current['pending']['status'] = 'UNKNOWN'
@@ -723,7 +748,7 @@ def confirm_recipient(root, event, nonce, yes, *, final=False):
     if state['target'].get('kind') == 'r39':
         # 발송 완료를 별도로 기록하며 고객 발송이나 회신 승인 절차로 넘어가지 않는다.
         with lock_path.open('a+') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            _lock_file(lock)
             current = _read_state(root, event)
             if (current.get('pending') or {}).get('nonce') == nonce:
                 current['pending']['status'] = 'SENT'
@@ -734,7 +759,7 @@ def confirm_recipient(root, event, nonce, yes, *, final=False):
                 _write_state(root, event, current)
         return f"{person['role']} {person['name']}님께 최종 기획전 보고서 PDF" + ('와 PNG를 전송했습니다.' if r42 else '를 전송했습니다.')
     with lock_path.open('a+') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock_file(lock)
         current = _read_state(root, event)
         if (current.get('pending') or {}).get('nonce') == nonce:
             current['pending']['status'] = 'SENT'
