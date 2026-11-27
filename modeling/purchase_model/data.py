@@ -66,18 +66,6 @@ def connect_hm() -> HMData:
     return _wrap(get_analysis_connection(), f"team:{Path(source.path).as_posix() if source else 'hm'}")
 
 
-def connect_team(repo_root) -> HMData:
-    """팀 저장소의 common.db_client 연결(읽기 전용)을 사용. repo_root = 팀 저장소 루트 폴더 (에이전트 코드 호환용)"""
-    import sys
-
-    root = str(Path(repo_root).resolve())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    from common.db_client import get_analysis_connection
-
-    return _wrap(get_analysis_connection(), f"team:{Path(root).as_posix()}")
-
-
 def from_connection(con, source: str = "external") -> HMData:
     return _wrap(con, source)
 

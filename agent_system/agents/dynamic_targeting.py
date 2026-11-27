@@ -197,11 +197,11 @@ def to_category_result(group: str, top, population: int) -> dict:
 
 
 def calculate_requested_target(question: str, campaign: dict, repo_root: Path) -> dict:
-    from modeling.purchase_model import connect_team, score_article, score_combo, select_model, supported_combos
+    from modeling.purchase_model import connect_hm, score_article, score_combo, select_model, supported_combos
     from agent_system.agents.model_targeting_agent import to_candidate_result
     model = select_model(MODEL_DATE)
     selection = resolve_user_selection(question, campaign, supported_combos(model))
-    with connect_team(repo_root) as data:
+    with connect_hm() as data:
         if selection['mode'] == 'article':
             result = score_article(data, selection['article_id'], MODEL_DATE)
         elif selection['mode'] == 'combo':

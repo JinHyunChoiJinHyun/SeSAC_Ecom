@@ -62,7 +62,7 @@ def weighted_taste(frame):
 
 def score_campaign(campaign, run, root):
     from . import campaign_target_r39 as legacy
-    from modeling.purchase_model import connect_team, article_attributes, select_model, supported_combos, score_combo, taste_scores
+    from modeling.purchase_model import connect_hm, article_attributes, select_model, supported_combos, score_combo, taste_scores
     from agent_system.agents.model_targeting_agent import validate_ranked_frame
     if not legacy.active(run):
         raise ValueError('먼저 기획전 페이지 틀을 승인해 주세요.')
@@ -83,7 +83,7 @@ def score_campaign(campaign, run, root):
         model = select_model(legacy.DATE)
         info, logits, tastes = [], [], []
         population = None
-        with connect_team(Path(root)) as data:
+        with connect_hm() as data:
             eligible_ids, audience_counts = audience.load_population(data, legacy.DATE, scope)
             expected_population = set(eligible_ids)
             combos = legacy.campaign_combos(values, article_attributes(data, ids), supported_combos(model))

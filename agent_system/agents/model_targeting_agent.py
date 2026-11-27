@@ -103,8 +103,8 @@ def calculate_target_candidates(selection: dict, repo_root: Path, limit: int=100
                                 score_as_of: str=MODEL_DATE) -> dict:
     """팀 H&M DuckDB 읽기 전용 연결 후 실제 저장 모델로 예측한다."""
     if score_as_of != MODEL_DATE: raise ValueError('현재 모델은 2020-09-23 하루만 지원합니다.')
-    from modeling.purchase_model import connect_team, score_combo, score_article
-    with connect_team(repo_root) as data:
+    from modeling.purchase_model import connect_hm, score_combo, score_article
+    with connect_hm() as data:
         if 'article_id' in selection:
             scored=score_article(data,selection['article_id'],score_as_of)
         else:

@@ -122,7 +122,7 @@ def _write_csv(frame, path):
 
 
 def score_campaign(campaign, run, root=ROOT):
-    from modeling.purchase_model import connect_team, article_attributes, select_model, supported_combos, score_combo, taste_scores
+    from modeling.purchase_model import connect_hm, article_attributes, select_model, supported_combos, score_combo, taste_scores
     from agent_system.agents.model_targeting_agent import validate_ranked_frame
     values = campaign.get('values') or {}
     ids = list(dict.fromkeys(re.findall(r'(?<!\d)\d{10}(?!\d)', str(values.get('products') or ''))))
@@ -132,7 +132,7 @@ def score_campaign(campaign, run, root=ROOT):
     folder.mkdir(mode=0o700)
     model = select_model(DATE)
     info = []
-    with connect_team(Path(root)) as data:
+    with connect_hm() as data:
         combos = campaign_combos(values, article_attributes(data, ids), supported_combos(model))
         for i, (pt, color) in enumerate(combos, 1):
             scored = score_combo(data, pt, color, DATE)

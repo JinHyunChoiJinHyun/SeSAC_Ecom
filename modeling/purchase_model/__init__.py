@@ -1,5 +1,5 @@
 """구매 예측 모델 패키지 — 기준일별 하나의 계층형 로지스틱 회귀로 학습 가능한 모든 품목·색상의 고객 점수"""
-from .data import HMData, article_attributes, connect_hm, connect_parquet, connect_team, from_connection
+from .data import HMData, article_attributes, connect_hm, connect_parquet, from_connection
 from .errors import (
     ArticleNotFound,
     ComboNotFound,
