@@ -24,6 +24,11 @@ ACTIVE = {"training", "checking", "ready"}
 TRAIN_TIMEOUT = 30 * 60
 CHECK_TIMEOUT = 15 * 60
 HISTORY_LIMIT = 50
+# 에이전트(고객 타깃 선정)가 점수를 계산하는 기준일. 이 날짜 이하 as_of 중 최신 모델만 실제로 쓰입니다.
+# agent_system/agents/dynamic_targeting.py MODEL_DATE 등과 같은 값이어야 합니다.
+SERVING_AS_OF = "2020-09-23"
+# 재시작 때 정리할 수 있는 프로세스(명령줄에 이 모듈 이름이 있는 것만 종료합니다)
+JOB_MODULES = ("modeling.purchase_model.train", "admin_dashboard.retrain_check")
 
 
 class RetrainError(Exception):
@@ -62,6 +67,36 @@ def _read_json(path: Path):
         return None
 
 
+def _process_command_line(pid: int) -> str:
+    """Windows 프로세스의 명령줄. 없거나 읽지 못하면 빈 문자열."""
+    if os.name != "nt":
+        return ""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+            capture_output=True, text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+
+
+def _kill_orphan(pid) -> bool:
+    """대시보드 재시작 전에 띄운 학습·점검 프로세스가 남아 있으면 종료합니다.
+    PID가 다른 프로그램에 재사용됐을 수 있으므로 명령줄이 학습·점검 모듈일 때만 종료합니다."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    command = _process_command_line(pid)
+    if not any(module in command for module in JOB_MODULES):
+        return False
+    try:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _tail(path: Path, lines: int = 20) -> list[str]:
     try:
         with path.open("rb") as f:
@@ -87,8 +122,11 @@ class RetrainManager:
         self._thread = None
         self._job = _read_json(self.runtime / "state.json")
         # 서버가 학습·점검 중에 꺼졌다면 그 작업은 이어 갈 수 없으므로 실패로 정리합니다.
+        # 남아 있는 학습·점검 프로세스를 먼저 종료해야 대기 폴더를 지운 뒤 다시 만들지 않습니다.
         if self._job and self._job.get("status") in {"training", "checking"}:
-            self._finish("failed", error="대시보드 서버가 다시 시작돼 작업이 중단됐습니다.", cleanup=True)
+            killed = _kill_orphan(self._job.get("pid"))
+            note = " 남아 있던 학습·점검 프로세스를 종료했습니다." if killed else ""
+            self._finish("failed", error="대시보드 서버가 다시 시작돼 작업이 중단됐습니다." + note, cleanup=True)
 
     # ---------------- 조회 ----------------
     def installed_models(self) -> list[dict]:
@@ -100,16 +138,34 @@ class RetrainManager:
                 out.append({"as_of": d.name[len("as_of="):], "run_id": r.name, "path": r})
         return out
 
-    def current_model(self) -> dict | None:
-        """가장 늦은 기준일에 선택되는 모델(as_of 최신, 같으면 run_id 최신)의 요약"""
-        models = self.installed_models()
-        if not models:
+    def _summary(self, best: dict | None, count: int) -> dict | None:
+        if not best:
             return None
-        best = max(models, key=lambda m: (m["as_of"], m["run_id"]))
         meta = _read_json(best["path"] / "metadata.json") or {}
         return {"as_of": best["as_of"], "run_id": best["run_id"], "combos": meta.get("counts", {}).get("combos"),
                 "complete_through": meta.get("complete_through"), "data_max": meta.get("data_range", {}).get("max_t_dat"),
-                "created_at": meta.get("created_at_utc"), "count": len(models)}
+                "created_at": meta.get("created_at_utc"), "count": count}
+
+    def current_model(self) -> dict | None:
+        """가장 늦은 기준일에 선택되는 모델(as_of 최신, 같으면 run_id 최신)의 요약"""
+        models = self.installed_models()
+        best = max(models, key=lambda m: (m["as_of"], m["run_id"]), default=None)
+        return self._summary(best, len(models))
+
+    def _serving(self, models: list[dict] | None = None) -> dict | None:
+        """에이전트가 실제로 쓰는 모델: SERVING_AS_OF 이하 as_of 중 최신(같으면 run_id 최신)"""
+        models = self.installed_models() if models is None else models
+        usable = [m for m in models if m["as_of"] <= SERVING_AS_OF]
+        return max(usable, key=lambda m: (m["as_of"], m["run_id"]), default=None)
+
+    def serving_model(self) -> dict | None:
+        models = self.installed_models()
+        serving = self._serving(models)
+        out = self._summary(serving, len(models))
+        if out:
+            # 되돌리기는 지금 모델을 빼도 쓸 수 있는 다른 모델이 남을 때만 가능합니다.
+            out["can_rollback"] = self._serving([m for m in models if m is not serving]) is not None
+        return out
 
     def status(self) -> dict:
         with self._lock:
@@ -119,7 +175,14 @@ class RetrainManager:
                 job["elapsed_seconds"] = round(time.time() - job["started_ts"], 1)
             job["log_tail"] = _tail(self.runtime / "jobs" / job["job_id"] / "log.txt")
             job.pop("pid", None)
-        return {"available": self.available, "current_model": self.current_model(), "job": job}
+            if job.get("status") == "ready":
+                # 적용해도 에이전트가 쓰지 않는 모델이면 화면에서 경고합니다.
+                serving = self._serving()
+                cand = (job["as_of"], job.get("run_id") or "")
+                job["serves_agents"] = job["as_of"] <= SERVING_AS_OF and (
+                    serving is None or cand > (serving["as_of"], serving["run_id"]))
+        return {"available": self.available, "current_model": self.current_model(),
+                "serving_model": self.serving_model(), "serving_as_of": SERVING_AS_OF, "job": job}
 
     def history(self) -> list[dict]:
         try:
@@ -176,7 +239,9 @@ class RetrainManager:
                                     stdin=subprocess.DEVNULL, env=env, creationflags=flags)
             with self._lock:
                 if self._job:
+                    # 재시작 후 남은 프로세스를 정리할 수 있도록 상태 파일에도 남깁니다.
                     self._job["pid"] = proc.pid
+                    self._save()
             try:
                 return proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -266,6 +331,40 @@ class RetrainManager:
             self._require(body, {"ready"})
             self._finish("discarded", cleanup=True, locked=True)
             return dict(self._job)
+
+    def rollback(self, body) -> dict:
+        """에이전트가 쓰는 최신 모델을 보관 폴더(models/.retired)로 옮겨 이전 모델로 되돌립니다. 지우지 않습니다."""
+        with self._lock:
+            if self._job and self._job.get("status") in ACTIVE:
+                raise RetrainError(409, "재학습 작업이 진행 중이거나 적용을 기다리고 있어 되돌릴 수 없습니다.")
+            models = self.installed_models()
+            serving = self._serving(models)
+            if not isinstance(body, dict) or not serving or body.get("run_id") != serving["run_id"]:
+                raise RetrainError(409, "화면의 모델 정보가 최신이 아닙니다. 새로고침 후 다시 시도해 주세요.")
+            previous = self._serving([m for m in models if m is not serving])
+            if previous is None:
+                raise RetrainError(409, "되돌릴 이전 모델이 없습니다.")
+            dest = self.models_dir / ".retired" / f"as_of={serving['as_of']}" / serving["run_id"]
+            if dest.exists():
+                raise RetrainError(409, "보관 폴더에 같은 이름의 모델이 이미 있습니다.")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.rename(serving["path"], dest)
+            except OSError as exc:
+                raise RetrainError(503, f"모델 폴더를 옮기지 못했습니다({type(exc).__name__}). 파일을 연 프로그램을 닫고 다시 시도해 주세요.") from None
+            try:
+                serving["path"].parent.rmdir()  # 기준일 폴더가 비었을 때만 지워집니다.
+            except OSError:
+                pass
+            now = _now()
+            record = {"job_id": "rollback_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"), "status": "rolled_back",
+                      "as_of": serving["as_of"], "run_id": serving["run_id"], "started_at": now, "finished_at": now,
+                      "error": None, "restored": f"{previous['as_of']} · {previous['run_id']}", "retired_path": str(dest)}
+            path = self.runtime / "history.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return {"retired": f"{serving['as_of']} · {serving['run_id']}", "restored": record["restored"]}
 
     def dismiss(self, body) -> dict:
         """실패한 작업 표시를 닫습니다(상태만 정리, 이력은 이미 남아 있음)."""

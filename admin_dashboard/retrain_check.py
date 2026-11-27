@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 COMBO_CHANGE_WARN = 0.10   # 학습 포함 조합 수가 현재 모델 대비 10% 넘게 바뀌면 경고
+COMBO_DROP_BLOCK = 0.10    # 10% 넘게 줄면 적용 불가 (DB 일부 적재 등으로 캠페인 조합이 모델에서 빠지는 것을 막음)
 OVERLAP_WARN = 0.80        # 대표 조합 상위 K명 겹침이 80% 미만이면 경고
 TOP_K = 10_000
 N_COMBOS = 3
@@ -73,10 +74,11 @@ def run_checks(candidate_dir, models_dir, data=None, top_k: int = TOP_K, n_combo
     if current is not None:
         new, old = set(cand.index()), set(current.index())
         change = (len(new) - len(old)) / max(1, len(old))
-        level = "warn" if abs(change) > COMBO_CHANGE_WARN else "ok"
+        level = "block" if change < -COMBO_DROP_BLOCK else "warn" if abs(change) > COMBO_CHANGE_WARN else "ok"
+        note = {"block": f" · {COMBO_DROP_BLOCK:.0%} 넘게 줄어 적용할 수 없습니다(데이터 적재 상태를 확인해 주세요)",
+                "warn": f" · 경고 기준 ±{COMBO_CHANGE_WARN:.0%}", "ok": ""}[level]
         items.append(_item("combos", "학습 포함 조합 수", level,
-                           f"{len(old):,}개 → {len(new):,}개 ({change:+.1%}) · 추가 {len(new - old):,} · 빠짐 {len(old - new):,}"
-                           + (f" · 경고 기준 ±{COMBO_CHANGE_WARN:.0%}" if level == "warn" else "")))
+                           f"{len(old):,}개 → {len(new):,}개 ({change:+.1%}) · 추가 {len(new - old):,} · 빠짐 {len(old - new):,}" + note))
 
     # 5) 대표 조합 고객 순위 비교 (두 모델 모두에 있는 조합 중 학습 구매 수 상위)
     comparisons = []

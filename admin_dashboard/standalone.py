@@ -52,6 +52,7 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
         "/api/retrain/apply": (retrain.apply, "모델을 적용할"),
         "/api/retrain/discard": (retrain.discard, "모델을 버릴"),
         "/api/retrain/dismiss": (retrain.dismiss, "작업 표시를 닫을"),
+        "/api/retrain/rollback": (retrain.rollback, "이전 모델로 되돌릴"),
         "/api/external/run": (external.start, "수집을 시작할"),
     }
 
@@ -90,7 +91,13 @@ def build_server(settings: Settings, host="127.0.0.1", port=8000, username="", p
             """관리자 계정을 확인하거나 계정 미설정 시 루프백 접속만 허용합니다."""
             # 계정을 생략한 구성에서는 루프백 주소의 요청만 허용합니다.
             if not username:
-                return self.client_address[0] in {"127.0.0.1", "::1"}
+                # Host 헤더도 루프백 이름일 때만 허용합니다. 외부 웹페이지가 자기 도메인을 127.0.0.1로
+                # 바꿔(DNS rebinding) 이 화면을 읽거나 설정을 바꾸는 것을 막습니다.
+                try:
+                    host = urlsplit("//" + (self.headers.get("Host") or "")).hostname
+                except ValueError:
+                    host = None
+                return self.client_address[0] in {"127.0.0.1", "::1"} and host in {"127.0.0.1", "localhost", "::1"}
             raw = self.headers.get("Authorization", "")
             try:
                 scheme, token = raw.split(" ", 1)

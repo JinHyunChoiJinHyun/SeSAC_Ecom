@@ -140,9 +140,13 @@ class ModelSettingsStore:
             return config
 
     def public_status(self):
-        current = self.current()
+        # 설정 파일이 잘못돼도 관리자 화면에서 다시 고를 수 있도록 선택지는 항상 돌려줍니다.
+        try:
+            current = self.current().public()
+        except ModelSettingsError:
+            current = None
         return {
-            "current": current.public(), "warning": self.warning,
+            "current": current, "warning": self.warning,
             "options": [
                 {"provider": provider, "model": option["model"], "label": option["label"],
                  "available": bool(environment_value(option["key_env"], self.project).strip())}
