@@ -28,6 +28,7 @@
 """
 
 import logging
+import re
 import os
 from pathlib import Path
 
@@ -48,6 +49,28 @@ TEMP_DIR = Path(os.getenv("CART_SIGNAL_DUCKDB_TEMP", PROJECT_ROOT / "logs" / "du
 def get_source_file_status() -> dict:
     """등록된 출처별 DB 파일 존재 여부를 반환합니다. 예: {"hm": True, "amazon": False}"""
     return {source.key: source.is_available() for source in get_sources()}
+
+
+_VIEW_FILE_PATTERN = re.compile(r"read_(?:parquet|csv(?:_auto)?|json(?:_auto)?)\s*\(\s*'((?:[^']|'')+)'", re.I)
+
+
+def _view_source_files(client) -> list[str]:
+    """연결한 DB의 VIEW 정의가 읽는 파일 경로 목록 (VIEW 모드 DB용)."""
+    try:
+        rows = client.execute(
+            "SELECT sql FROM duckdb_views() WHERE NOT internal AND sql IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        logger.exception("VIEW 정의를 읽지 못했습니다.")
+        return []
+    files = set()
+    for (sql,) in rows:
+        for raw in _VIEW_FILE_PATTERN.findall(sql or ""):
+            path = raw.replace("''", "'")
+            if any(ch in path for ch in "*?[") or "://" in path:
+                continue  # 와일드카드·원격 경로는 허용하지 않음
+            files.add(Path(path).as_posix())
+    return sorted(files)
 
 
 def open_duckdb_connection():
@@ -123,6 +146,14 @@ def open_duckdb_connection():
         # 주의: USE 문을 실행하면 search_path가 바뀌므로 사용하지 않습니다.
         client.execute(f"SET search_path = '{','.join(search_path)}'")
 
+        # db_setup.py 기본값(VIEW 모드)은 VIEW가 원본 Parquet 파일을 읽으므로,
+        # 외부 접근을 막기 전에 '연결한 DB의 VIEW가 참조하는 파일'만 정확한 경로로 허용합니다.
+        # (폴더 단위가 아니라 파일 단위: 같은 폴더에 새 파일 쓰기·와일드카드 읽기는 계속 차단)
+        allowed_files = _view_source_files(client)
+        if allowed_files:
+            quoted = ", ".join("'" + f.replace("'", "''") + "'" for f in allowed_files)
+            client.execute(f"SET allowed_paths = [{quoted}]")
+
         # Agent가 사용할 신뢰된 DB를 모두 연결한 뒤 외부 파일 접근 차단
         # SQL을 통한 추가 ATTACH, 파일 읽기 및 외부 접근을 제한
         client.execute("SET enable_external_access = false")
@@ -189,3 +220,15 @@ def get_duckdb_connection(read_only=True):
         raise
 
     return client
+
+
+def open_local_external_connection(path: Path):
+    """로컬 시장 분석 전용 DB를 직접 읽기 전용으로 연결합니다.
+
+    H&M 등 일반 분석 출처의 ATTACH 또는 모델링 DB 연결과 독립적입니다.
+    호출자는 연결을 닫아야 하며, 파일이 없으면 새 DB를 생성하지 않습니다.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"외부 DuckDB 파일이 없습니다: {path}")
+    return duckdb.connect(str(path), read_only=True)

@@ -232,3 +232,63 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CART_SIGNAL 로컬 환경 및 산출물
+/CART_SIGNAL/
+.venv/
+project_agent/
+.env.*
+!.env.example
+*.py[cod]
+.DS_Store
+.vscode/
+.idea/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.db-wal
+*.db-shm
+/Amazon_parquet/
+/h-and-m-parquet/
+/database/musinsa/
+/logs/
+/runtime/
+/delivery_output/
+/visualization_output/
+/duckdb_structure_output/
+/youtube_cache/
+/Claude_Outputs/
+*.bak
+*.py.bak
+
+# CART_SIGNAL 로컬 데이터 및 참고 자료
+/database/amazon_data.duckdb
+/database/hm_data.duckdb
+/merge_reference/
+
+/local_tests/
+
+/.vscode/
+
+# 로컬 코드 백업
+/backup/
+
+# CART_SIGNAL 테스트 코드 및 테스트 산출물
+/tests/
+/local_tests/
+/WORKS/
+/audit_output/
+/interfaces/slack/_w_test
+
+# 로컬 수집 데이터
+/database/naver/
+/database/youtube/
+
+# 로컬 백업 및 실행 산출물
+/backup/
+*.log
+*.zip
+.DS_Store
+
+# 구매 예측 모델 바이너리 (별도 전달)
+/modeling/purchase_model/models/

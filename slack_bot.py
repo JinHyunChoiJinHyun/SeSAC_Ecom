@@ -37,6 +37,8 @@ python slack_bot.py
 """
 
 
+from agent_system.agents import content_generation_agent as content_agent
+from agent_system.agents import campaign_execution_agent as execution_agent
 import logging
 import json
 import os
@@ -416,7 +418,20 @@ def run_slack_question(question, graph_runner):
         print("[Slack Router] 데이터 출처 일시 사용 불가 안내")
         return result
 
+    if result.get("turn_type") == "report":
+        print("[Slack Router] 보고서 전달 (PDF·Word 첨부)")
+        return result
+
+    if result.get("turn_type") == "workflow":
+        # 워크플로는 여러 단계 결과를 한 번에 전달 (그래프는 단계 결과에 있을 때만 첨부)
+        print("[Slack Router] 워크플로 단계 결과")
+        return result
+
     analysed_question = result.get("standalone_question") or question
+    if result.get("comparison_status"):
+        # 비교 가능 데이터 부족은 오류가 아니라 근거 부족이라는 분석 결과임
+        print(f"[Slack Router] 카테고리 비교 결과: {result['comparison_status']}", flush=True)
+        return result
     if _has_visualization_intent(analysed_question):
         print("[Slack Router] 시각화 요청: 차트 생성 확인")
         _ensure_graph_success(result, "시각화", require_visualization=True)
@@ -499,7 +514,66 @@ class SlackBridge:
         self.pending = {}
         # 종료가 시작되면 새로운 요청을 접수하지 않습니다.
         self.closing = False
+        self._target_ui_lock = Lock()
+        self._resolved_target_messages = deque(maxlen=1000)
 
+
+    def receive_report_file(self, event, body, client):
+        """수정된 Word 첨부는 일반 텍스트 질문 대신 PDF 변환 큐로 보냅니다."""
+        from interfaces.slack.report_finalize import _report_file, process_uploaded_docx, process_uploaded_png
+        if event.get('bot_id') or not event.get('user') or not event.get('channel'):
+            return False
+        files = [f for f in event.get('files', []) if isinstance(f,dict)]
+        jobs = []
+        for f in files:
+            name = str(f.get('name') or '').lower()
+            if name.endswith('.docx') and not name.startswith('~$'):
+                jobs.append((process_uploaded_docx,f))
+            elif name.endswith('.png'):
+                jobs.append((process_uploaded_png,f))
+        if not jobs:
+            return False
+        # 동일 메시지에서는 Word 변환부터 실행하고 파일 ID 기준 중복 이벤트를 제거한다.
+        jobs.sort(key=lambda job: job[0] is process_uploaded_png)
+        with self.event_lock:
+            if self.closing:
+                return True
+            fresh=[]
+            for fn,f in jobs:
+                event_key=('r42file',event.get('channel'),event.get('ts'),f.get('id') or body.get('event_id'))
+                if event_key not in self.seen:
+                    self.seen.append(event_key); fresh.append((fn,f))
+            if fresh:
+                self.executor.submit(self._r424_file_batch,client,event.copy(),fresh)
+        return True
+
+    def _r424_file_batch(self,client,event,jobs):
+        from interfaces.slack.report_finalize import process_uploaded_png
+        from agent_system.approval_demo import recipient_flow as r, delivery_r42 as d
+        question = re.sub(r'<@[^>]+>', '', str(event.get('text') or '')).strip()
+        kwargs=dict(channel=event['channel'],thread_ts=event.get('thread_ts') or event.get('ts'))
+        try:
+            resolver=getattr(self,'resolve_report_event',None)
+            if resolver: resolver(event)
+            state=r._read_state(self.base_dir,event)
+            r._check_delivery_state(state,event)
+            for fn,f in jobs:
+                ok=fn(client,event,f,defer=True) if fn is process_uploaded_png else fn(client,event,f)
+                if ok is not True: return
+            if r.MAIL_INTENT.search(question):
+                result=self.runner(question,event)
+                client.chat_postMessage(**kwargs,text=result['final_answer'])
+                if result.get('recipient_confirmation'): execution_agent.post_buttons(client,event,r._read_state(self.base_dir,event)['pending'])
+                elif result.get('recipient_choose'): execution_agent.post_buttons(client,event,choose=True)
+            else:
+                state=r._read_state(self.base_dir,event)
+                pending=execution_agent.prepare_send(self.base_dir,event) if state.get('pdf') and state.get('png') else None
+                if pending: execution_agent.post_buttons(client,event,pending)
+                elif state.get('target',{}).get('kind')=='r39':
+                    status=(state.get('pending') or {}).get('status')
+                    client.chat_postMessage(**kwargs,text='수신자 확인 버튼을 눌러 주세요.' if status=='AWAITING_CONFIRMATION' else '최종 PDF를 확인하고 수신자를 지정해 주세요.' if state.get('pdf') else '수정 Word를 첨부해 주세요.')
+        except Exception as exc:
+            client.chat_postMessage(**kwargs,text='파일 처리 실패: '+(str(exc) if isinstance(exc,ValueError) else type(exc).__name__))
 
     # =====================================================
     # DM 수신
@@ -604,6 +678,140 @@ class SlackBridge:
             )
         )
 
+
+    # =====================================================
+    # 버튼 클릭 수신 (승인·반려·워크플로 계속 등, interfaces/slack/actions.py)
+    # =====================================================
+
+    def receive_action(self, body, client):
+        """버튼 클릭 → 요청한 사용자인지 확인 → 버튼을 선택 결과로 바꾸고 → 다른 요청처럼 순서대로 처리."""
+        from agent_system.orchestrator.tools.memory import build_slack_thread_id
+        from interfaces.slack.actions import parse_action, resolved_blocks
+
+        parsed = parse_action(body)
+        if parsed is None:
+            return None
+        event = parsed["event"]
+        # CART_SIGNAL_BUTTON_ID_DIAGNOSTIC_V1
+        LOGGER.info(
+            "[버튼 권한 진단] clicked_user=%s channel=%s "
+            "clicked_thread=%s original_thread=%s "
+            "thread_ts=%s message_ts=%s",
+            event.get("user"),
+            event.get("channel"),
+            build_slack_thread_id(event),
+            parsed["thread_id"],
+            event.get("thread_ts"),
+            parsed.get("message_ts"),
+        )
+        # CART_SIGNAL_BUTTON_OWNER_CHECK_V2
+        # 세션 ID와 기본 Slack 대화 ID는 다를 수 있으므로 요청자 ID로 권한 검사합니다.
+        owner = parsed.get("requester_user_id", "")
+        LOGGER.info("[버튼 요청자 확인] clicked_user=%s owner=%s", event.get("user"), owner)
+        if not owner or event.get("user") != owner:
+            # 다른 사용자 또는 이전 버전 버튼: 처리하지 않고 안내
+            try:
+                client.chat_postEphemeral(channel=event["channel"], user=event["user"],
+                                          thread_ts=event.get("thread_ts"),
+                                          text=("이전 버전 버튼입니다. 새 승인 요청 버튼을 사용해 주세요."
+                                                if not owner else "이 버튼은 요청한 사용자만 누를 수 있습니다."))
+            except Exception as exc:
+                LOGGER.error("버튼 안내 전송 실패 (%s)", type(exc).__name__)
+            return None
+        # CART_SIGNAL_APPROVAL_SESSION_R22: 발행 당시 분석 세션과 현재 세션을 일치시킨다.
+        # 버튼 payload의 ID를 직접 신뢰해 다른 사용자의 세션을 열지 않는다.
+        from agent_system.orchestrator.tools.analysis_sessions import current as _session_current
+        from agent_system.orchestrator.tools.approval_session_guard import session_match
+        _current_session = _session_current(build_slack_thread_id(event))
+        if not session_match(parsed.get("thread_id", ""), _current_session):
+            LOGGER.warning("APPROVAL_SESSION_MISMATCH channel=%s", event.get("channel"))
+            client.chat_postEphemeral(
+                channel=event["channel"], user=event["user"],
+                thread_ts=event.get("thread_ts"),
+                text="이 버튼은 현재 분석 세션의 승인 요청이 아닙니다. 최신 세션에서 새 승인을 요청해 주세요.",
+            )
+            return None
+        action = parsed['action']
+        is_target = action.get('type') == 'target_selection_review'
+        if is_target:
+            with self._target_ui_lock:
+                if action.get('view') in ('open','close'):
+                    # 화면 변경만 수행한다. Graph.invoke, 고객 재분석, 승인 상태 변경 없음.
+                    try:
+                        from agent_system.orchestrator.graph import get_graph, pending_interrupt
+                        from interfaces.slack.target_review_r422 import toggle_blocks
+                        message_key = (event['channel'], parsed['message_ts'])
+                        graph = get_graph()
+                        snap = graph.get_state({'configurable':{'thread_id':_current_session}})
+                        values = getattr(snap, 'values', None) or {}
+                        if message_key in self._resolved_target_messages and (values.get('workflow_run') or {}).get('campaign_target_r39',{}).get('status') != 'confirmed':
+                            raise ValueError('승인 처리 중이거나 반려된 제안입니다.')
+                        blocks = toggle_blocks(parsed, values.get('workflow_run') or {},
+                                               values.get('campaign') or {},
+                                               values.get('pending_approval') or pending_interrupt(graph,_current_session))
+                        client.chat_update(channel=event['channel'], ts=parsed['message_ts'],
+                                           text='고객 타깃 검토 · 선정 근거', blocks=blocks)
+                    except Exception as exc:
+                        LOGGER.warning('R40 근거 화면 갱신 실패 (%s)',type(exc).__name__)
+                        client.chat_postEphemeral(channel=event['channel'],user=event['user'],
+                                                  thread_ts=event.get('thread_ts'),
+                                                  text='선정 근거를 갱신하지 못했습니다. 최신 고객 선정 결과를 확인해 주세요.')
+                    return None
+                # 승인/반려와 화면 토글이 동시에 도착해도 같은 메시지의 버튼을 되살리지 않는다.
+                self._resolved_target_messages.append((event['channel'],parsed['message_ts']))
+                return self._resolve_and_enqueue(client,event,parsed,resolved_blocks)
+        return self._resolve_and_enqueue(client,event,parsed,resolved_blocks)
+
+    def _resolve_and_enqueue(self, client, event, parsed, resolved_blocks):
+        try:
+            blocks=resolved_blocks(parsed["blocks"], parsed["label"], event["user"])
+            if parsed['action'].get('type')=='target_selection_review' and parsed['action'].get('command')=='approve':
+                import json, uuid
+                for block in parsed['blocks']:
+                    for button in block.get('elements',[]):
+                        if str(button.get('action_id','')).endswith('_evidence'):
+                            value=json.loads(button['value'])
+                            if value.get('view') not in ('open','close'): continue
+                            value['view']='open'
+                            evidence={**button,'value':json.dumps(value,ensure_ascii=False),'text':{'type':'plain_text','text':'선정 근거 보기'}}
+                            blocks.append({'type':'actions','block_id':'cartsignal_target_evidence_'+uuid.uuid4().hex,'elements':[evidence]})
+            client.chat_update(channel=event["channel"], ts=parsed["message_ts"],
+                               text=f"선택: {parsed['label']}", blocks=blocks)
+        except Exception as exc:  # 버튼을 못 지워도 처리는 계속 (같은 버튼 두 번째 클릭은 아래에서 차단)
+            LOGGER.error("버튼 메시지 수정 실패 (%s)", type(exc).__name__)
+        event = {**event, "cart_signal_action": parsed["action"]}
+        return self._enqueue(
+            event=event,
+            body={"team_id": parsed["team_id"], "event_id": f"action:{parsed['message_ts']}"},
+            client=client,
+            question=f"[버튼] {parsed['label']}",
+        )
+
+    # =====================================================
+    # 사용자 확인 버튼 게시
+    # =====================================================
+
+    def _post_actions(self, client, event, result):
+        """결과가 사용자 확인(승인·워크플로)을 기다리면 버튼 메시지를 붙입니다."""
+        from interfaces.slack.actions import build_action_blocks
+
+        try:
+            blocks = build_action_blocks(
+                result.get("actions"), result.get("thread_id", ""),
+                requester_user_id=event.get("user", ""),
+            )
+        except Exception as exc:
+            LOGGER.error("버튼 만들기 실패 (%s)", type(exc).__name__)
+            return False
+        if not blocks:
+            return False
+        try:
+            client.chat_postMessage(channel=event["channel"], thread_ts=event.get("thread_ts"),
+                                    text="버튼으로 선택해 주세요.", blocks=blocks)
+            return True
+        except Exception as exc:  # 버튼을 못 붙여도 글자로 답할 수 있음
+            LOGGER.error("버튼 메시지 전송 실패 (%s)", type(exc).__name__)
+            return False
 
     # =====================================================
     # 요청 Queue 등록
@@ -813,14 +1021,17 @@ class SlackBridge:
         # 처리 시작 상태와 경과 시간 기록
         # =================================================
         started = time.perf_counter()
-        self._set_status(client, event, status_ts, STATUS_RUNNING)
+        self._set_status(client, event, status_ts, "🧭 요청 분석 및 담당 Agent 선택 중...")
 
         # =================================================
         # Multi Agent 실행
         # =================================================
         try:
             # 대화 기억(멀티턴)을 위해 Slack 이벤트도 함께 넘깁니다.
-            result = self.runner(question, event)
+            # CART_SIGNAL_PROGRESS_V1: 같은 작업 스레드에서 Agent 단계별 Slack 상태 갱신
+            from agent_system.orchestrator.tools.progress_status import progress_scope
+            with progress_scope(lambda text: self._set_status(client, event, status_ts, text)):
+                result = self.runner(question, event)
             # 예외 없이 오류 State가 반환된 경우도 실패로 처리합니다.
             # 단, 출처 일시 사용 불가처럼 사용자에게 안내할 오류는 답변으로 전달합니다.
             if result.get("error") and not _is_user_facing_error(result):
@@ -993,6 +1204,64 @@ class SlackBridge:
                     "일부 결과 파일을 첨부하지 못했습니다. "
                     "다시 요청해 주시고, 문제가 계속되면 담당자에게 문의해 주세요.",
             )
+
+
+        # CART_SIGNAL_DELIVERY_ORDER_V1: 실패 안내와 파일 공유 확인 이후 버튼 게시
+        if delivery_result.get("share_confirmation") is False:
+            self._notify(client, event, "파일 업로드는 완료됐지만 Slack 공유 게시를 확인하지 못했습니다. 첨부파일이 모두 보이는지 확인한 뒤 선택해 주세요.")
+
+        # R39: 실제로 보고서가 전달된 스레드에만 사내 발송 준비 상태를 등록한다.
+        if result.get('r39_report') and delivery_status == 'success' and delivery_result.get('share_confirmation') is not False:
+            try:
+                from agent_system.agents.campaign_execution_agent import register_campaign_report
+                register_campaign_report(self.base_dir, event, result['r39_report'])
+            except Exception:
+                LOGGER.exception('R39_REPORT_REGISTER_FAILED')
+                self._notify(client, event, '사내 보고 등록에 실패했습니다. 보고서를 다시 요청해 주세요.')
+        # 승인 대기·워크플로 멈춤이면 확인 버튼을 붙입니다 (글자로 '승인'을 쓰지 않아도 됨)
+        final_review = any(a.get('type')=='final_page_review' for a in (result.get('actions') or []))
+        if not (final_review and result.get('visualization_path') and (delivery_status!='success' or delivery_result.get('share_confirmation') is False)):
+            self._post_actions(client, event, result)
+        # 승인 수신자 확인은 별도 네/아니요 버튼으로 표시
+        confirmation = result.get('recipient_confirmation') if isinstance(result, dict) else None
+        if isinstance(result, dict) and result.get("recipient_choose"):
+            from agent_system.agents.campaign_execution_agent import post_buttons
+            post_buttons(client,event,choose=True)
+        if result.get("r424_mail_review"):
+            from agent_system.agents.campaign_execution_agent import post_buttons
+            from agent_system.approval_demo.recipient_flow import _read_state
+            post_buttons(client,event,_read_state(self.base_dir,event)["pending"])
+        if confirmation:
+            from agent_system.approval_demo.recipient_flow import _thread
+            import json as _json
+            try:
+                value = {'nonce': confirmation['nonce'], 'thread': _thread(event),
+                         'owner': event.get('user'), 'channel': event.get('channel'),
+                         'thread_ts': event.get('thread_ts') or event.get('ts')}
+                buttons = [{'type': 'button', 'action_id': 'cartrecipient_' + key,
+                            'text': {'type': 'plain_text', 'text': label},
+                            'style': 'primary' if key == 'yes' else 'danger',
+                            'value': _json.dumps(value, ensure_ascii=False)}
+                           for key, label in [('yes', '네'), ('no', '아니요')]]
+                client.chat_postMessage(channel=event['channel'], thread_ts=event.get('thread_ts') or event.get('ts'),
+                                        text='수신자 확인: 네 / 아니요',
+                                        blocks=[{'type': 'actions', 'elements': buttons}])
+            except Exception as exc:
+                LOGGER.error('수신자 버튼 게시 실패: %s', type(exc).__name__)
+        # CART_SIGNAL_TOPIC_BUTTONS_V1
+        if isinstance(result, dict) and result.get("topic_confirmation"):
+            from interfaces.slack.topic_confirmation_buttons import build_blocks
+            from agent_system.orchestrator.tools.memory import build_slack_thread_id
+            try:
+                blocks = build_blocks(build_slack_thread_id(event))
+                if blocks:
+                    client.chat_postMessage(channel=event["channel"],
+                                            thread_ts=event.get("thread_ts"),
+                                            text="새 분석 세션으로 분리할까요?",
+                                            blocks=blocks)
+            except Exception as exc:
+                LOGGER.error("주제 전환 버튼 게시 실패 (%s)", type(exc).__name__)
+        LOGGER.info("[Slack 선택 안내 게시 완료 시도]")
 
 
     # =====================================================
@@ -1195,18 +1464,264 @@ def main():
     # =====================================================
 
     def runner(question, event):
+        # CART_SIGNAL_RESET_R12: 명시적 초기화·취소는 모든 별도 라우터보다 먼저 처리한다.
+        # 동일 채널·사용자의 새 분석은 새 체크포인트 ID를 사용하므로 이전 상품·승인·분석이 상속되지 않는다.
+        from agent_system.orchestrator.tools.analysis_sessions import (
+            current as _session_current,
+            parse_start_command as _parse_new_analysis,
+            start as _session_start,
+            switch_allowed as _session_switch_allowed,
+        )
+        from agent_system.orchestrator.tools.analysis_topic_guard import reset as _topic_reset
+        from agent_system.orchestrator.tools.memory import build_slack_thread_id as _build_session_id
+        from agent_system.orchestrator.tools.workflow import CANCEL_COMMAND as _cancel_command
+
+        _base_id = _build_session_id(event)
+        _active_id = _session_current(_base_id)
+
+        # CART_SIGNAL_R32_INTEGRATED: 모든 CART_SIGNAL 버튼은 승인자/메일 라우터보다 먼저 처리합니다.
+        # 일반 채팅과 cartrecipient_* 이메일 승인 버튼의 동작은 변경하지 않습니다.
+        if (event.get('cart_signal_action') or {}).get('type') == 'final_page_review':
+            from agent_system.orchestrator.tools import campaign_page_final_r428 as final428
+            try:
+                snapshot = conversation_graph.get_state({'configurable':{'thread_id':_active_id}})
+                values = getattr(snapshot,'values',None) or {}
+                result = content_agent.handle_final_page_button(event['cart_signal_action'],BASE_DIR,event,values.get('workflow_run') or {},values.get('campaign') or {})
+                return {**result,'thread_id':_active_id}
+            except Exception as exc:
+                LOGGER.warning('R4282 final page button failed (%s)',type(exc).__name__)
+                return {'turn_type':'chitchat','final_answer':'완성본 검토 상태를 확인할 수 없습니다. 최신 완성본을 다시 조회해 주세요.','completed_steps':[]}
+        if "cart_signal_action" in event:
+            from agent_system.orchestrator.tools.button_dispatch_r32 import dispatch_cart_signal_button
+            from env.model_settings import get_request_config
+
+            def _run_cart_button(action):
+                return run_slack_question(
+                    question=question,
+                    graph_runner=lambda q: run_conversation_turn(
+                        question=q,
+                        thread_id=_active_id,
+                        llm_config=get_request_config().public(),
+                        graph=conversation_graph,
+                        action=action,
+                        metadata={"source": "slack", "slack_channel": event.get("channel", ""),
+                                  "slack_user": event.get("user", "")},
+                    ),
+                )
+
+            result = dispatch_cart_signal_button(event, _run_cart_button)
+            LOGGER.info("CART_SIGNAL_BUTTON_DIRECT_ROUTED action=%s base=%s active=%s",
+                        str((event.get("cart_signal_action") or {}).get("type")), _base_id, _active_id)
+            return result
+
+        _start_payload = _parse_new_analysis(question)
+        if _start_payload is not None:
+            allowed, reason = _session_switch_allowed(conversation_graph, _active_id)
+            if not allowed:
+                return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+            _new_id = _session_start(_base_id)
+            _topic_reset(_base_id)
+            if _session_current(_base_id) != _new_id:
+                raise RuntimeError("새 분석 세션 연결 확인 실패")
+            _snapshot = conversation_graph.get_state({"configurable": {"thread_id": _new_id}})
+            _values = dict((getattr(_snapshot, "values", None) or {})) if _snapshot else {}
+            if _values.get("campaign") or _values.get("workflow_run") or _values.get("pending_approval"):
+                raise RuntimeError("새 분석 세션에 이전 기획전 상태가 남아 있습니다")
+            LOGGER.info("NEW_ANALYSIS_SESSION_CREATED base=%s active=%s", _base_id, _new_id)
+            if not _start_payload:
+                return {
+                    "turn_type": "chitchat",
+                    "final_answer": "새 기획전 분석을 시작했습니다. 이전 상품 선택·승인·고객 분석은 이번 분석에 적용되지 않습니다. 기획전 조건을 알려주시면 5개 대분류부터 비교하겠습니다. 기존 분석 이력과 DB는 보존됩니다.",
+                    "completed_steps": [],
+                }
+            question = _start_payload
+            _active_id = _new_id
+        elif _cancel_command.fullmatch(str(question or "")):
+            # 고객 타깃/메일 특수 라우터를 통과시키지 않고 현재 분석 워크플로를 직접 취소한다.
+            from env.model_settings import get_request_config
+            result = run_slack_question(
+                question=question,
+                graph_runner=lambda q: run_conversation_turn(
+                    question=q,
+                    thread_id=_active_id,
+                    llm_config=get_request_config().public(),
+                    graph=conversation_graph,
+                    action=event.get("cart_signal_action"),
+                    metadata={"source": "slack", "slack_channel": event.get("channel", ""),
+                              "slack_user": event.get("user", "")},
+                ),
+            )
+            LOGGER.info("WORKFLOW_CANCEL_ROUTED base=%s active=%s", _base_id, _active_id)
+            return result
+        else:
+            LOGGER.info("ANALYSIS_SESSION_BOUND base=%s active=%s", _base_id, _active_id)
+
+        # CART_APPROVAL_RECIPIENT_R3: 17단계 실DB 검증 및 자연어 수신자 확인
+        from agent_system.agents.campaign_execution_agent import route_recipient_flow
+        # 같은 분석 세션의 확정 기획전 값을 읽어 고객 선정에 활용한다.
+        # 대화 상태 조회에 실패하면 추측하지 않고 명시적 조건을 요청한다.
+        _target_campaign = {}
+        try:
+            from agent_system.orchestrator.tools.memory import build_slack_thread_id as _target_thread_id
+            from agent_system.orchestrator.tools.analysis_sessions import current as _target_current
+            _target_session = _target_current(_target_thread_id(event))
+            _target_snapshot = conversation_graph.get_state({'configurable': {'thread_id': _target_session}})
+            _target_values = (getattr(_target_snapshot, 'values', None) or {}) if _target_snapshot else {}
+            _target_campaign = _target_values.get('campaign') or {}
+            if not isinstance(_target_campaign, dict):
+                _target_campaign = {}
+        except Exception:
+            _target_campaign = {}
+        # R39: 기획전 승인 이후의 타깃/보고서 요청을 레거시 시연 라우터보다 우선한다.
+        from agent_system.orchestrator.tools import campaign_target_r39 as target39
+        from agent_system.approval_demo import recipient_flow as recipient39
+        _target_run = (_target_values.get('workflow_run') or {}) if '_target_values' in locals() else {}
+        from agent_system.orchestrator.tools import campaign_page_final_r428 as final428
+        from interfaces.slack.target_review_r422 import evidence_request, replay
+        prior_messages = (_target_values.get('messages') or []) if '_target_values' in locals() else []
+        previous = str(getattr(prior_messages[-1], 'content', '')) if prior_messages else ''
+        try:
+            final_record428 = final428.read(BASE_DIR,event,_target_run) if _target_run.get('run_id') else None
+        except (ValueError,OSError):
+            final_record428 = None
+        kind428 = final428.intent(question, previous, reviewing=bool(final_record428 and final_record428.get('status')=='review'))
+        if kind428:
+            return {**content_agent.handle_final_page(kind428,question,BASE_DIR,event,_target_run,_target_campaign),'thread_id':_active_id}
+        if evidence_request(question):
+            try: return replay(_target_run,_target_campaign,_active_id,event.get('user',''))
+            except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
+        if re.fullmatch(r'(?:최종본(?:으로)?\s*(?:만들어|변환해)|PDF\s*(?:로)?\s*변환해)(?:줘|주세요)[.!]?',str(question).strip(),re.I):
+            return {'turn_type':'chitchat','final_answer':'수정한 Word 파일을 첨부해 주세요. 첨부한 파일을 PDF로 변환합니다.','completed_steps':[]}
+        from agent_system.orchestrator.tools import audience_scope_r426 as audience426
+        if (_target_run.get('workflow') == 'trend_planning' and _target_run.get('status') != 'cancelled'
+                and (audience426.age_change_request(question) or audience426.reselection_request(question) or audience426.confirmation_request(question)
+                     or (target39.target_request(question) and (_target_run.get('campaign_target_r39') or {}).get('policy') == 'r40_v1'
+                         and not audience426.current_target(_target_run.get('campaign_target_r39'), _target_campaign, _target_run)))):
+            # 발송 중/결과 불명확 상태를 덮어쓰지 않는다. 원래 스레드와 다른 스레드도 검사.
+            try:
+                if recipient39.campaign_delivery_busy(BASE_DIR,event,_target_run.get('run_id')):
+                    return {'turn_type':'chitchat','final_answer':'이메일 발송 중이거나 결과 확인이 필요합니다. 결과 확인 후 고객 타깃을 변경해 주세요.','completed_steps':[]}
+            except (ValueError,OSError):
+                return {'turn_type':'chitchat','final_answer':'기존 발송 상태를 확인하지 못해 고객 타깃을 변경하지 않았습니다.','completed_steps':[]}
+            from env.model_settings import get_request_config
+            return run_slack_question(question=question, graph_runner=lambda q: run_conversation_turn(
+                question=q, thread_id=_active_id, llm_config=get_request_config().public(), graph=conversation_graph,
+                action=event.get('cart_signal_action'), metadata={'source':'slack','slack_channel':event.get('channel',''),'slack_user':event.get('user','')}))
+        if target39.in_campaign(_target_run) or target39.delivery_allowed(_target_run):
+            from agent_system.approval_demo.mail_copy_r424 import is_edit
+            selected_for_mail=target39.confirmed_for_report(_target_run,_target_campaign)
+            if selected_for_mail and is_edit(question) and not re.search(r'고객군|세그먼트|핵심\s*타깃|교차판매|재활성화',str(question)):
+                from agent_system.approval_demo.session_r424 import resolve
+                from agent_system.agents.campaign_execution_agent import revise_mail
+                try:
+                    resolve(BASE_DIR,event,target39.email_summary(_target_run,selected_for_mail))
+                    revised=revise_mail(BASE_DIR,event,question)
+                    return {'turn_type':'chitchat','final_answer':'메일 검토안을 갱신했습니다.','completed_steps':[],'r424_mail_review':True}
+                except ValueError as exc:
+                    return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
+            if recipient39.MAIL_INTENT.search(str(question)) and (recipient39.ROLE_PATTERN.search(str(question)) or '메일' in question or '발송' in question):
+                selected39 = target39.confirmed_for_report(_target_run, _target_campaign)
+                from agent_system.orchestrator.tools.campaign_copy_r41 import approved as copy41_approved
+                if selected39 and selected39.get('policy') == 'r40_v1' and not copy41_approved(_target_run, _target_campaign):
+                    return {'turn_type':'chitchat','final_answer':'고객군별 문구를 승인하고 새 보고서를 생성해 주세요. 이메일은 발송하지 않았습니다.','completed_steps':[]}
+                if selected39:
+                    from agent_system.approval_demo.session_r424 import resolve
+                    try: resolve(BASE_DIR,event,target39.email_summary(_target_run,selected39))
+                    except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
+                if not selected39 or not recipient39.matches_campaign_report(BASE_DIR, event, target39.email_summary(_target_run, selected39)):
+                    return {'turn_type':'chitchat', 'final_answer':'현재 기획전의 Word 보고서를 만든 스레드에서 수정본을 PDF로 변환한 뒤 사내 보고 대상을 지정해 주세요. 고객에게 직접 발송하지 않습니다.', 'completed_steps':[]}
+                try: execution_agent.sync_delivery(BASE_DIR,event,_target_run,_target_campaign)
+                except ValueError as exc: return {'turn_type':'chitchat','final_answer':str(exc),'completed_steps':[]}
+                recipient_result = execution_agent.start_recipient_confirmation(question, event, BASE_DIR)
+                if recipient_result is not None:
+                    return recipient_result
+            from agent_system.orchestrator.tools.target_start_r38 import target_start_intent
+            from agent_system.orchestrator.tools.campaign_page import is_page_preview_replay_request
+            from agent_system.orchestrator.tools.report import detect
+            try:
+                size_request = target39.parse_k(question) is not None
+            except ValueError:
+                size_request = True
+            from agent_system.orchestrator.tools.campaign_copy_r41 import is_request as segment_copy_request
+            if (segment_copy_request(question) or target39.target_request(question) or (target39.active(_target_run) and target_start_intent(question)) or size_request
+                    or target39.target_result_request(question) or is_page_preview_replay_request(question) or detect(question)):
+                from env.model_settings import get_request_config
+                return run_slack_question(question=question, graph_runner=lambda q: run_conversation_turn(
+                    question=q, thread_id=_active_id, llm_config=get_request_config().public(), graph=conversation_graph,
+                    action=event.get('cart_signal_action'), metadata={'source':'slack','slack_channel':event.get('channel',''),'slack_user':event.get('user','')}))
+            # 활성 기획전의 요청은 구형 고객 분류를 새로 실행하지 않는다.
+            recipient_result = None
+        else:
+            # 새 분석에서 이전 기획전의 스레드 상태를 통해 발송하지 않는다.
+            if recipient39.MAIL_INTENT.search(str(question)) and recipient39._read_state(BASE_DIR,event).get('target',{}).get('kind')=='r39':
+                return {'turn_type':'chitchat','final_answer':'현재 기획전의 보고서를 먼저 생성해 주세요. 이전 기획전 파일은 재사용하지 않습니다.','completed_steps':[]}
+            recipient_result = route_recipient_flow(question, event, BASE_DIR, campaign=_target_campaign)
+        if recipient_result is not None:
+            return recipient_result
+
+        # CART_APPROVAL_SLACK_DEMO_V1: 명시적 승인시연 명령만 별도 처리한다.
+        # 고객 이메일 전송 기능은 추가하지 않는다.
+        from agent_system.agents.campaign_execution_agent import run_approval_demo_command
+        approval_result = run_approval_demo_command(question, event, repo_root=BASE_DIR)
+        if approval_result is not None:
+            return approval_result
+
         # Orchestrator 그래프: 일상 대화는 바로 답하고,
         # 업무 요청은 이전 대화를 반영해 다시 쓴 질문으로 특화 Agent(현재 General Analysis)에 넘깁니다.
         from env.model_settings import get_request_config
 
-        thread_id = build_slack_thread_id(event)
-        return run_slack_question(
+        # CART_SIGNAL_ANALYSIS_SESSION_ROUTING_V1
+        from agent_system.orchestrator.tools.analysis_sessions import current, parse_start_command, start, switch_allowed
+        base_thread_id = build_slack_thread_id(event)
+        thread_id = current(base_thread_id)
+        from agent_system.orchestrator.tools.analysis_topic_guard import before_turn, remember, reset, abandon_pending
+        # CART_SIGNAL_TOPIC_GUARD_V1
+        next_question = parse_start_command(question)
+        if next_question is not None:
+            allowed, reason = switch_allowed(conversation_graph, thread_id)
+            if not allowed:
+                return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+            thread_id = start(base_thread_id)
+            reset(base_thread_id)
+            if not next_question:
+                return {
+                    "turn_type": "chitchat",
+                    "final_answer": "새 분석 세션을 시작했습니다. 이전 분석·보고서는 보존됩니다. 새 주제의 분석을 요청해 주세요.",
+                    "completed_steps": [],
+                }
+            question = next_question
+        else:
+            action, proposed_question = before_turn(base_thread_id, question)
+            if action == "ask":
+                allowed, reason = switch_allowed(conversation_graph, thread_id)
+                if not allowed:
+                    abandon_pending(base_thread_id)
+                    return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+                return {
+                    "turn_type": "chitchat",
+                    "topic_confirmation": True,
+                    "final_answer": "분석 주제가 바뀐 것 같아요. 새 분석 세션으로 분리할까요?\n"
+                                    "아래 버튼으로 선택해 주세요\n"
+                                    f"대기 중인 요청: {proposed_question}",
+                    "completed_steps": [],
+                }
+            if action == "switch":
+                allowed, reason = switch_allowed(conversation_graph, thread_id)
+                if not allowed:
+                    return {"turn_type": "chitchat", "final_answer": reason, "completed_steps": []}
+                thread_id = start(base_thread_id)
+                reset(base_thread_id)
+                question = proposed_question
+            elif action == "stay":
+                question = proposed_question
+        result = run_slack_question(
             question=question,
             graph_runner=lambda q: run_conversation_turn(
                 question=q,
                 thread_id=thread_id,
                 llm_config=get_request_config().public(),
                 graph=conversation_graph,
+                action=event.get("cart_signal_action"),   # Slack 버튼이면 버튼 값 그대로 처리
                 metadata={
                     "source": "slack",
                     "slack_channel": event.get("channel", ""),
@@ -1214,6 +1729,9 @@ def main():
                 },
             ),
         )
+        if isinstance(result, dict) and result.get("turn_type") == "analysis":
+            remember(base_thread_id, question)
+        return result
 
 
     # =====================================================
@@ -1233,6 +1751,24 @@ def main():
         )
     )
 
+
+    def resolve_report_event(event):
+        from agent_system.orchestrator.tools.analysis_sessions import current
+        from agent_system.orchestrator.tools import campaign_target_r39 as target
+        from agent_system.approval_demo.session_r424 import resolve
+        event.setdefault('channel_type','im' if str(event.get('channel','')).startswith('D') else 'channel')
+        snapshot=conversation_graph.get_state({'configurable':{'thread_id':current(build_slack_thread_id(event))}})
+        vals=getattr(snapshot,'values',{}) or {}
+        run=vals.get('workflow_run') or {}
+        if run.get('workflow')!='trend_planning':
+            from agent_system.approval_demo.recipient_flow import _read_state
+            if _read_state(BASE_DIR,event).get('target',{}).get('kind')=='r39':
+                raise ValueError('이전 기획전의 파일 상태는 현재 분석에서 사용할 수 없습니다.')
+            return event  # 일반 보고서 PDF 변환 호환
+        selected=target.confirmed_for_report(run,vals.get('campaign') or {})
+        if not target.delivery_allowed(run) or not selected: raise ValueError('현재 기획전 고객 타깃 승인을 먼저 완료해 주세요.')
+        return resolve(BASE_DIR,event,target.email_summary(run,selected))
+    bridge.resolve_report_event=resolve_report_event
 
     handler = None
 
@@ -1262,6 +1798,9 @@ def main():
             client,
         ):
 
+            if bridge.receive_report_file(event, body, client):
+                return
+
             bridge.receive(
                 event=
                     event,
@@ -1278,6 +1817,78 @@ def main():
         # Channel Mention Event
         # =================================================
 
+        # CART_SIGNAL_FILE_SHARED_HANDLER_V1
+        @app.event("file_shared")
+        def handle_file_shared(event, body, client):
+            """Slack 파일 공유 이벤트를 기존 DOCX 변환 처리에 전달합니다."""
+            import logging
+
+            logger = logging.getLogger("cart_signal.file_shared")
+            file_id = event.get("file_id")
+            if not file_id:
+                logger.warning("file_shared 이벤트에 file_id가 없습니다.")
+                return
+
+            try:
+                response = client.files_info(file=file_id)
+                info = response.get("file") or {}
+                if not info:
+                    logger.warning("파일 정보를 조회하지 못했습니다: %s", file_id)
+                    return
+
+                channel = event.get("channel_id") or event.get("channel")
+                if not channel:
+                    shares = info.get("shares") or {}
+                    for entries in shares.values():
+                        for channel_id, records in entries.items():
+                            if records:
+                                channel = channel_id
+                                break
+                        if channel:
+                            break
+
+                if not channel:
+                    logger.warning("파일 공유 채널을 확인하지 못했습니다: %s", file_id)
+                    return
+
+                # file_shared의 이벤트 시간은 메시지/스레드 시간이 아니다.
+                # shares에서 실제 공유 메시지가 하나로 식별될 때만 보조 이벤트를 처리한다.
+                records = [r for entries in (info.get('shares') or {}).values() for r in entries.get(channel, []) if r.get('ts')]
+                if len(records) != 1 or info.get('bot_id'):
+                    return
+                shared = records[0]
+                adapted_event = {
+                    "type": "message",
+                    "subtype": "file_share",
+                    "channel": channel,
+                    "user": event.get("user_id") or info.get("user"),
+                    "ts": shared["ts"],
+                    "thread_ts": shared.get("thread_ts") or shared["ts"],
+                    "files": [info],
+                }
+
+                # 원본 메시지 전체를 가져와 동시 첨부 및 요청 문구를 보존한다.
+                try:
+                    response = client.conversations_replies(channel=channel, ts=adapted_event['thread_ts'], limit=100)
+                    original = next((m for m in response.get('messages',[]) if m.get('ts')==shared['ts']),None)
+                    if not original or not original.get('files'):
+                        return  # message/app_mention 이벤트가 처리한다.
+                    adapted_event.update(text=original.get('text',''),files=original['files'])
+                except Exception:
+                    return
+                accepted = bridge.receive_report_file(
+                    adapted_event,
+                    body,
+                    client,
+                )
+                logger.info(
+                    "Word 파일 처리 연결: file_id=%s, accepted=%s",
+                    file_id,
+                    accepted,
+                )
+            except Exception:
+                logger.exception("file_shared 처리 중 오류가 발생했습니다.")
+
         @app.event(
             "app_mention"
         )
@@ -1288,6 +1899,8 @@ def main():
             context,
         ):
 
+            if bridge.receive_report_file(event, body, client):
+                return
             bridge.receive_mention(
 
                 event=
@@ -1303,6 +1916,130 @@ def main():
                     context.get(
                         "bot_user_id"
                     ),
+            )
+
+
+        # =================================================
+        # 버튼 클릭 (승인·반려·워크플로 계속 등)
+        # Slack 앱 설정에서 Interactivity & Shortcuts를 켜야 합니다.
+        # =================================================
+
+        @app.action(re.compile("^cartrecipient_"))
+        def handle_recipient_button(ack, body, client):
+            ack()
+            # 이메일 작업은 Slack 3초 응답 제한 밖에서 워커로 처리
+            def _job():
+                import json as _json
+                from agent_system.agents.campaign_execution_agent import confirm_recipient
+                from agent_system.approval_demo.recipient_flow import _thread
+                try:
+                    action = (body.get('actions') or [{}])[0]
+                    value = _json.loads(action.get('value') or '{}')
+                    user = (body.get('user') or {}).get('id')
+                    channel = (body.get('channel') or {}).get('id') or (body.get('container') or {}).get('channel_id')
+                    evt = {'user': user, 'channel': channel, 'thread_ts': value.get('thread_ts'), '_r424_state_key': value.get('thread')}
+                    if (value.get('owner') != user or value.get('channel') != channel or
+                            value.get('thread') != _thread(evt) or
+                            action.get('action_id') not in ('cartrecipient_yes', 'cartrecipient_no','cartrecipient_send','cartrecipient_cancel','cartrecipient_pick_MANAGER','cartrecipient_pick_TEAM_LEADER','cartrecipient_pick_ASSISTANT_MANAGER','cartrecipient_pick_STAFF')):
+                        message = '다른 사용자 또는 다른 스레드의 버튼입니다. 이메일은 전송하지 않았습니다.'
+                    else:
+                        from agent_system.approval_demo.recipient_flow import _read_state
+                        from agent_system.orchestrator.tools import campaign_target_r39 as target39
+                        stored = _read_state(BASE_DIR, evt)
+                        saved = stored.get('target') or {}
+                        if saved.get('kind')=='r39' and (saved.get('owner') != user or saved.get('channel',channel)!=channel):
+                            return
+                        if stored.get('archived'):
+                            client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text='이전 기획전 요청입니다. 이메일은 전송하지 않았습니다.')
+                            return
+                        if saved.get('kind') == 'r39':
+                            from agent_system.orchestrator.tools.memory import build_slack_thread_id
+                            from agent_system.orchestrator.tools.analysis_sessions import current
+                            evt['channel_type'] = 'im' if str(channel).startswith('D') else 'channel'
+                            snapshot = conversation_graph.get_state({'configurable': {'thread_id': current(build_slack_thread_id(evt))}})
+                            values = getattr(snapshot, 'values', {}) or {}
+                            run = values.get('workflow_run') or {}
+                            selected = target39.confirmed_for_report(run, values.get('campaign') or {}) if target39.delivery_allowed(run) else None
+                            from agent_system.orchestrator.tools.campaign_copy_r41 import approved as copy41_approved
+                            if selected and selected.get('policy') == 'r40_v1' and (not copy41_approved(run, values.get('campaign') or {}) or saved.get('segment_copy_hash') != target39.email_summary(run, selected).get('segment_copy_hash')):
+                                client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text='승인된 고객군별 문구와 보고서가 일치하지 않습니다. 이메일은 전송하지 않았습니다.')
+                                return
+                            if not selected or saved.get('run_id') != run.get('run_id') or saved.get('fingerprint') != selected['fingerprint']:
+                                client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text='현재 기획전과 일치하지 않는 보고 요청입니다. 이메일은 전송하지 않았습니다.')
+                                return
+                        if saved.get('kind')=='r39' and action.get('action_id')=='cartrecipient_send':
+                            from agent_system.agents.campaign_execution_agent import sync_delivery
+                            try: sync_delivery(BASE_DIR,evt,run,values.get('campaign') or {},sending=True)
+                            except ValueError as exc:
+                                client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text=str(exc))
+                                return
+                        from agent_system.approval_demo.delivery_r42 import ROLE_KEYS
+                        from agent_system.agents.campaign_execution_agent import prepare_send, post_buttons
+                        action_id = action['action_id']
+                        if action_id.startswith('cartrecipient_pick_'):
+                            from datetime import datetime, timezone, timedelta
+                            choice = _read_state(BASE_DIR,evt).get('recipient_choice') or {}
+                            if choice.get('nonce') != value.get('nonce') or choice.get('owner') != user or datetime.now(timezone.utc)-datetime.fromisoformat(choice['created_at']) > timedelta(minutes=15):
+                                client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text='이전 담당자 선택 버튼입니다. 다시 요청해 주세요.')
+                                return
+                            from agent_system.agents.campaign_execution_agent import start_recipient_confirmation
+                            role = next(k for k,v in ROLE_KEYS.items() if v == action_id.removeprefix('cartrecipient_pick_'))
+                            result = start_recipient_confirmation(role+'에게 보내줘',evt,BASE_DIR,choice_nonce=value.get('nonce'))
+                            client.chat_postMessage(channel=channel,thread_ts=value.get('thread_ts'),text=result['final_answer'])
+                            if result.get('recipient_confirmation'):
+                                post_buttons(client,evt,_read_state(BASE_DIR,evt)['pending'])
+                            return
+                        prior = _read_state(BASE_DIR,evt).get('pending') or {}
+                        if action_id=='cartrecipient_send' and prior.get('nonce')==value.get('nonce') and prior.get('status')=='AWAITING_SEND':
+                            try: client.chat_update(channel=channel,ts=(body.get('message') or {}).get('ts'),text='이메일 발송 처리 중',blocks=[])
+                            except Exception: pass
+                        message = confirm_recipient(BASE_DIR, evt, value.get('nonce'),
+                                                    action_id in ('cartrecipient_yes','cartrecipient_send'), final=action_id in ('cartrecipient_send','cartrecipient_cancel'))
+                        if action_id == 'cartrecipient_no' and prior.get('nonce') == value.get('nonce') and (_read_state(BASE_DIR,evt).get('pending') or {}).get('status') == 'CANCELLED':
+                            post_buttons(client,evt,choose=True)
+                        if action_id == 'cartrecipient_yes' and prior.get('nonce') == value.get('nonce') and prior.get('status') == 'AWAITING_CONFIRMATION':
+                            pending42 = prepare_send(BASE_DIR,evt)
+                            if pending42:
+                                post_buttons(client,evt,pending42)
+                        if action_id=='cartrecipient_send' and prior.get('nonce')==value.get('nonce') and prior.get('status')=='AWAITING_SEND':
+                            after=(_read_state(BASE_DIR,evt).get('pending') or {}).get('status')
+                            try: client.chat_update(channel=channel,ts=(body.get('message') or {}).get('ts'),text='이메일 발송 완료 · PDF + PNG' if after=='SENT' else message,blocks=[])
+                            except Exception: pass
+                        if saved.get('kind') == 'r39' and action_id in ('cartrecipient_yes','cartrecipient_send'):
+                            # 실제 발송 성공 기록과 현재 Run을 재검사한 뒤 업무를 종료한다.
+                            try:
+                                config39 = {'configurable': {'thread_id': current(build_slack_thread_id(evt))}}
+                                latest39 = conversation_graph.get_state(config39)
+                                vals39 = getattr(latest39, 'values', {}) or {}
+                                finished39 = target39.complete_after_report(vals39.get('workflow_run') or {}, vals39.get('campaign') or {}, _read_state(BASE_DIR, evt), value.get('nonce'))
+                                if finished39 and not vals39.get('pending_approval'):
+                                    conversation_graph.update_state(config39, {'workflow_run': finished39, 'turn_type': 'chitchat'}, as_node='orchestrator')
+                            except Exception:
+                                LOGGER.exception('R39_REPORT_COMPLETION_FAILED')
+                                message += '\n발송은 완료됐지만 워크플로 종료 상태를 저장하지 못했습니다.'
+                    client.chat_postMessage(channel=channel, thread_ts=value.get('thread_ts'), text=message)
+                except Exception as exc:
+                    LOGGER.exception('승인 수신자 처리 실패: %s', type(exc).__name__)
+            bridge.executor.submit(_job)
+
+        @app.action(re.compile("^carttopic_"))
+        def handle_topic_button(ack, body, client):
+            ack()
+            from interfaces.slack.topic_confirmation_buttons import handle_click
+            handle_click(bridge, body, client)
+
+        @app.action(
+            re.compile("^cartsignal_")
+        )
+        def handle_button(
+            ack,
+            body,
+            client,
+        ):
+            ack()   # 3초 안에 응답해야 Slack이 오류를 표시하지 않음
+            bridge.receive_action(
+                body=body,
+                client=client,
             )
 
 
